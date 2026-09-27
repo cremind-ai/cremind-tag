@@ -163,15 +163,17 @@ def enrollment_hex_path(out_dir: Path, tag_id: int) -> Path:
 
 
 def write_enrollment_hex(path: Path, blob: bytes, board: Board) -> Path:
-    """Write the UICR image for ``blob`` with mode 0600 (it holds the secret)."""
+    """Write the UICR image for ``blob`` owner-only (it holds the secret): mode 0600, and on Windows a
+    protected DACL for the current user and SYSTEM, set before the secret is written."""
+    from cremind_tag.private_files import restrict_to_owner
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
     fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "wb") as fh:
+        restrict_to_owner(path)  # an existing file keeps its old mode/ACL through O_TRUNC
         fh.write(enrollment_hex(blob, board).encode("ascii"))
-    if sys.platform != "win32":  # an existing file keeps its old mode through O_TRUNC
-        os.chmod(path, 0o600)
     return path
 
 

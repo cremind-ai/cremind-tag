@@ -121,6 +121,11 @@ def parse_fault(spec: str, faults: SimFaults) -> None:
             faults.mesh.drop_chunks |= {int(i) for i in arg.split(",") if i.strip()}
         case "result-loss":
             faults.mesh.result_loss = prob()
+        case "status-loss":
+            try:
+                faults.mesh.drop_status = int(arg or 1)
+            except ValueError:
+                raise FaultSpecError(f"{spec}: expected a count") from None
         case "send-fail":
             faults.mesh.send_fail = prob()
         case "suspend-fail":

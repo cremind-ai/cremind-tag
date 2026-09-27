@@ -123,10 +123,12 @@ def test_identify_and_refresh(make_rig: Any) -> None:
             identify = rig.fake.add_command("identify", {"hw_id": rig.hw()})
             done = await command_done(rig, identify)
             assert done["status"] == "succeeded", done
-            assert any(r["purpose"] == "identify" and r["state"] == "displayed" for r in revisions(rig))
+            identify_revisions = [r for r in revisions(rig) if r["purpose"] == "identify"]
+            assert [r["state"] for r in identify_revisions] == ["displayed"]  # delivered once, not twice
             # after the hold the regular screen comes back (a new revision)
             await rig.wait(lambda: revisions(rig)[-1]["purpose"] == "screen"
                            and revisions(rig)[-1]["state"] == "displayed", 20, what="screen restored")
+            assert len([r for r in revisions(rig) if r["purpose"] == "identify"]) == 1
             before = max(r["revision"] for r in revisions(rig))
             refresh = rig.fake.add_command("refresh_tag", {"tag_id": rig.hw()})
             done = await command_done(rig, refresh)
@@ -206,5 +208,73 @@ def test_revoked_hardware_credential_keeps_content_running(make_rig: Any) -> Non
             did = rig.fake.add_job("alice", rig.hw(), title="Content still flows")
             await rig.wait(lambda: rig.stage(did) == "displayed", what="displayed")
             assert Credential(rig.hardware_cred.id, "x").credential_id in svc.failed_credentials
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_clear_tag_waits_with_one_op_while_the_tag_is_away(make_rig: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review regression: a timed-out clear step re-sent TAG_COMMAND CLEAR under new op ids; the bridge queued
+    every one and refreshed the panel once per copy."""
+    from cremind_tag.daemon import commands as commands_module
+
+    monkeypatch.setitem(commands_module.STEP_TIMEOUT_S, "clear", 0.4)
+
+    async def scenario() -> None:
+        async with make_rig(owner=None) as rig:
+            tag = rig.sim_tag()
+            tag.out_of_range = True
+            await rig.start()
+            assign, clear = rig.fake.claim_tag(rig.hw(), "alice", rig.bridge_hw())
+            assert (await command_done(rig, assign))["status"] == "succeeded"
+            await asyncio.sleep(3.0)  # several step timeouts while the tag is away
+            queued = [j for j in rig.sim.bridge(0).jobs.get(rig.tag_id(), []) if j.kind == "cmd"]
+            assert len(queued) == 1, queued
+            refreshes = tag.stats["refreshes"]
+            tag.out_of_range = False
+            assert (await command_done(rig, clear))["status"] == "succeeded"
+            await asyncio.sleep(1.0)
+            assert tag.stats["refreshes"] == refreshes + 1
+            assert rig.sim.gateway.counters["deliveries_accepted"] == 0
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_a_claim_whose_answer_was_lost_still_runs(make_rig: Any) -> None:
+    """Review regression: Cremind committed the claim but its answer was lost; the command sat 'claiming'."""
+
+    async def scenario() -> None:
+        async with make_rig() as rig:
+            rig.fake.claim_answer_lost = 1
+            svc = await rig.start()
+            command = rig.fake.add_command("collect_diagnostics", {})
+            done = await command_done(rig, command, 20)
+            assert done["status"] == "succeeded", done
+            assert rig.fake.claim_answer_lost == 0  # the lost answer really happened
+            assert svc.hardware is not None and svc.hardware.commands_claimed == 1  # claimed again: 409 = ours
+            assert rig.runs == 1  # no restart needed
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_an_ownership_command_finishes_after_its_expiry(make_rig: Any) -> None:
+    """Cremind accepts a late `succeeded`; a clear it re-queues meanwhile is recognised as already done."""
+
+    async def scenario() -> None:
+        async with make_rig() as rig:
+            tag = rig.sim_tag()
+            tag.out_of_range = True
+            await rig.start()
+            command = rig.fake.add_command("clear_tag", {"tag_id": rig.hw(), "epoch": 1}, ttl_s=1.0)
+            await rig.wait(lambda: rig.fake.commands[command]["status"] == "claimed", what="claimed")
+            await asyncio.sleep(2.0)  # past its expiry, the tag still away
+            assert rig.fake.commands[command]["status"] == "claimed"
+            tag.out_of_range = False
+            done = await command_done(rig, command)
+            assert done["status"] == "succeeded", done
+            refreshes = tag.stats["refreshes"]
+            again = rig.fake.add_command("clear_tag", {"tag_id": rig.hw(), "epoch": 1})  # Cremind's re-queue
+            done = await command_done(rig, again)
+            assert done["status"] == "succeeded" and done["result"]["already_cleared"] is True
+            assert tag.stats["refreshes"] == refreshes
 
     run_scenario(scenario(), timeout=100)

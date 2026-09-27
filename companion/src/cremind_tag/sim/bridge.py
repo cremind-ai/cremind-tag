@@ -214,6 +214,7 @@ class SimBridge:
         self.boot_id = rng.getrandbits(32)
         self._boot_ms = clock.now_ms()
         self._xfer: _Transfer | None = None
+        self._last_xfer: tuple[int, Status] | None = None  # the last transfer validated and its status
         self._result_seq = 0
         self._result_acks: dict[int, asyncio.Event] = {}
         self._suspended = False
@@ -265,6 +266,7 @@ class SimBridge:
         if self._session_task is not None:
             self._session_task.cancel()
         self._xfer = None
+        self._last_xfer = None
         self.fonts.abort()
         self._result_acks.clear()
         self._suspended = False
@@ -378,6 +380,12 @@ class SimBridge:
     def _validate(self, xfer_id: int) -> tuple[Status, int]:
         xfer = self._xfer
         if xfer is None or xfer.begin.xfer_id != xfer_id:
+            last = self._last_xfer
+            if last is not None and last[0] == xfer_id:
+                # §10: the COMMIT of a transfer already validated (its LAYOUT_STATUS was lost): DUPLICATE for
+                # an accepted one — never NOT_FOUND, which would end a delivery that is on its way.
+                self.counters["commit_repeats"] += 1
+                return (Status.DUPLICATE if last[1] in (Status.OK, Status.DUPLICATE) else last[1]), 0
             return Status.NOT_FOUND, 0
         b = xfer.begin
         missing = sum(1 << i for i in range(b.chunk_count) if i not in xfer.chunks)
@@ -385,36 +393,43 @@ class SimBridge:
             self.counters["incomplete"] += 1
             return Status.INCOMPLETE, missing  # the transfer stays open for the resent chunks
         self._xfer = None
+        status = self._validate_complete(xfer)
+        self._last_xfer = (xfer_id, status)
+        return status, 0
+
+    def _validate_complete(self, xfer: _Transfer) -> Status:
+        """§3.3 checks of a complete transfer, in order."""
+        b = xfer.begin
         data = b"".join(xfer.chunks[i] for i in range(b.chunk_count))
         if b.total_len > LAYOUT_HARD_MAX:
-            return Status.TOO_LARGE, 0
+            return Status.TOO_LARGE
         if len(data) != b.total_len or any(len(xfer.chunks[i]) != LAYOUT_CHUNK_DATA_MAX
                                            for i in range(b.chunk_count - 1)):
-            return Status.INVALID, 0
+            return Status.INVALID
         if layout_digest(data) != b.digest:
-            return Status.DIGEST_MISMATCH, 0
+            return Status.DIGEST_MISMATCH
         assignment = self.assignments.get(b.tag_id)
         if assignment is None or assignment.epoch < b.epoch:
-            return Status.NOT_ASSIGNED, 0
+            return Status.NOT_ASSIGNED
         if assignment.epoch > b.epoch:
-            return Status.STALE_EPOCH, 0
+            return Status.STALE_EPOCH
         history = self.history.get((b.tag_id, b.epoch))
         if history is not None and b.revision <= history.revision:
             if b.revision != history.revision or b.digest != history.digest:
-                return Status.STALE_REVISION, 0
+                return Status.STALE_REVISION
             duplicate = self._duplicate(b, history)
             if duplicate is not None:
-                return duplicate, 0
+                return duplicate
             # Same revision, never displayed (DISPLAY_STATE_UNKNOWN, cancelled, ...): a re-delivery.
         pack = self.fontpack
         if pack is None or b.fontpack_id != pack.pack_id:
-            return Status.FONTPACK_MISMATCH, 0
+            return Status.FONTPACK_MISMATCH
         try:
             check_strikes(decode_layout(data), pack.has_strike)
         except LayoutError as exc:
-            return exc.status, 0
+            return exc.status
         self._accept(b, data)
-        return Status.OK, 0
+        return Status.OK
 
     def _duplicate(self, b: MeshLayoutBegin, history: History) -> Status | None:
         """Same revision and digest (§3.3): ``DUPLICATE`` when it was displayed or is still pending.

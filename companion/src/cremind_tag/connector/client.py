@@ -15,9 +15,12 @@ details:
   the same request cannot succeed;
 - :class:`ConnectorUnavailable` (5xx, 429, network, timeouts): transient — retry
   with :class:`Backoff`;
-- :class:`ConnectorTlsError`: the server's certificate is not trusted, or a
-  plain-HTTP URL points at a server that moved to HTTPS — a configuration
-  problem the operator must fix (``cremind-tag connect server``).
+- :class:`ConnectorTlsError`: the server's certificate is not trusted, an
+  ``https://`` URL points at a plain-HTTP server, a plain-HTTP URL points at a
+  server that moved to HTTPS, or the CA file is unusable — a configuration
+  problem the operator must fix (``cremind-tag connect server``); the daemon
+  retries it slowly. An EOF or reset during the TLS handshake (a restarting
+  server, a proxy dropping the connection) is :class:`ConnectorUnavailable`.
 
 TLS: the system trust store (``ssl.create_default_context()``, which reads the
 Windows certificate store / the OS bundle), plus an optional CA bundle file for
@@ -47,6 +50,7 @@ from .models import (
     HeartbeatResult,
     InventoryResult,
     MalformedResponse,
+    ReceiptsResult,
     SyncResult,
     WhoAmI,
 )
@@ -302,14 +306,18 @@ class ConnectorClient:
     async def _transport_error(self, where: str, exc: httpx.HTTPError) -> ConnectorError:
         cause = _ssl_cause(exc)
         if cause is not None:
+            # Only configuration problems are ConnectorTlsError: an untrusted certificate, or an https://
+            # URL for a server that speaks plain HTTP. An EOF, a reset or any other failure during the
+            # handshake is what a restarting server or a dropping proxy produces: retry it.
             if isinstance(cause, ssl.SSLCertVerificationError):
                 hint = (f" (the CA file {self.ca_file} does not cover it)" if self.ca_file
                         else "; pass the Cremind CA with `cremind-tag connect server URL --ca-file CA.pem`")
                 return ConnectorTlsError(f"{where}: the certificate of {self.base_url} is not trusted: "
-                                         f"{cause.verify_message or cause}{hint}")
+                                         f"{getattr(cause, 'verify_message', None) or cause}{hint}")
             if self.base_url.startswith("https://") and "WRONG_VERSION_NUMBER" in str(cause):
                 return ConnectorTlsError(f"{where}: {self.base_url} does not speak TLS; is the URL http://…?")
-            return ConnectorTlsError(f"{where}: TLS handshake with {self.base_url} failed: {cause}")
+            return ConnectorUnavailable(f"{where}: TLS handshake with {self.base_url} interrupted: "
+                                        f"{type(cause).__name__}: {cause}")
         if self.base_url.startswith("http://") and isinstance(exc, httpx.RemoteProtocolError | httpx.ReadError):
             if await self._https_answers():
                 return ConnectorTlsError(self._moved_to_https_message(where))
@@ -441,16 +449,21 @@ class ConnectorClient:
         value = body.get("accepted") if isinstance(body, Mapping) else None
         return value if isinstance(value, int) else 0
 
-    async def receipts(self, receipts: list[Mapping[str, Any]]) -> int:
+    async def receipts(self, receipts: list[Mapping[str, Any]]) -> ReceiptsResult:
+        """``{applied, rejected?}``; each rejection names the delivery and ``epoch_mismatch``, ``unknown``,
+        ``terminal`` or ``not_owned``."""
         body = await self._request("POST", "/receipts", json={"receipts": [dict(r) for r in receipts]})
-        value = body.get("applied") if isinstance(body, Mapping) else None
-        return value if isinstance(value, int) else 0
+        return ReceiptsResult.from_json(body)
 
     async def previews(self, *, tag_id: str, revision: int, kind: str, png_base64: str,
-                       delivery_ids: list[int]) -> bool:
-        body = await self._request("POST", "/previews", json={
-            "tag_id": tag_id, "revision": revision, "kind": kind, "png_base64": png_base64,
-            "delivery_ids": list(delivery_ids)})
+                       delivery_ids: list[int], epoch: int | None = None) -> bool:
+        """Store a preview; ``epoch`` is the tag epoch it was rendered for (409 ``epoch_mismatch`` when that
+        is not the tag's current one)."""
+        payload: dict[str, Any] = {"tag_id": tag_id, "revision": revision, "kind": kind, "png_base64": png_base64,
+                                   "delivery_ids": list(delivery_ids)}
+        if epoch is not None:
+            payload["epoch"] = epoch
+        body = await self._request("POST", "/previews", json=payload)
         return bool(body.get("stored")) if isinstance(body, Mapping) else False
 
 

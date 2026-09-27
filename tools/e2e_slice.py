@@ -336,7 +336,10 @@ async def run_slice(cremind_repo: Path, port: int, scratch: Path, *, time_scale:
                                             "png": preview.content.startswith(b"\x89PNG")}
         clock.mark("displayed preview stored")
 
-        # 5b. an event run without an LLM (best effort)
+        # 5b. a cancel in Cremind while the card is on its way: a resolving job; never displayed
+        report["cancel"] = await cancel_path(api, sim, device_id, wait, clock)
+
+        # 5c. an event run without an LLM (best effort)
         if event_run:
             try:
                 report["event_run"] = await event_run_path(api, device_id, wait, clock)
@@ -366,6 +369,33 @@ async def run_slice(cremind_repo: Path, port: int, scratch: Path, *, time_scale:
         with contextlib.suppress(OSError):
             (scratch / "report.json").write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
     return report
+
+
+async def cancel_path(api: Api, sim: Any, device_id: str, wait: Any, clock: Clock) -> dict[str, Any]:
+    """Hold the tag out of range, pin a note, cancel it once the companion has it: Cremind sends a
+    ``resolved`` job, the companion drops the card from the screen being delivered, never receipts it
+    displayed, and the resolving job itself is displayed with the next screen."""
+    tag = next(iter(sim.tags.values()))
+    tag.out_of_range = True
+    try:
+        note = api.call("POST", f"/api/tags/devices/{device_id}/display",
+                        json={"title": "Cancel me", "ttl_s": 3600})["delivery"]
+        await wait(lambda: api.call("GET", f"/api/tags/deliveries/{note['id']}")["delivery"]["stage"]
+                   in ("gateway_received", "bridge_received", "transferring"), "the note on its way", 60)
+        cancelled = api.call("POST", f"/api/tags/deliveries/{note['id']}/cancel")
+        resolved = cancelled.get("resolved") or {}
+        clock.mark(f"note {note['id']} cancelled in Cremind (resolving job {resolved.get('id')})")
+    finally:
+        tag.out_of_range = False
+    if not resolved.get("id"):
+        raise SliceError(f"the cancel returned no resolving job: {cancelled}")
+    shown = await wait(lambda: (d := api.call("GET", f"/api/tags/deliveries/{resolved['id']}")["delivery"])["stage"]
+                       in ("displayed", "failed", "expired", "cancelled") and d, "the resolving job displayed", 120)
+    clock.mark(f"resolving job {shown['stage']}")
+    final = api.call("GET", f"/api/tags/deliveries/{note['id']}")["delivery"]
+    return {"ok": shown["stage"] == "displayed" and final["stage"] == "cancelled", "cancelled_delivery": note["id"],
+            "cancelled_stage": final["stage"], "resolving_delivery": resolved["id"], "resolving_stage": shown["stage"],
+            "revision": shown["revision"], "stages": stage_timings(shown)}
 
 
 async def event_run_path(api: Api, device_id: str, wait: Any, clock: Clock) -> dict[str, Any]:

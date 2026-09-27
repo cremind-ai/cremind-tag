@@ -11,8 +11,8 @@ were acknowledged); a destination whose mesh is suspended for a BLE connection
 (§5.2) receives the message once it resumes, or the send fails if the window is
 longer than the segment retransmission budget; access-layer loss of
 ``LAYOUT_CHUNK`` (probability or explicit chunk indices, the lower transport
-still acknowledges — which is how ``LAYOUT_STATUS INCOMPLETE`` arises) and of
-results/acks; failed sends. Not modelled: radio propagation, relaying, TTL,
+still acknowledges — which is how ``LAYOUT_STATUS INCOMPLETE`` arises), of
+results/acks and of ``LAYOUT_STATUS`` (the commit is then repeated); failed sends. Not modelled: radio propagation, relaying, TTL,
 network/IV-index/sequence-number handling, provisioning PDUs, keys.
 """
 
@@ -27,7 +27,14 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from ..protocol.ids import MESH_COMPANY_ID, MESH_MAX_VENDOR_PARAMS, MeshOp
-from ..protocol.msgs import MESH_MESSAGES, FixedMessage, MeshDeliveryResult, MeshLayoutChunk, MeshResultAck
+from ..protocol.msgs import (
+    MESH_MESSAGES,
+    FixedMessage,
+    MeshDeliveryResult,
+    MeshLayoutChunk,
+    MeshLayoutStatus,
+    MeshResultAck,
+)
 from .core import SimClock
 
 log = logging.getLogger(__name__)
@@ -83,6 +90,7 @@ class MeshFaults:
     chunk_loss: float = 0.0
     drop_chunks: set[int] = field(default_factory=set)  # chunk indices dropped once each
     result_loss: float = 0.0  # DELIVERY_RESULT and RESULT_ACK
+    drop_status: int = 0  # the next N LAYOUT_STATUS messages are lost (a lost OK -> the commit is repeated)
     send_fail: float = 0.0  # end callback reports failure
 
 
@@ -121,6 +129,9 @@ class MeshNetwork:
             return faults.chunk_loss > 0 and self.rng.random() < faults.chunk_loss
         if isinstance(msg, MeshDeliveryResult | MeshResultAck):
             return faults.result_loss > 0 and self.rng.random() < faults.result_loss
+        if isinstance(msg, MeshLayoutStatus) and faults.drop_status > 0:
+            faults.drop_status -= 1
+            return True
         return False
 
     async def send(self, src: int, dst: int, msg: FixedMessage) -> bool:

@@ -13,7 +13,6 @@ import threading
 from collections.abc import Callable
 
 import httpx
-
 from fake_cremind import FakeCremind  # type: ignore[import-not-found]  # loaded by conftest
 
 REASONS = {200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",

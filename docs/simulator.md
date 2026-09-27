@@ -54,6 +54,7 @@ Bridge maintenance ports accept `cremind-tag bridge ... --url socket://127.0.0.1
 | `chunk-loss=P` | each `LAYOUT_CHUNK` is dropped at the bridge's access layer with probability P (segments still acknowledged → `LAYOUT_STATUS INCOMPLETE`, resend rounds) |
 | `drop-chunks=1,3` | drop those chunk indices once each (deterministic) |
 | `result-loss=P` | `DELIVERY_RESULT` / `RESULT_ACK` lost with probability P (bridge retries, gateway de-duplicates) |
+| `status-loss=N` | the next N `LAYOUT_STATUS` messages are lost (the gateway repeats `LAYOUT_COMMIT` after 10 s; the bridge answers a repeated commit of an accepted transfer `DUPLICATE`) |
 | `send-fail=P` | a mesh send's `end` callback reports failure (gateway retries 3 times, then `TIMEOUT`) |
 | `suspend-fail=P` | `bt_mesh_suspend()` fails (`MESH_SUSPEND_FAILED`, per-tag back-off) |
 | `resume-fail=N` | the next N `bt_mesh_resume()` calls fail (session aborted, recovery, reboot after 5 s) |
@@ -154,6 +155,14 @@ firmware should do the same unless the protocol document says otherwise.
   not remembered, so a retry with the same `op_id` can succeed.
 - A `LAYOUT_STATUS` other than `OK`, `INCOMPLETE` or `DUPLICATE` ends the
   delivery: the gateway emits its `EVT_RESULT` with that status (zero digest).
+- A `LAYOUT_COMMIT` repeated for a transfer the bridge already validated (its
+  `LAYOUT_STATUS` was lost) answers `DUPLICATE` for an accepted transfer, the
+  first answer otherwise — never `NOT_FOUND`; the gateway treats `DUPLICATE` like
+  `OK`. The bridge remembers only its last transfer, in RAM (a reboot forgets it).
+- The gateway emits exactly one `EVT_RESULT` per `update_id` (it remembers the
+  last 1024); a later result for the same `update_id` — the bridge's OK after the
+  gateway already reported `TIMEOUT` — is acknowledged to the bridge and dropped
+  (counter `duplicate_update_results`).
 - `DUPLICATE` at the bridge: a displayed revision's stored result is re-sent
   under the new `update_id`; a still-pending revision adopts the new `update_id`;
   a revision that ended without being displayed is accepted again.

@@ -75,6 +75,7 @@ FW = "0.1.0"
 SEND_RETRIES = 3  # §3.2 rule 1
 INCOMPLETE_ROUNDS = 3  # §3.2 rule 3
 COMMIT_RESENDS = 3
+REPORTED_UPDATE_IDS = 1024  # update_ids remembered for the one-result-per-update_id rule (§10)
 STATUS_TIMEOUT_MS = 10000.0
 ASSIGN_TIMEOUT_MS = 5000.0
 PROVISION_MS = 3000.0
@@ -162,6 +163,7 @@ class SimGateway:
         self._status_waiters: dict[tuple[int, int], asyncio.Future[tuple[Status, int]]] = {}
         self._assign_waiters: dict[tuple[int, int, int], asyncio.Future[Status]] = {}
         self._seen_results: deque[tuple[int, int]] = deque(maxlen=256)
+        self._reported: OrderedDict[int, None] = OrderedDict()  # update_ids whose EVT_RESULT was emitted
         self._ops_in_flight = 0
         self._provisioning = False
         self._tasks = TaskSet("gateway")
@@ -508,12 +510,23 @@ class SimGateway:
         delivery = self._by_update.pop(msg.update_id, None)
         if delivery is not None:
             delivery.state = "done"
-        self._emit(SerialMsg.EVT_RESULT, {
+        self._emit_result({
             "update_id": msg.update_id, "bridge": src, "tag_id": msg.tag_id, "epoch": msg.epoch,
             "revision": msg.revision, "status": msg.status, "digest": msg.digest, "battery_mv": msg.battery_mv,
             "timing": {"wake_ms": msg.wake_ms, "mesh_ms": delivery.mesh_ms if delivery else 0,
-                       "transfer_ms": msg.transfer_ms, "refresh_ms": msg.refresh_ms, "suspend_ms": msg.suspend_ms}},
-            retained=True)
+                       "transfer_ms": msg.transfer_ms, "refresh_ms": msg.refresh_ms, "suspend_ms": msg.suspend_ms}})
+
+    def _emit_result(self, fields: dict[str, Any]) -> None:
+        """§10: exactly one ``EVT_RESULT`` per ``update_id``; a later result for it is dropped (the bridge
+        already got its ``RESULT_ACK``)."""
+        update_id = fields["update_id"]
+        if update_id in self._reported:
+            self.counters["duplicate_update_results"] += 1
+            return
+        self._reported[update_id] = None
+        while len(self._reported) > REPORTED_UPDATE_IDS:
+            self._reported.popitem(last=False)
+        self._emit(SerialMsg.EVT_RESULT, fields, retained=True)
         self.counters["results"] += 1
 
     # -- assignments and tag commands ---------------------------------------------------------------
@@ -523,8 +536,8 @@ class SimGateway:
             if msg == SerialMsg.TAG_COMMAND:
                 sent = await self._send(f["bridge"], MeshTagCmd(f["op_id"], f["tag_id"], f["epoch"], f["cmd"]))
                 if not sent:
-                    self._emit(SerialMsg.EVT_RESULT, self._result_fields(f["op_id"], f["bridge"], f["tag_id"],
-                                                                         f["epoch"], 0, Status.TIMEOUT), retained=True)
+                    self._emit_result(self._result_fields(f["op_id"], f["bridge"], f["tag_id"], f["epoch"], 0,
+                                                          Status.TIMEOUT))
                 return
             bridge, tag_id, epoch = f["bridge"], f["tag_id"], f["epoch"]
             request = (MeshAssignSet(tag_id, epoch, f["key"], 1) if msg == SerialMsg.ASSIGN_TAG
@@ -593,9 +606,8 @@ class SimGateway:
     def _gateway_result(self, d: Delivery, status: Status) -> None:
         d.state = "done"
         self._by_update.pop(d.update_id, None)
-        self._emit(SerialMsg.EVT_RESULT, self._result_fields(d.update_id, d.bridge, d.tag_id, d.epoch, d.revision,
-                                                             status, d.mesh_ms), retained=True)
-        self.counters["results"] += 1
+        self._emit_result(self._result_fields(d.update_id, d.bridge, d.tag_id, d.epoch, d.revision, status,
+                                              d.mesh_ms))
 
     async def _delivery_worker(self) -> None:
         while True:
@@ -634,12 +646,12 @@ class SimGateway:
                     status = Status.TIMEOUT
                     break
         d.mesh_ms = int(self.clock.now_ms() - started)
-        if status == Status.OK:
+        if status in (Status.OK, Status.DUPLICATE):
+            # §10: DUPLICATE is treated like OK — a repeated COMMIT whose first OK was lost, or a revision
+            # the bridge already has (it re-sends the stored result or delivers the pending one).
             d.state = "at_bridge"
             self._emit(SerialMsg.EVT_STAGE, {"update_id": d.update_id, "tag_id": d.tag_id, "revision": d.revision,
                                              "stage": DeliveryStage.BRIDGE_RECEIVED}, retained=False)
-        elif status == Status.DUPLICATE:
-            d.state = "at_bridge"  # the bridge re-sends its stored result (or delivers the pending one)
         else:
             self._gateway_result(d, status)
 

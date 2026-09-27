@@ -11,9 +11,13 @@
   displayed revision/digest and a status (``ok|pending|offline|error``).
 - **Commands**: long-poll ``GET commands``; each command is persisted, then
   claimed, then run by :class:`~cremind_tag.daemon.commands.CommandExecutor`.
-  Commands left ``claiming``/``running`` by a previous run resume first.
+  Commands left ``running`` by a previous run resume first; a command still
+  ``claiming`` (its claim failed, or its answer was lost although Cremind
+  committed it — Cremind never offers a claimed command again) is claimed
+  again before every poll, with back-off, until Cremind answers.
 
-A 401/403 stops these loops only (content credentials keep working).
+A 401/403 stops these loops only (content credentials keep working); a TLS
+configuration error is retried every ``tls_retry_s``.
 """
 
 from __future__ import annotations
@@ -70,6 +74,7 @@ class HardwareWorker:
         self._inventory_wanted = asyncio.Event()
         self._inventory_wanted.set()
         self.inventory_done = asyncio.Event()
+        self._claim_retry: dict[str, tuple[int, float]] = {}  # command id -> (failed claims, next try)
 
     def request_inventory(self) -> None:
         self._inventory_wanted.set()
@@ -95,11 +100,19 @@ class HardwareWorker:
     async def _guard(self, coro: Any) -> None:
         try:
             await coro
-        except (ConnectorAuthError, ConnectorTlsError) as exc:
+        except ConnectorAuthError as exc:
             self.state, self.error = "stopped", str(exc)
             self.svc.credential_failed(self.credential_id, exc)
             log.error("hardware: credential=%s stopped: %s", self.credential_id, exc)
             raise _Stop(str(exc)) from None
+
+    async def _tls_pause(self, exc: ConnectorTlsError) -> None:
+        """A TLS configuration error: report it and try again after ``tls_retry_s``."""
+        self.state, self.error = "tls_error", str(exc)
+        self.svc.credential_warning(self.credential_id, exc)
+        log.error("hardware: credential=%s TLS problem (retry in %.0fs): %s", self.credential_id,
+                  self.svc.settings.tls_retry_s, exc)
+        await asyncio.sleep(self.svc.settings.tls_retry_s)
 
     # -- inventory -------------------------------------------------------------------------
 
@@ -119,12 +132,17 @@ class HardwareWorker:
                 result = await self.client.inventory(body)
                 self.inventories += 1
                 self.state, self.error = "running", None
+                self.svc.credential_ok(self.credential_id)
                 backoff.reset()
                 self.inventory_done.set()
                 log.info("hardware: inventory gateways=%d bridges=%d tags=%d assignments=%d",
                          len(body["gateways"]), len(body["bridges"]), len(body["tags"]), len(result.assignments))
-            except (ConnectorAuthError, ConnectorTlsError):
+            except ConnectorAuthError:
                 raise
+            except ConnectorTlsError as exc:
+                await self._tls_pause(exc)
+                self._inventory_wanted.set()
+                continue
             except ConnectorError as exc:
                 self.state, self.error = "retrying", str(exc)
                 delay = backoff.next()
@@ -184,8 +202,11 @@ class HardwareWorker:
                 delay = self.svc.settings.heartbeat_s
                 if result.commands_pending:
                     log.debug("hardware: %d command(s) pending in Cremind", result.commands_pending)
-            except (ConnectorAuthError, ConnectorTlsError):
+            except ConnectorAuthError:
                 raise
+            except ConnectorTlsError as exc:
+                await self._tls_pause(exc)
+                continue
             except ConnectorError as exc:
                 delay = min(backoff.next(), self.svc.settings.heartbeat_s)
                 log.info("hardware: heartbeat failed (%s); retry in %.1fs", exc, delay)
@@ -237,14 +258,20 @@ class HardwareWorker:
     async def _command_loop(self) -> None:
         svc = self.svc
         for row in await svc.db.run(svc.store.unfinished_commands):
-            await self._resume(row)
+            if row.state == "running":
+                log.info("hardware: resuming command %s %s", row.kind, row.command_id)
+                self.executor.submit(row)
         backoff = Backoff(1.0, svc.settings.connector_retry_max_s)
         while True:
             try:
+                await self._retry_claims()
                 commands = await self.client.commands(wait=svc.settings.command_wait_s)
                 backoff.reset()
-            except (ConnectorAuthError, ConnectorTlsError):
+            except ConnectorAuthError:
                 raise
+            except ConnectorTlsError as exc:
+                await self._tls_pause(exc)
+                continue
             except ConnectorError as exc:
                 delay = backoff.next()
                 log.info("hardware: commands poll failed (%s); retry in %.1fs", exc, delay)
@@ -263,12 +290,15 @@ class HardwareWorker:
             return
         await self._claim_and_run(row)
 
-    async def _resume(self, row: CommandRow) -> None:
-        if row.state == "running":
-            log.info("hardware: resuming command %s %s", row.kind, row.command_id)
-            self.executor.submit(row)
-        else:
-            await self._claim_and_run(row)
+    async def _retry_claims(self) -> None:
+        """Claim again every command still ``claiming`` here whose retry time has come."""
+        now = self.svc.clock()
+        for row in await self.svc.db.run(self.svc.store.unfinished_commands):
+            if row.state != "claiming":
+                continue
+            _, next_try = self._claim_retry.get(row.command_id, (0, 0.0))
+            if next_try <= now:
+                await self._claim_and_run(row)
 
     async def _claim_and_run(self, row: CommandRow) -> None:
         svc = self.svc
@@ -278,17 +308,23 @@ class HardwareWorker:
             raw = exc.body.get("command")
             current = raw if isinstance(raw, dict) else {}
             if current.get("status") != "claimed":  # finished, expired or cancelled meanwhile
+                self._claim_retry.pop(row.command_id, None)
                 await svc.db.run(svc.store.command_forget, row.command_id)
                 return
-            # claimed, and persisted here before the claim: it is ours (claimed before a crash)
+            # claimed, and persisted here before the claim: it is ours (the answer to our claim was lost)
         except ConnectorNotFound:
+            self._claim_retry.pop(row.command_id, None)
             await svc.db.run(svc.store.command_forget, row.command_id)
             return
         except (ConnectorAuthError, ConnectorTlsError):
             raise
         except ConnectorError as exc:
-            log.info("hardware: claim of %s failed (%s); it stays queued locally", row.command_id, exc)
+            failures = self._claim_retry.get(row.command_id, (0, 0.0))[0] + 1
+            delay = Backoff.delay_for(failures - 1, 1.0, svc.settings.connector_retry_max_s)
+            self._claim_retry[row.command_id] = (failures, svc.clock() + delay)
+            log.info("hardware: claim of %s failed (%s); claiming again in %.1fs", row.command_id, exc, delay)
             return
+        self._claim_retry.pop(row.command_id, None)
         self.commands_claimed += 1
         svc.crash.hit("command_claimed")
         await svc.db.run(svc.store.command_state, row.command_id, "running")

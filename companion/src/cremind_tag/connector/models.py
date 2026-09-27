@@ -363,6 +363,45 @@ class HeartbeatResult:
                    commands_pending=_int(obj, "commands_pending", default=0))
 
 
+REJECTION_REASONS = ("epoch_mismatch", "unknown", "terminal", "not_owned")
+
+
+@dataclass(frozen=True, slots=True)
+class Rejection:
+    """A receipt Cremind did not apply, and why."""
+
+    delivery_id: int
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptsResult:
+    """``POST receipts``: ``{"applied": n, "rejected": [{"delivery_id", "reason"}]}`` (``rejected`` optional:
+    older Cremind builds answer ``{"applied": n}`` only)."""
+
+    applied: int
+    rejected: tuple[Rejection, ...] = ()
+
+    @classmethod
+    def from_json(cls, raw: Any) -> ReceiptsResult:
+        obj = raw if isinstance(raw, Mapping) else {}
+        applied = obj.get("applied")
+        rejected = []
+        for item in obj.get("rejected") or []:
+            if not isinstance(item, Mapping):
+                continue
+            did = item.get("delivery_id")
+            if isinstance(did, int) and not isinstance(did, bool):
+                rejected.append(Rejection(did, str(item.get("reason") or "unknown")))
+        return cls(applied if isinstance(applied, int) and not isinstance(applied, bool) else 0, tuple(rejected))
+
+    def reasons(self) -> dict[str, list[int]]:
+        out: dict[str, list[int]] = {}
+        for r in self.rejected:
+            out.setdefault(r.reason, []).append(r.delivery_id)
+        return out
+
+
 @dataclass(frozen=True, slots=True)
 class Receipt:
     """One delivery receipt (``POST receipts``)."""
@@ -393,6 +432,6 @@ class Receipt:
 
 __all__ = [
     "Assignment", "Command", "EventsPage", "HeartbeatResult", "InventoryResult", "Job", "MalformedResponse",
-    "ProfileSettings", "Receipt", "SyncResult", "TagInfo", "WhoAmI", "iso", "iso_now", "parse_tag_hw_id",
+    "ProfileSettings", "REJECTION_REASONS", "Receipt", "ReceiptsResult", "Rejection", "SyncResult", "TagInfo", "WhoAmI", "iso", "iso_now", "parse_tag_hw_id",
     "parse_time", "tag_hw_id",
 ]

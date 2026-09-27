@@ -29,9 +29,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import functools
 import hashlib
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from ..compose.api import ActiveCard, ComposedScreen, ScreenSettings, TagPanel
@@ -49,9 +51,35 @@ HOLD_S = 5.0
 """How long a revision waits when its tag cannot be delivered to right now (not assigned, no gateway)."""
 
 
+_OFFSET = re.compile(r"(?i)(?:UTC|GMT)?\s*([+-])(\d{1,2})(?::?(\d{2}))?")
+
+
+@functools.lru_cache(maxsize=64)
+def iana_timezone(name: str | None) -> str:
+    """A zone ICU knows. Cremind sends IANA names; defensively a Windows zone id (``SE Asia Standard Time``)
+    is mapped with ICU's Windows table and a bare UTC offset (``+07:00``, ``UTC+7``) becomes ``GMT+07:00``.
+    Anything else is UTC (the composer would fall back to it silently)."""
+    import icu
+
+    text = (name or "").strip() or "UTC"
+    if icu.TimeZone.createTimeZone(text).getID() != "Etc/Unknown":
+        return text
+    mapped = str(icu.TimeZone.getIDForWindowsID(text) or "")
+    if mapped and icu.TimeZone.createTimeZone(mapped).getID() != "Etc/Unknown":
+        log.info("scheduler: Windows time zone %r read as %s", text, mapped)
+        return mapped
+    match = _OFFSET.fullmatch(text)
+    if match:
+        custom = f"GMT{match[1]}{int(match[2]):02d}:{int(match[3] or 0):02d}"
+        if icu.TimeZone.createTimeZone(custom).getID() != "Etc/Unknown":
+            return custom
+    log.warning("scheduler: unknown time zone %r; showing UTC", text)
+    return "UTC"
+
+
 def screen_settings(settings: Any) -> ScreenSettings:
     return ScreenSettings(show_excerpts=bool(settings.show_excerpts), qr_links=bool(settings.qr_links),
-                          timezone=settings.timezone or "UTC", language=settings.language or "en")
+                          timezone=iana_timezone(settings.timezone), language=settings.language or "en")
 
 
 def panel_for(inp: ComposeInput) -> TagPanel:
@@ -119,7 +147,11 @@ class ScreenScheduler:
             if due is not None:
                 wakes.append(due)
         await self.send_due()
-        for ts in (await svc.db.run(store.next_due_ts), await svc.db.run(store.next_expiry_ts)):
+        # A due revision only counts when it can be sent; otherwise the gateway connecting (or the pack
+        # loading) wakes the scheduler, and the scan interval bounds the wait.
+        can_send = svc.gateway is not None and svc.gateway.connected and svc.fonts is not None
+        due_ts = await svc.db.run(store.next_due_ts) if can_send else None
+        for ts in (due_ts, await svc.db.run(store.next_expiry_ts)):
             if ts is not None:
                 wakes.append(ts)
         return min(wakes) if wakes else None
@@ -196,7 +228,8 @@ class ScreenScheduler:
         rev = await svc.db.run(lambda: store.create_revision(
             tag_id=tag_id, dirty_gen=view.dirty_gen, epoch=inp.tag.epoch, bridge_addr=inp.tag.bridge_addr,
             fontpack_id=pack_hex, purpose=purpose, layout=screen.layout, layout_digest=digest, content_key=key,
-            delivery_ids=delivery_ids, pending_delivery_ids=list(screen.pending_delivery_ids), preview_png=png))
+            delivery_ids=delivery_ids, pending_delivery_ids=list(screen.pending_delivery_ids), preview_png=png,
+            preview_epoch=max(inp.tag.epoch, view.epoch)))
         self.composed += 1
         log.info("scheduler: tag %08X revision %d (%s) shows %s, %d more waiting, %d bytes", tag_id, rev.revision,
                  purpose, list(screen.delivery_ids), len(screen.pending_delivery_ids), len(screen.layout))

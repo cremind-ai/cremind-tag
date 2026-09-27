@@ -31,8 +31,12 @@ def sync_result(outstanding: list[Job], head: int, *, stream: str = "s1", valid:
 
 
 def store(tmp_path: Path) -> QueueStore:
+    from cremind_tag.store import BridgeRecord
+
     db = open_database(tmp_path / "c.sqlite3")
-    db.insert_tag(TagRecord(TAG, 16, 1, 400, 300, 1, 1, "file:tag:1A2B3C4D", epoch=1))
+    for addr in (2, 3):
+        db.upsert_bridge(BridgeRecord(f"{addr:032x}", addr=addr, configured=True))
+    db.insert_tag(TagRecord(TAG, 16, 1, 400, 300, 1, 1, "file:tag:1A2B3C4D", epoch=1, bridge_addr=2))
     return QueueStore(db)
 
 
@@ -44,9 +48,25 @@ def outbox(s: QueueStore, kind: str) -> list[dict[str, Any]]:
 
 def test_schema_version(tmp_path: Path) -> None:
     with open_database(tmp_path / "c.sqlite3") as db:
-        assert db.schema_version == QUEUE_MIGRATIONS[-1].version == 2
+        assert db.schema_version == QUEUE_MIGRATIONS[-1].version == 3
     with open_database(tmp_path / "c.sqlite3") as db:  # re-open: nothing to do
-        assert [v for v, _, _ in db.applied_migrations()] == [1, 2]
+        assert [v for v, _, _ in db.applied_migrations()] == [1, 2, 3]
+
+
+def test_a_v2_database_upgrades(tmp_path: Path) -> None:
+    from cremind_tag.store import Database
+
+    path = tmp_path / "old.sqlite3"
+    with Database.open(path, extra_migrations=QUEUE_MIGRATIONS[:1]) as db:  # what b6c48b3 created
+        db.insert_tag(TagRecord(TAG, 16, 1, 400, 300, 1, 1, "file:tag:1A2B3C4D", epoch=1))
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO revisions (tag_id, revision, epoch, layout, layout_digest, content_key, op_id,"
+                         " state, created_at, created_ts) VALUES (?, 1, 1, x'00', 'd', 'k', 7, 'sent', 'now', 0)",
+                         (TAG,))
+    with open_database(path) as db:
+        assert db.schema_version == 3
+        rev = QueueStore(db).get_revision(TAG, 1)
+        assert rev is not None and rev.not_found_count == 0 and rev.state == "sent"
 
 
 def test_events_page_commits_jobs_cursor_and_accepted_together(tmp_path: Path) -> None:
@@ -125,3 +145,88 @@ def test_card_set_rules(tmp_path: Path) -> None:
     assert refused[0]["detail"] == "refused_by_companion"
     inp = s.compose_input(TAG)
     assert inp is not None and [c.delivery_id for c in inp.cards] == [503] and inp.carry == (504,)
+
+
+def sent_revision(s: QueueStore, delivery_ids: list[int], *, epoch: int = 1) -> Any:
+    rev = s.create_revision(tag_id=TAG, dirty_gen=-1, epoch=epoch, bridge_addr=2, fontpack_id="00" * 8,
+                            purpose="screen", layout=b"x", layout_digest="d", content_key="k",
+                            delivery_ids=delivery_ids, pending_delivery_ids=[], preview_png=None)
+    assert s.mark_sent(TAG, rev.revision, rev.op_id)
+    return s.get_revision(TAG, rev.revision)
+
+
+def result(s: QueueStore, rev: Any, status: int, *, epoch: int = 1, update_id: int | None = None) -> None:
+    s.apply_result(update_id=rev.op_id if update_id is None else update_id, tag_id=TAG, epoch=epoch,
+                   revision=rev.revision, status=status, digest=bytes(range(8)), battery_mv=0, timing={})
+
+
+def test_not_found_is_retried_then_escalated_and_a_late_ok_still_counts(tmp_path: Path) -> None:
+    from cremind_tag.daemon.store import NOT_FOUND_ESCALATE
+    from cremind_tag.protocol.ids import Status
+
+    s = store(tmp_path)
+    s.apply_sync("cred", sync_result([job(501, 1)], 1))
+    rev = sent_revision(s, [501])
+    for attempt in range(1, NOT_FOUND_ESCALATE):
+        result(s, rev, Status.NOT_FOUND)
+        again = s.get_revision(TAG, rev.revision)
+        assert (again.state, again.not_found_count) == ("pending", attempt) and again.op_id != rev.op_id
+        assert s.get_view(TAG).blocked_reason is None and s.get_job(501).outcome is None
+        assert s.mark_sent(TAG, again.revision, again.op_id)
+        rev = s.get_revision(TAG, rev.revision)
+    result(s, rev, Status.NOT_FOUND)  # the third: a stop
+    assert s.get_view(TAG).blocked_reason == "not_found" and s.get_job(501).outcome == "failed"
+    assert s.get_revision(TAG, rev.revision).state == "failed"
+    result(s, rev, Status.OK)  # the screen was displayed after all
+    assert s.get_revision(TAG, rev.revision).state == "displayed"
+    view = s.get_view(TAG)
+    assert view.blocked_reason is None and view.displayed_revision == rev.revision
+
+
+def test_a_security_result_of_an_old_epoch_attempt_is_ignored(tmp_path: Path) -> None:
+    from cremind_tag.protocol.ids import Status
+
+    s = store(tmp_path)
+    s.apply_sync("cred", sync_result([job(501, 1)], 1))
+    old = sent_revision(s, [501])  # sent at epoch 1 (op X)
+    s.on_assigned(TAG, epoch=2, bridge_addr=3, bridge_hw_id=None)
+    newer = sent_revision(s, [501], epoch=2)
+    result(s, old, Status.STALE_EPOCH, epoch=1, update_id=old.op_id)  # the old bridge, long after
+    assert s.get_view(TAG).blocked_reason is None
+    assert s.get_revision(TAG, newer.revision).state == "sent"
+    assert s.get_job(501).outcome is None
+    result(s, newer, Status.STALE_EPOCH, epoch=2)  # the current attempt at the current epoch: a real stop
+    assert s.get_view(TAG).blocked_reason == "stale_epoch"
+
+
+def test_block_fails_only_revisions_of_that_epoch(tmp_path: Path) -> None:
+    from cremind_tag.protocol.ids import Status
+
+    s = store(tmp_path)
+    s.apply_sync("cred", sync_result([job(501, 1)], 1))
+    rev = sent_revision(s, [501])
+    with s.db.transaction() as conn:  # a later revision already at epoch 2 (the tag moved meanwhile)
+        conn.execute("INSERT INTO revisions (tag_id, revision, epoch, layout, layout_digest, content_key, op_id,"
+                     " state, created_at, created_ts) VALUES (?, 99, 2, x'00', 'd', 'k', 42, 'pending', 'now', 0)",
+                     (TAG,))
+    result(s, rev, Status.AUTH_FAILED)
+    assert s.get_revision(TAG, rev.revision).state == "failed"
+    assert s.get_revision(TAG, 99).state == "pending"
+
+
+def test_a_progress_update_during_composition_is_not_lost(tmp_path: Path) -> None:
+    s = store(tmp_path)
+    s.apply_sync("cred", sync_result([], 0))
+    s.accept_page("cred", EventsPage("s1", (job(501, 1, kind="progress", replace_key="run:1"),), next_after=1,
+                                     head_seq=1))
+    snapshot = s.compose_input(TAG)  # the scheduler starts composing with card 501 ...
+    assert snapshot is not None
+    s.accept_page("cred", EventsPage("s1", (job(502, 2, kind="progress", replace_key="run:1"),), next_after=2,
+                                     head_seq=2))  # ... while 502 replaces it
+    s.create_revision(tag_id=TAG, dirty_gen=snapshot.view.dirty_gen, epoch=1, bridge_addr=2, fontpack_id="00" * 8,
+                      purpose="screen", layout=b"x", layout_digest="d", content_key="k", delivery_ids=[501],
+                      pending_delivery_ids=[], preview_png=None)
+    view = s.get_view(TAG)
+    assert view.progress_pending  # still to do
+    assert TAG in s.tags_needing_work()[0]
+    assert s.get_job(502).state == "active"

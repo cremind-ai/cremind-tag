@@ -46,6 +46,8 @@ class DaemonSettings:
     """Longest delay between re-deliveries (the job's TTL bounds the total)."""
     connector_retry_max_s: float = 60.0
     """Longest back-off after a Cremind request failed transiently."""
+    tls_retry_s: float = 300.0
+    """Retry interval after a TLS configuration error (untrusted certificate, server moved to HTTPS)."""
     result_timeout_s: float = 1800.0
     """A delivery sent without any result for this long is sent again (the gateway may have lost it)."""
     identify_hold_s: float = 60.0
@@ -59,7 +61,8 @@ class DaemonSettings:
 
     def validate(self) -> None:
         for name in ("active_poll_s", "idle_poll_s", "heartbeat_s", "resync_s", "scan_interval_s",
-                     "retry_initial_s", "retry_max_s", "connector_retry_max_s", "result_timeout_s"):
+                     "retry_initial_s", "retry_max_s", "connector_retry_max_s", "result_timeout_s",
+                     "tls_retry_s"):
             if getattr(self, name) <= 0:
                 raise ConfigError(f"daemon.{name} must be positive")
         if self.idle_poll_s < self.active_poll_s:

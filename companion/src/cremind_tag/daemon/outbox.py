@@ -10,8 +10,14 @@ result is idempotent for the same status).
 
 Errors: transient ones (5xx, network) retry with bounded exponential back-off
 per row; a 4xx refusal marks the row dead (kept for ``cremind-tag queue`` and
-diagnostics); 401/403 or a TLS misconfiguration stop the sender and are
-reported in ``daemon status``.
+diagnostics); 401/403 stop the sender, a TLS misconfiguration pauses it for
+``tls_retry_s``; both are reported in ``daemon status``.
+
+``POST receipts`` may list ``rejected`` receipts: ``terminal``, ``not_owned``
+and ``unknown`` ones are dropped (Cremind already has the delivery's final
+word, or it is not this profile's); ``epoch_mismatch`` means an assignment
+moved the delivery to another epoch — the credential re-syncs, and the sync
+re-sends the terminal receipts of deliveries Cremind still lists.
 """
 
 from __future__ import annotations
@@ -84,12 +90,25 @@ class OutboxSender:
         ids = [r.id for r in batch]
         try:
             await self._post(batch)
-        except (ConnectorAuthError, ConnectorTlsError) as exc:
+        except ConnectorAuthError as exc:
             self.stopped = str(exc)
             self.svc.credential_failed(self.credential_id, exc)
             log.error("outbox: credential=%s stopped: %s", self.credential_id, exc)
             return False
+        except ConnectorTlsError as exc:
+            self.svc.credential_warning(self.credential_id, exc)
+            log.error("outbox: credential=%s TLS problem (retry in %.0fs): %s", self.credential_id,
+                      self.svc.settings.tls_retry_s, exc)
+            await self.svc.db.run(self.svc.store.outbox_retry, ids, str(exc), self.svc.settings.tls_retry_s)
+            return True
         except ConnectorConflict as exc:
+            if first.kind == "previews" and exc.code == "epoch_mismatch":
+                # Rendered for an epoch the tag has left (an assignment or owner change): never retried.
+                log.info("outbox: credential=%s preview of tag %s refused (epoch_mismatch); re-syncing",
+                         self.credential_id, first.payload.get("tag_id"))
+                await self.svc.db.run(self.svc.store.outbox_done, ids)
+                self.svc.request_sync(self.credential_id)
+                return True
             if first.kind == "command_result":
                 log.info("outbox: command=%s already finished in Cremind (%s)", first.payload.get("command_id"),
                          exc.code)
@@ -109,6 +128,7 @@ class OutboxSender:
             await self.svc.db.run(self.svc.store.outbox_retry, ids, str(exc), delay)
             return True
         await self.svc.db.run(self.svc.store.outbox_done, ids)
+        self.svc.credential_ok(self.credential_id)
         self.sent += len(batch)
         return True
 
@@ -118,16 +138,25 @@ class OutboxSender:
         if row.kind == "receipts":
             receipts = [r for item in batch for r in (item.payload.get("receipts") or [])]
             self.svc.crash.hit("before_receipt_post")
-            applied = await self.client.receipts(receipts)
-            log.debug("outbox: credential=%s receipts=%d applied=%d", self.credential_id, len(receipts), applied)
+            result = await self.client.receipts(receipts)
+            log.debug("outbox: credential=%s receipts=%d applied=%d rejected=%d", self.credential_id, len(receipts),
+                      result.applied, len(result.rejected))
+            reasons = result.reasons()
+            for reason, ids_ in reasons.items():
+                log.info("outbox: credential=%s %d receipt(s) rejected (%s): %s", self.credential_id, len(ids_),
+                         reason, ids_[:20])
+            if "epoch_mismatch" in reasons:
+                self.svc.request_sync(self.credential_id)
         elif row.kind == "accepted":
             accepted = await self.client.accepted(int(payload.get("through_seq") or 0),
                                                   [int(i) for i in payload.get("delivery_ids") or []])
             log.debug("outbox: credential=%s accepted=%d", self.credential_id, accepted)
         elif row.kind == "previews":
+            epoch = payload.get("epoch")
             await self.client.previews(tag_id=str(payload["tag_id"]), revision=int(payload["revision"]),
                                        kind=str(payload["kind"]), png_base64=str(payload["png_base64"]),
-                                       delivery_ids=[int(i) for i in payload.get("delivery_ids") or []])
+                                       delivery_ids=[int(i) for i in payload.get("delivery_ids") or []],
+                                       epoch=int(epoch) if isinstance(epoch, int) else None)
         elif row.kind == "command_result":
             await self.client.result(str(payload["command_id"]), str(payload["status"]), payload.get("result"),
                                      payload.get("error"))

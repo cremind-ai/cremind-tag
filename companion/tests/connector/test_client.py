@@ -104,8 +104,11 @@ def test_whoami_sync_events_and_writes() -> None:
             assert await client.accepted(1, [did]) == 1
             receipt = {"delivery_id": did, "stage": "displayed", "outcome": "displayed", "at": "2026-09-27T10:00:00Z",
                        "tag_id": "1A2B3C4D", "epoch": 3, "revision": 7, "digest": "00" * 8}
-            assert await client.receipts([receipt]) == 1
-            assert await client.receipts([receipt]) == 0  # idempotent: a terminal outcome is final
+            assert (await client.receipts([receipt])).applied == 1
+            again = await client.receipts([receipt])  # idempotent: a terminal outcome is final
+            assert again.applied == 0 and again.reasons() == {"terminal": [did]}
+            other = await client.receipts([{**receipt, "delivery_id": 999999}, {**receipt, "epoch": 9}])
+            assert other.reasons() == {"unknown": [999999], "terminal": [did]}
             assert cremind.delivery(did)["stage"] == "displayed"
         header = [r for r in cremind.requests]
         assert header[0][1] == "/whoami"
@@ -269,3 +272,41 @@ def test_redirect_to_https_is_a_configuration_error() -> None:
                 await client.whoami()
 
     run_scenario(scenario())
+
+
+def test_a_handshake_cut_short_is_transient_not_a_tls_error() -> None:
+    """Review regression: an EOF or reset during the TLS handshake (a restarting server) stopped the loops."""
+    import socket
+    import struct
+
+    probe = Credential("tagc_" + "a" * 26, "b" * 30)
+
+    async def scenario() -> None:
+        for reset in (False, True):
+            async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, reset: bool = reset) -> None:
+                await reader.read(1)  # the ClientHello started
+                sock = writer.get_extra_info("socket")
+                if reset and sock is not None:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                writer.close()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            async with server, ConnectorClient(f"https://127.0.0.1:{port}", probe, timeout=5) as client:
+                with pytest.raises(ConnectorUnavailable):
+                    await client.whoami()
+
+    run_scenario(scenario())
+
+
+def test_timestamps_with_and_without_milliseconds() -> None:
+    from cremind_tag.connector.models import ReceiptsResult, parse_time
+
+    whole = parse_time("2026-09-27T10:00:00Z")
+    milli = parse_time("2026-09-27T10:00:00.123Z")
+    assert (milli - whole).total_seconds() == pytest.approx(0.123)
+    assert parse_time("2026-09-27T10:00:00.123456+00:00") > milli
+    assert parse_time(1790503200123).microsecond == 123000
+    assert ReceiptsResult.from_json({"applied": 2}).rejected == ()  # an older Cremind: no `rejected`
+    parsed = ReceiptsResult.from_json({"applied": 0, "rejected": [{"delivery_id": 5, "reason": "not_owned"}, "x"]})
+    assert parsed.reasons() == {"not_owned": [5]}

@@ -82,6 +82,7 @@ class ContentWorker:
                 jobs, full = await self.poll_once()
                 backoff.reset()
                 self.state, self.error = "running", None
+                self.svc.credential_ok(self.credential_id)
                 if full:
                     continue
                 self.caught_up = True
@@ -91,11 +92,19 @@ class ContentWorker:
                 log.info("content: credential=%s cursor expired (oldest=%s head=%s): sync", self.credential_id,
                          exc.oldest_seq, exc.head_seq)
                 self._forced_sync = True
-            except (ConnectorAuthError, ConnectorTlsError) as exc:
+            except ConnectorAuthError as exc:
                 self.state, self.error = "stopped", str(exc)
                 self.svc.credential_failed(self.credential_id, exc)
                 log.error("content: credential=%s stopped: %s", self.credential_id, exc)
                 return
+            except ConnectorTlsError as exc:
+                # A configuration problem the operator must fix; it may be fixed on the server side
+                # (a new certificate), so try again slowly rather than stopping for good.
+                self.state, self.error = "tls_error", str(exc)
+                self.svc.credential_warning(self.credential_id, exc)
+                log.error("content: credential=%s TLS problem (retry in %.0fs): %s", self.credential_id,
+                          settings.tls_retry_s, exc)
+                await self._sleep(settings.tls_retry_s)
             except ConnectorError as exc:
                 delay = backoff.next()
                 self.state, self.error = "retrying", str(exc)

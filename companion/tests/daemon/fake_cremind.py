@@ -11,7 +11,9 @@ companion_accepted), receipts that never move a stage backwards and whose
 terminal outcome is final (and whose ``epoch`` must match), previews, hardware
 commands with claim/result, and ``replace_key``/``resolves`` retiring older
 deliveries the way ``write_deliveries`` does. Timestamps are ISO strings with
-second resolution, like the server's.
+millisecond resolution (``whole_seconds=True`` for the older server format).
+``POST receipts`` answers ``{"applied", "rejected": [{"delivery_id", "reason"}]}``
+with ``epoch_mismatch``, ``unknown``, ``terminal`` or ``not_owned``.
 
 Every receipt received is logged in ``receipt_log`` so tests can check that no
 delivery was ever reported with two different terminal outcomes.
@@ -41,8 +43,14 @@ TERMINAL = ("displayed", "superseded", "expired", "cancelled", "failed", "uncert
 ACTIVE = STAGES[:-1]
 
 
+WHOLE_SECONDS = False
+
+
 def iso(ms: float) -> str:
-    return dt.datetime.fromtimestamp(ms / 1000, tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    moment = dt.datetime.fromtimestamp(ms / 1000, tz=dt.UTC)
+    if WHOLE_SECONDS:
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def parse_ts(value: Any) -> float | None:
@@ -97,6 +105,7 @@ class FakeCremind:
         self.previews: dict[tuple[str, str], dict[str, Any]] = {}
         self.preview_log: list[dict[str, Any]] = []
         self.receipt_log: list[dict[str, Any]] = []
+        self.rejected_log: list[dict[str, Any]] = []
         self.accepted_log: list[int] = []
         self.requests: list[tuple[str, str, str | None]] = []
         self.heartbeats: list[dict[str, Any]] = []
@@ -104,6 +113,9 @@ class FakeCremind:
         self.command_results: list[dict[str, Any]] = []
         self.fail_next: dict[str, list[int]] = {}
         self.expire_cursor_once = False
+        self.tls_fail_next = 0  # requests that fail as an untrusted certificate
+        self.expiry_lag_s = 1.0
+        self.claim_answer_lost = 0  # claims that commit but answer 503 (the answer is lost)
         self._ids = itertools.count(500)
         self._command_event: asyncio.Event | None = None
         self.transport = httpx.MockTransport(self.handle)
@@ -164,6 +176,8 @@ class FakeCremind:
                         self._end(d, "superseded", "replaced")
         stream.head += 1
         delivery_id = next(self._ids)
+        if replace_key is None and kind not in ("resolved", "clear"):
+            replace_key = f"delivery:{delivery_id}"  # every content job has one (connector-api.md)
         self.deliveries[delivery_id] = {
             "id": delivery_id, "profile": profile, "seq": stream.head, "tag": tag_hw, "epoch": device["epoch"],
             "kind": kind, "priority": priority if priority is not None else {"needs_input": 90, "clear": 100,
@@ -180,6 +194,16 @@ class FakeCremind:
 
     def _end(self, d: dict[str, Any], outcome: str, detail: str) -> None:
         d.update(stage=outcome, outcome=outcome, detail=detail)
+
+    def cancel(self, delivery_id: int) -> int:
+        """A user cancel in Cremind: the delivery ends ``cancelled`` and a ``resolved`` job naming its
+        ``replace_key`` tells a companion that already fetched it; returns the resolving job's id."""
+        d = self.deliveries[delivery_id]
+        self._end(d, "cancelled", "cancelled by the user")
+        return self.add_job(d["profile"], d["tag"], kind="resolved", title="Cancelled", resolves=d["replace_key"],
+                            card={"v": 1, "kind": "resolved", "severity": "info", "icon": "info", "title": "Cancelled",
+                                  "body": None, "lang": "en", "ts": iso(self.now_ms()), "progress": None,
+                                  "link": None, "source": {"type": "delivery", "id": str(delivery_id)}})
 
     def delivery(self, delivery_id: int) -> dict[str, Any]:
         return self.deliveries[delivery_id]
@@ -265,7 +289,8 @@ class FakeCremind:
         return cred, None
 
     def _expire(self) -> None:
-        now = self.now_ms()
+        # Cremind's projection worker expires deliveries on its own pass (every ~2 s), not at the instant.
+        now = self.now_ms() - self.expiry_lag_s * 1000
         for d in self.deliveries.values():
             if d["stage"] in ACTIVE and d["expires_at"] <= now:
                 self._end(d, "expired", "expired")
@@ -282,6 +307,12 @@ class FakeCremind:
             return self._error(404, "not_found", "no route")
         route = path[len(PREFIX):]
         self.requests.append((request.method, route, None))
+        if self.tls_fail_next > 0:
+            self.tls_fail_next -= 1
+            import ssl
+
+            raise httpx.ConnectError("certificate verify failed", request=request) from ssl.SSLCertVerificationError(
+                1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate")
         faults = self.fail_next.get(route.split("/")[1] if route.count("/") > 1 else route.strip("/"))
         if faults:
             status = faults.pop(0)
@@ -381,6 +412,9 @@ class FakeCremind:
             return self._error(409, "already_claimed", f"The command is already {c['status']}.",
                                command=self._command_json(c))
         c["status"] = "claimed"
+        if self.claim_answer_lost > 0:
+            self.claim_answer_lost -= 1
+            return self._error(503, "unavailable", "the claim committed but its answer was lost")
         return self._json(200, self._command_json(c))
 
     def _result(self, request: httpx.Request, cid: str, body: dict[str, Any]) -> httpx.Response:
@@ -471,14 +505,19 @@ class FakeCremind:
             return err
         assert cred is not None
         applied = 0
+        rejected: list[dict[str, Any]] = []
         for rec in body.get("receipts") or []:
             self.receipt_log.append(dict(rec))
-            d = self.deliveries.get(int(rec["delivery_id"]))
-            if d is None or d["profile"] != cred.profile or d["stage"] in TERMINAL:
+            did = int(rec["delivery_id"])
+            d = self.deliveries.get(did)
+            reason = ("unknown" if d is None else "not_owned" if d["profile"] != cred.profile
+                      else "terminal" if d["stage"] in TERMINAL else None)
+            if reason is None and isinstance(rec.get("epoch"), int) and rec["epoch"] != d["epoch"]:
+                reason = "epoch_mismatch"
+            if reason is not None:
+                rejected.append({"delivery_id": did, "reason": reason})
                 continue
-            epoch = rec.get("epoch")
-            if isinstance(epoch, int) and epoch != d["epoch"]:
-                continue
+            assert d is not None
             outcome, stage = rec.get("outcome"), rec.get("stage")
             target = d["stage"]
             if outcome in TERMINAL:
@@ -504,7 +543,8 @@ class FakeCremind:
                 if d["stage"] == "displayed" and rev >= device["displayed_revision"]:
                     device["displayed_revision"] = rev
                     device["displayed_digest"] = d.get("digest")
-        return self._json(200, {"applied": applied})
+        self.rejected_log.extend(rejected)
+        return self._json(200, {"applied": applied, "rejected": rejected})
 
     def _previews(self, request: httpx.Request, body: dict[str, Any]) -> httpx.Response:
         cred, err = self._auth(request, "content")
@@ -519,7 +559,10 @@ class FakeCremind:
         device = self.devices.get(("tag", body.get("tag_id")))
         if device is None or device["owner_profile"] != cred.profile:
             return self._error(404, "tag_not_found", "No tag with that id belongs to this profile.")
-        self.preview_log.append({k: body[k] for k in ("tag_id", "revision", "kind", "delivery_ids")})
+        if body.get("epoch") is not None and body["epoch"] != device["epoch"]:
+            self.preview_log.append({"refused": "epoch_mismatch", **{k: body.get(k) for k in ("tag_id", "epoch")}})
+            return self._error(409, "epoch_mismatch", "The preview was rendered for another epoch of the tag.")
+        self.preview_log.append({k: body.get(k) for k in ("tag_id", "epoch", "revision", "kind", "delivery_ids")})
         key = (body["tag_id"], body["kind"])
         current = self.previews.get(key)
         if current is not None and current["revision"] > body["revision"]:

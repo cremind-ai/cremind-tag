@@ -17,8 +17,8 @@ thread):
 :class:`OutboxSender`       per credential: receipts, accepted, previews, results
 ==========================  ==========================================================
 
-A failing credential (401/403, TLS misconfiguration) stops only its own
-loops. The gateway connection is retried with back-off until it answers; the
+A revoked or invalid credential (401/403) stops only its own loops; a TLS
+misconfiguration pauses them and retries every ``tls_retry_s``. The gateway connection is retried with back-off until it answers; the
 link then reconnects by itself. Durability boundaries call
 :meth:`CrashPoints.hit` so tests can kill the service at each of them.
 """
@@ -159,6 +159,7 @@ class DaemonService:
         self.senders: dict[str, OutboxSender] = {}
         self.clients: list[ConnectorClient] = []
         self.failed_credentials: dict[str, str] = {}
+        self.credential_warnings: dict[str, str] = {}  # TLS problems, retried slowly
         self._tasks: list[asyncio.Task[Any]] = []
         self._stop = asyncio.Event()
         self._crashed: SimulatedCrash | None = None
@@ -191,9 +192,8 @@ class DaemonService:
         if (opts.hardware_credential or opts.content_credentials) and not opts.cremind_url:
             raise DaemonConfigError("no Cremind URL configured (cremind-tag connect server URL)")
         if opts.gateway_url is not None:
-            from ..cli._hardware import gateway_hw_id
-
-            self.gateway_hw_id = gateway_hw_id(opts.gateway_url)
+            # gateway_hw_id is derived per session (record_gateway): before the port enumerates, the USB
+            # serial number is unknown and a URL-based id would name a phantom gateway.
             client_options = {"reconnect": True, "name": "cremind-tag daemon", "op_ids": self.op_ids,
                               **opts.gateway_options}
             self.gateway = GatewayClient(opts.gateway_url, **client_options)
@@ -393,6 +393,12 @@ class DaemonService:
     def credential_failed(self, credential_id: str, exc: Exception) -> None:
         self.failed_credentials[credential_id] = str(exc)
 
+    def credential_warning(self, credential_id: str, exc: Exception) -> None:
+        self.credential_warnings[credential_id] = str(exc)
+
+    def credential_ok(self, credential_id: str) -> None:
+        self.credential_warnings.pop(credential_id, None)
+
     def gateway_session(self, event: SessionStarted, boot_changed: bool) -> None:
         if boot_changed:
             self.boot_generation += 1
@@ -402,8 +408,12 @@ class DaemonService:
         self.wake_scheduler()
 
     def record_gateway(self, event: SessionStarted) -> None:
-        if self.gateway_hw_id is None or self.gateway_url is None:
+        """Every session: the gateway's id (from its USB serial number now that the port is open) and row."""
+        if self.gateway_url is None:
             return
+        from ..cli._hardware import gateway_hw_id
+
+        self.gateway_hw_id = gateway_hw_id(self.gateway_url)
         hello = event.hello
         board = hello.caps.board if isinstance(hello.caps.board, int) else None
         self.db.upsert_gateway(GatewayRecord(self.gateway_hw_id, port=self.gateway_url, boot_id=hello.boot_id,
@@ -437,6 +447,9 @@ class DaemonService:
                 "kind": "hardware", "companion_id": self.hardware.companion_id, "state": self.hardware.state,
                 "error": self.hardware.error, "inventories": self.hardware.inventories,
                 "heartbeats": self.hardware.heartbeats, "commands_running": dict(self.hardware.executor.running)}
+        for credential_id, error in self.credential_warnings.items():
+            credentials.setdefault(credential_id, {})["state"] = "tls_error"
+            credentials[credential_id]["error"] = error
         for credential_id, error in self.failed_credentials.items():
             credentials.setdefault(credential_id, {})["state"] = "stopped"
             credentials[credential_id]["error"] = error

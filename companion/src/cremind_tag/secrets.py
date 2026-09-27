@@ -10,10 +10,11 @@ Backends, chosen once when the store is opened:
 - ``keyring`` — the OS credential store through ``keyring`` (Windows
   Credential Manager, macOS Keychain, Secret Service), service name
   ``cremind-tag``;
-- ``file`` — a JSON file (``<data dir>/secrets.json``) created with mode 0600
-  and replaced atomically; used when no usable keyring backend exists (headless
-  Linux, containers) or when configured explicitly. On Windows the file relies on
-  the user profile's ACL (``chmod`` cannot restrict it further).
+- ``file`` — a JSON file (``<data dir>/secrets.json``) only its owner can
+  access (mode 0600; on Windows a protected DACL for the current user and
+  SYSTEM, since Windows ignores the mode and a file inherits its folder's ACL),
+  replaced atomically under an inter-process lock; used when no usable keyring
+  backend exists (headless Linux, containers) or when configured explicitly.
 
 The backend in use is logged; secret values never are. A reference such as
 ``keyring:tag:1A2B3C4D`` is what other components (the inventory database)
@@ -22,12 +23,13 @@ store instead of the secret.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
-import stat
-import sys
+import tempfile
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Protocol
 
@@ -99,13 +101,41 @@ class KeyringBackend:
 
 
 class FileBackend:
-    """A 0600 JSON file ``{"version": 1, "secrets": {key: value}}``, replaced atomically."""
+    """An owner-only JSON file ``{"version": 1, "secrets": {key: value}}``, replaced atomically.
+
+    Several processes may use the file at once (two ``tag enroll`` runs, the
+    daemon and the CLI): every read-modify-write cycle holds an inter-process
+    lock on ``secrets.json.lock``, and each write goes to its own temporary file
+    (owner-only before any secret is written) that then replaces the file. On
+    Windows "owner-only" is a protected DACL for the current user and SYSTEM
+    (:mod:`cremind_tag.private_files`); elsewhere mode 0600.
+    """
 
     name = "file"
 
     def __init__(self, path: Path) -> None:
+        from .private_files import InterProcessLock
+
         self.path = Path(path)
         self._lock = threading.Lock()
+        self._process_lock = InterProcessLock(self.path.with_name(self.path.name + ".lock"))
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        with self._lock, self._process_lock.held():
+            yield
+
+    def ensure_private(self) -> str | None:
+        """Make an existing file owner-only again (e.g. created by an older version); returns what was wrong."""
+        from .private_files import access_problem, restrict_to_owner
+
+        with self._locked():
+            problem = access_problem(self.path)
+            if problem is not None:
+                restrict_to_owner(self.path)
+                log.warning("secrets: %s was not private (%s); access is now restricted to its owner", self.path,
+                            problem)
+        return problem
 
     def _load(self) -> dict[str, str]:
         if not self.path.exists():
@@ -120,32 +150,36 @@ class FileBackend:
         return {str(k): str(v) for k, v in data["secrets"].items()}
 
     def _store(self, secrets: dict[str, str]) -> None:
+        from .private_files import replace_with_retry, restrict_to_owner
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
         payload = json.dumps({"version": _FILE_VERSION, "secrets": secrets}, indent=1, sort_keys=True)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
-        fd = os.open(tmp, flags, 0o600)
+        fd, tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent)
         try:
-            os.write(fd, payload.encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        if sys.platform != "win32":
-            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
-        os.replace(tmp, self.path)
+            try:
+                restrict_to_owner(tmp)  # before a single secret byte is in it
+                os.write(fd, payload.encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            replace_with_retry(tmp, self.path)  # the owner-only DACL moves with the file
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
     def get(self, key: str) -> str | None:
-        with self._lock:
+        with self._locked():
             return self._load().get(key)
 
     def set(self, key: str, value: str) -> None:
-        with self._lock:
+        with self._locked():
             secrets = self._load()
             secrets[key] = value
             self._store(secrets)
 
     def delete(self, key: str) -> bool:
-        with self._lock:
+        with self._locked():
             secrets = self._load()
             if key not in secrets:
                 return False
@@ -154,7 +188,9 @@ class FileBackend:
             return True
 
     def describe(self) -> str:
-        return f"file {self.path} (mode 0600)"
+        from .private_files import protection_label
+
+        return f"file {self.path} ({protection_label()})"
 
 
 def keyring_usable() -> tuple[bool, str]:
@@ -197,7 +233,7 @@ class SecretStore:
 
     @classmethod
     def open(cls, data_dir: Path, backend: str = "auto") -> SecretStore:
-        """Pick the backend: ``keyring`` when usable (or forced), else the 0600 file."""
+        """Pick the backend: ``keyring`` when usable (or forced), else the owner-only file."""
         if backend not in ("auto", "keyring", "file"):
             raise SecretStoreError(f"unknown secrets backend {backend!r}")
         chosen: Backend
@@ -210,8 +246,10 @@ class SecretStore:
             elif backend == "keyring":
                 raise SecretStoreError(f"keyring backend requested but {why}")
             else:
-                log.warning("secrets: %s; falling back to a 0600 file", why)
+                log.warning("secrets: %s; falling back to an owner-only file", why)
                 chosen = FileBackend(Path(data_dir) / FILE_NAME)
+        if isinstance(chosen, FileBackend):
+            chosen.ensure_private()
         log.info("secrets: using %s", chosen.describe())
         return cls(chosen)
 

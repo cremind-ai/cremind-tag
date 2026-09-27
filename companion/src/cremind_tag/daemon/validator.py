@@ -8,10 +8,15 @@ still carries such text, because it means something upstream went wrong. A
 refused job is receipted ``failed`` with detail ``refused_by_companion``
 (docs/security.md "Content policy"); the text itself is never logged.
 
-Checked: the card's ``title`` and ``body`` (what a screen can show). Rules:
+Checked: the card's ``title`` and ``body``, each as given AND as the tag would
+show it (``layout.plaintext.plain_text``: HTML entities decoded, HTML and
+Markdown stripped, spaces collapsed; with and without its line breaks), and a
+whitespace-collapsed copy of every form, as Cremind's ``contains_otp`` does.
+Rules:
 
 - one-time codes: a 4–8 digit number (or ``123 456``) within 24 characters of
-  ``otp``/``code``/``passcode``/``pin``/``verification``/… on either side;
+  ``otp``/``code``/``passcode``/``pin``/``verification``/… on either side; the
+  gap may cross a line break (``Your code:\\n482913``);
 - credentials: ``Bearer …``/``CremindTag …``/``token …`` values, well-known
   token shapes (``sk-…``, ``ghp_…``, ``xox?-…``, ``AIza…``, ``tagc_…``, JWTs),
   ``password=…``/``api_key: …`` pairs, hex runs ≥ 24 and base64 runs ≥ 24 mixing
@@ -33,8 +38,10 @@ _OTP_WORDS = (
     r"2fa|mfa|code|m[aã]\s+(?:x[aá]c\s+(?:nh[aậ]n|th[uự]c)|otp))"
 )
 _OTP_DIGITS = r"(\d{4,8}|\d{3}[\s-]\d{3})"
-_OTP_AFTER = re.compile(rf"(?i)\b{_OTP_WORDS}\b[^\d\n]{{0,24}}?{_OTP_DIGITS}(?!\d)")
-_OTP_BEFORE = re.compile(rf"(?i)(?<!\d){_OTP_DIGITS}\b[^\d\n]{{0,24}}?\b{_OTP_WORDS}\b")
+# The gap may cross a line break: "Your code:\n482913" is still a code (Cremind's rule).
+_OTP_AFTER = re.compile(rf"(?i)\b{_OTP_WORDS}\b[^\d]{{0,24}}?{_OTP_DIGITS}(?!\d)")
+_OTP_BEFORE = re.compile(rf"(?i)(?<!\d){_OTP_DIGITS}\b[^\d]{{0,24}}?\b{_OTP_WORDS}\b")
+_WS = re.compile(r"\s+")
 
 _SCHEME_TOKEN = re.compile(r"(?i)\b(bearer|cremindtag|basic|token)\s+[A-Za-z0-9._~+/=:-]{8,}")
 _KNOWN_TOKENS = re.compile(
@@ -49,7 +56,7 @@ _KNOWN_TOKENS = re.compile(
 )
 _KEY_VALUE = re.compile(
     r"(?i)\b([\w.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|token|secret|password|passwd|pwd|"
-    r"passcode))\s*[:=]\s*(?![\"']?\[redacted\])(\"[^\"]+\"|'[^']+'|[^\s,;&]+)"
+    r"passcode|key))\s*[:=]\s*(?![\"']?\[redacted\])(\"[^\"]+\"|'[^']+'|[^\s,;&]+)"
 )  # Cremind's own redaction (``password=[redacted]``) is fine
 _HEX_RUN = re.compile(r"\b[0-9a-fA-F]{24,}\b")
 _B64_RUN = re.compile(r"[A-Za-z0-9+/_-]{24,}={0,2}")
@@ -78,8 +85,9 @@ def text_problem(text: str) -> str | None:
     """Why ``text`` must not be displayed (``None`` when it may)."""
     if not text:
         return None
-    if _OTP_AFTER.search(text) or _OTP_BEFORE.search(text):
-        return "one-time code"
+    for candidate in (text, _WS.sub(" ", text)):
+        if _OTP_AFTER.search(candidate) or _OTP_BEFORE.search(candidate):
+            return "one-time code"
     if _SCHEME_TOKEN.search(text) or _KNOWN_TOKENS.search(text) or _KEY_VALUE.search(text):
         return "credential"
     if _HEX_RUN.search(text) or any(_mixed_b64(m.group(0)) for m in _B64_RUN.finditer(text)):
@@ -89,6 +97,21 @@ def text_problem(text: str) -> str | None:
     if len(_LOG_LINE.findall(text)) >= 3:
         return "tool or terminal output"
     return None
+
+
+def displayed_forms(value: str) -> list[str]:
+    """``value`` as given and as a tag would show it (plain text, with and without its line breaks)."""
+    from ..layout.plaintext import plain_text
+
+    forms = [value]
+    for keep_newlines in (False, True):
+        try:
+            shown = plain_text(value, keep_newlines=keep_newlines)
+        except Exception:  # the raw value is still checked
+            continue
+        if shown and shown not in forms:
+            forms.append(shown)
+    return forms
 
 
 def card_problem(card: Mapping[str, Any] | None) -> str | None:
@@ -101,10 +124,11 @@ def card_problem(card: Mapping[str, Any] | None) -> str | None:
             continue
         if not isinstance(value, str):
             return f"{key} is not text"
-        problem = text_problem(value)
-        if problem is not None:
-            return f"{problem} in {key}"
+        for form in displayed_forms(value):
+            problem = text_problem(form)
+            if problem is not None:
+                return f"{problem} in {key}"
     return None
 
 
-__all__ = ["REFUSED_DETAIL", "card_problem", "text_problem"]
+__all__ = ["REFUSED_DETAIL", "card_problem", "displayed_forms", "text_problem"]

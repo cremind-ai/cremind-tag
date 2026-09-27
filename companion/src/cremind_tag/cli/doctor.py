@@ -5,7 +5,8 @@ the command exits 1 when any check fails. Checks:
 
 - configuration file and data directory; the database (``PRAGMA
   integrity_check``, schema version);
-- the secret store backend (an OS keyring or the 0600 file);
+- the secret store backend (an OS keyring or the owner-only file) and, for the
+  file, that no other local user can read it (it is restricted if it was);
 - Cremind reachability and TLS (an unauthenticated ``whoami`` must answer 401);
 - every configured credential (``whoami``: kind, profile, companion);
 - the gateway (``HELLO`` + ``INFO``), the bridges' active font pack ids;
@@ -81,9 +82,12 @@ def _database_check(report: Report, config: Any) -> None:
 
 
 def _secrets_check(report: Report, config: Any) -> Any:
-    from cremind_tag.secrets import SecretStore, SecretStoreError, keyring_usable
+    from cremind_tag.private_files import access_problem
+    from cremind_tag.secrets import FILE_NAME, SecretStore, SecretStoreError, keyring_usable
 
     usable, why = keyring_usable()
+    secrets_file = config.ensure_data_dir() / FILE_NAME
+    exposed = access_problem(secrets_file)  # before opening the store, which restricts the file
     try:
         store = SecretStore.open(config.ensure_data_dir(), config.secrets.backend)
     except SecretStoreError as exc:
@@ -92,6 +96,12 @@ def _secrets_check(report: Report, config: Any) -> Any:
     status = "ok" if store.backend_name == "keyring" or config.secrets.backend == "file" else "warn"
     detail = store.describe() + ("" if usable else f" — keyring: {why}")
     report.add("secret store", status, detail)
+    if exposed is not None:
+        still = access_problem(secrets_file)
+        report.add("secrets file", "warn" if still is None else "fail",
+                   f"{secrets_file}: {exposed}; " + ("access is now restricted to you — rotate the connector "
+                                                      "credentials if other users could have read it"
+                                                      if still is None else f"still: {still}"))
     return store
 
 
@@ -100,8 +110,8 @@ async def _cremind_checks(report: Report, config: Any, secrets: Any) -> None:
         ConnectorAuthError,
         ConnectorClient,
         ConnectorError,
-        CremindSettings,
         Credential,
+        CremindSettings,
         parse_credential,
     )
 

@@ -46,6 +46,9 @@ STAGE_RANK = {name: rank for rank, name in enumerate(STAGES)}
 TERMINAL_OUTCOMES = ("displayed", "superseded", "expired", "cancelled", "failed", "uncertain")
 INSTRUCTION_KINDS = frozenset({"resolved", "clear"})
 """Kinds that change the card set but are never shown themselves."""
+TERMINAL_STATE = {"displayed": "done", "superseded": "superseded", "expired": "expired", "cancelled": "cancelled",
+                  "failed": "failed", "uncertain": "done"}
+"""Local ``state`` of a job that arrived already final in Cremind."""
 
 STALE_REVISION_JUMP = 1 << 16
 """Revisions skipped after ``STALE_REVISION`` (doubled per consecutive refusal, at most ``<< 8``)."""
@@ -62,7 +65,10 @@ SECURITY_STATUSES = frozenset({
     Status.AUTH_FAILED, Status.SECURITY_CONFIG, Status.NOT_ASSIGNED, Status.STALE_EPOCH, Status.VERSION_MISMATCH,
     Status.NOT_FOUND,
 })
-"""Results that stop the tag's work of that epoch and re-sync its assignment (§10, connector-api.md Defaults)."""
+"""Results that stop the tag's work of that epoch and re-sync its assignment (§10, connector-api.md Defaults).
+``NOT_FOUND`` counts only after ``NOT_FOUND_ESCALATE`` consecutive answers for one revision (§10)."""
+NOT_FOUND_ESCALATE = 3
+"""``EVT_RESULT NOT_FOUND`` answers for one revision before it is treated as a security stop (§10)."""
 LAYOUT_STATUSES = frozenset({Status.INVALID, Status.TOO_LARGE, Status.UNSUPPORTED})
 """Results that fail the revision (and the deliveries it shows) but not the tag."""
 
@@ -174,6 +180,7 @@ class RevisionRow:
     last_stage: str | None
     attempts: int
     uncertain_count: int
+    not_found_count: int
     next_attempt_ts: float
     last_status: str | None
     detail: str | None
@@ -189,7 +196,8 @@ class RevisionRow:
                    bytes(r["layout"]), r["layout_digest"], r["content_key"], r["frame_digest"],
                    tuple(_loads(r["delivery_ids"], [])), tuple(_loads(r["pending_delivery_ids"], [])),
                    bytes(r["preview_png"]) if r["preview_png"] is not None else None, r["op_id"], r["state"],
-                   r["last_stage"], r["attempts"], r["uncertain_count"], r["next_attempt_ts"], r["last_status"],
+                   r["last_stage"], r["attempts"], r["uncertain_count"], r["not_found_count"],
+                   r["next_attempt_ts"], r["last_status"],
                    r["detail"], r["created_at"], r["created_ts"], r["sent_at"], r["sent_ts"], r["finished_at"])
 
 
@@ -382,8 +390,9 @@ class QueueStore:
                     progress_only: bool = False) -> None:
         cls._ensure_view(conn, tag_id, now_iso)
         if progress_only:
-            conn.execute("UPDATE tag_views SET progress_pending = 1, updated_at = ? WHERE tag_id = ?",
-                         (now_iso, tag_id))
+            # A new generation too: a composition that started before this change must not clear it.
+            conn.execute("UPDATE tag_views SET progress_pending = 1, dirty_gen = dirty_gen + 1, updated_at = ?"
+                         " WHERE tag_id = ?", (now_iso, tag_id))
             return
         conn.execute("UPDATE tag_views SET dirty = 1, dirty_gen = dirty_gen + 1, force = MAX(force, ?),"
                      " updated_at = ? WHERE tag_id = ?", (int(force), now_iso, tag_id))
@@ -498,10 +507,10 @@ class QueueStore:
             new = self._jobs(conn, "delivery_id = ?", (job.delivery_id,))[0]
             self._ensure_view(conn, job.tag_id, now_iso)
             if job.stage in TERMINAL_OUTCOMES:
-                # Already ended in Cremind (superseded by a newer card, cancelled, expired): history only.
-                self._drop(conn, [new], "superseded" if job.stage == "superseded" else
-                           ("expired" if job.stage == "expired" else "cancelled"), job.stage, now_iso,
-                           f"ended in Cremind before arrival ({job.stage})")
+                # Already final in Cremind (superseded, cancelled, expired … while this companion was away):
+                # recorded by its stage, never displayed (connector-api.md "events").
+                self._drop(conn, [new], TERMINAL_STATE[job.stage], job.stage, now_iso,
+                           f"final in Cremind before it arrived ({job.stage})")
                 continue
             problem = card_problem(job.card)
             if problem is not None:
@@ -577,9 +586,10 @@ class QueueStore:
                                list(outstanding)) if outstanding else []
             for job in known:
                 current = outstanding[job.delivery_id]
-                if current.epoch != job.epoch:
-                    conn.execute("UPDATE jobs SET epoch = ? WHERE delivery_id = ?", (current.epoch, job.delivery_id))
-                    job = self._jobs(conn, "delivery_id = ?", (job.delivery_id,))[0]
+                if current.epoch == job.epoch:
+                    continue  # the receipt is on its way (the outbox keeps it until Cremind answers)
+                conn.execute("UPDATE jobs SET epoch = ? WHERE delivery_id = ?", (current.epoch, job.delivery_id))
+                job = self._jobs(conn, "delivery_id = ?", (job.delivery_id,))[0]
                 resend.append((job.credential_id, self._receipt(
                     job, stage=job.last_stage or "companion_accepted", outcome=job.outcome, at=job.finished_at or now_iso,
                     status_code=job.status_code, revision=job.revision, digest=job.digest,
@@ -669,13 +679,16 @@ class QueueStore:
         with self.db.transaction() as conn:
             self._mark_dirty(conn, tag_id, now_iso, force=force)
 
-    def set_override(self, tag_id: int, override: str | None, until: float | None) -> None:
+    def set_override(self, tag_id: int, override: str | None, until: float | None, *, force: bool = True) -> None:
+        """Show ``override`` (``identify``) until ``until``; ``force=False`` only moves the hold's end
+        (the screen already shows it, so no new revision)."""
         _, now_iso = self._now()
         with self.db.transaction() as conn:
             self._ensure_view(conn, tag_id, now_iso)
             conn.execute("UPDATE tag_views SET override = ?, override_until = ? WHERE tag_id = ?",
                          (override, until, tag_id))
-            self._mark_dirty(conn, tag_id, now_iso, force=True)
+            if force:
+                self._mark_dirty(conn, tag_id, now_iso, force=True)
 
     def tags_needing_work(self) -> tuple[list[int], set[str]]:
         """Tags to (re)compose, and credentials whose tags lack a view (they need a ``sync``)."""
@@ -736,7 +749,7 @@ class QueueStore:
     def create_revision(self, *, tag_id: int, dirty_gen: int, epoch: int, bridge_addr: int | None,
                         fontpack_id: str | None, purpose: str, layout: bytes, layout_digest: str, content_key: str,
                         delivery_ids: Sequence[int], pending_delivery_ids: Sequence[int],
-                        preview_png: bytes | None) -> RevisionRow:
+                        preview_png: bytes | None, preview_epoch: int | None = None) -> RevisionRow:
         """Allocate the next revision (``Database.allocate_revision``), supersede older undelivered
         revisions (their deliveries are in this one) and persist the new one with its ``op_id``
         BEFORE anything is sent; the desired preview goes to the outbox in the same transaction."""
@@ -757,14 +770,14 @@ class QueueStore:
                  now_iso, now_ts))
             conn.execute("UPDATE tag_views SET dirty = 0, force = 0, progress_pending = 0, updated_at = ?"
                          " WHERE tag_id = ? AND dirty_gen = ?", (now_iso, tag_id, dirty_gen))
-            conn.execute("UPDATE tag_views SET force = 0, progress_pending = 0 WHERE tag_id = ?", (tag_id,))
             self._expire_override(conn, tag_id, now_ts)
             view = conn.execute("SELECT credential_id FROM tag_views WHERE tag_id = ?", (tag_id,)).fetchone()
             if preview_png is not None and view is not None and view["credential_id"]:
                 import base64
 
                 self._enqueue(conn, "previews", view["credential_id"], {
-                    "tag_id": tag_hw_id(tag_id), "revision": revision, "kind": "desired",
+                    "tag_id": tag_hw_id(tag_id), "epoch": preview_epoch if preview_epoch is not None else epoch,
+                    "revision": revision, "kind": "desired",
                     "png_base64": base64.b64encode(preview_png).decode("ascii"),
                     "delivery_ids": list(delivery_ids)}, now_iso, dedupe_key=f"{tag_hw_id(tag_id)}:desired")
             row = conn.execute("SELECT * FROM revisions WHERE tag_id = ? AND revision = ?",
@@ -928,19 +941,46 @@ class QueueStore:
             rev = RevisionRow.from_row(row)
             view_row = conn.execute("SELECT * FROM tag_views WHERE tag_id = ?", (tag_id,)).fetchone()
             view = TagView.from_row(view_row) if view_row is not None else None
-            if rev.state in ("displayed", "failed", "uncertain"):
+            if rev.state == "displayed":
                 return effects  # a re-sent result: already applied
             current_attempt = update_id == rev.op_id
-            conn.execute("UPDATE revisions SET last_status = ? WHERE tag_id = ? AND revision = ?",
-                         (status_name(st), tag_id, revision))
             if st == Status.OK:
+                # The tag shows it, whatever this database concluded meanwhile (a revision failed on an
+                # ambiguous result, or superseded, is recorded displayed; outcomes already reported stay).
                 self._displayed(conn, rev, digest[:8].hex(), timing, now_iso, view)
+                if view is not None and view.blocked_reason == "not_found":
+                    conn.execute("UPDATE tag_views SET blocked_reason = NULL, blocked_epoch = NULL WHERE tag_id = ?",
+                                 (tag_id,))
                 effects.outbox = True
                 return effects
-            if not current_attempt and rev.state != "superseded":
-                return effects  # the failure of an attempt we already replaced
-            if rev.state == "superseded" and st not in SECURITY_STATUSES and st != Status.STALE_REVISION:
+            if rev.state in ("failed", "uncertain"):
+                return effects
+            if not current_attempt:
+                return effects  # the failure of an attempt already replaced (or of an older epoch's attempt)
+            conn.execute("UPDATE revisions SET last_status = ? WHERE tag_id = ? AND revision = ?",
+                         (status_name(st), tag_id, revision))
+            assigned = conn.execute("SELECT epoch FROM tags WHERE tag_id = ?", (tag_id,)).fetchone()
+            current_epoch = max(int(assigned["epoch"]) if assigned is not None else 0,
+                                view.epoch if view is not None else 0)
+            if st in SECURITY_STATUSES and epoch < current_epoch:
+                # An attempt under an epoch the tag has moved on from (a bridge still holding the old key):
+                # it says nothing about the current assignment.
+                return effects
+            if rev.state == "superseded" and st != Status.STALE_REVISION \
+                    and (st not in SECURITY_STATUSES or st == Status.NOT_FOUND):
                 return effects  # a newer revision carries these cards
+            if st == Status.NOT_FOUND:
+                # §10: ambiguous in EVT_RESULT (the bridge lost the transfer, or the tag refused the id):
+                # retried like a link failure, a stop only after repeated NOT_FOUND for this revision.
+                count = rev.not_found_count + 1
+                conn.execute("UPDATE revisions SET not_found_count = ? WHERE tag_id = ? AND revision = ?",
+                             (count, tag_id, revision))
+                if count < NOT_FOUND_ESCALATE:
+                    conn.execute("UPDATE revisions SET state = 'pending', op_id = ?, next_attempt_ts = ?, detail = ?"
+                                 " WHERE tag_id = ? AND revision = ?",
+                                 (self.op_ids.next(), now_ts + self.retry_delay(count - 1),
+                                  f"NOT_FOUND ({count}/{NOT_FOUND_ESCALATE}); re-delivering", tag_id, revision))
+                    return effects
             if st == Status.DISPLAY_STATE_UNKNOWN:
                 # §6/§10: re-deliver the SAME revision (new op id); the tag repeats the refresh.
                 delay = self.retry_initial_s if rev.uncertain_count < self.uncertain_retries \
@@ -971,7 +1011,8 @@ class QueueStore:
                     self._mark_dirty(conn, tag_id, now_iso, force=True)
                 return effects
             if st in SECURITY_STATUSES:
-                detail = (f"stopped: the bridge or tag answered {status_name(st)} for epoch {epoch}; "
+                repeated = f" {NOT_FOUND_ESCALATE} times" if st == Status.NOT_FOUND else ""
+                detail = (f"stopped: the bridge or tag answered {status_name(st)}{repeated} for epoch {epoch}; "
                           "the companion re-syncs the tag's assignment")
                 self._block(conn, tag_id, status_name(st).lower(), epoch, int(st), detail, now_iso)
                 effects.inventory = True
@@ -1019,9 +1060,9 @@ class QueueStore:
                          " stale_jumps = 0, updated_at = ? WHERE tag_id = ?",
                          (rev.revision, digest_hex, now_iso, now_iso, rev.tag_id))
         credential = view.credential_id if view is not None else None
-        if rev.preview_png is not None and credential:
+        if rev.preview_png is not None and credential and rev.revision >= current:  # never over a newer one
             self._enqueue(conn, "previews", credential, {
-                "tag_id": tag_hw_id(rev.tag_id), "revision": rev.revision, "kind": "displayed",
+                "tag_id": tag_hw_id(rev.tag_id), "epoch": rev.epoch, "revision": rev.revision, "kind": "displayed",
                 "png_base64": base64.b64encode(rev.preview_png).decode("ascii"), "delivery_ids": ids},
                 now_iso, dedupe_key=f"{tag_hw_id(rev.tag_id)}:displayed")
 
@@ -1051,8 +1092,8 @@ class QueueStore:
                      (reason, epoch, now_iso, tag_id))
         if not fail_jobs:
             return
-        for row in conn.execute("SELECT * FROM revisions WHERE tag_id = ? AND state IN ('pending', 'sent')",
-                                (tag_id,)).fetchall():
+        for row in conn.execute("SELECT * FROM revisions WHERE tag_id = ? AND state IN ('pending', 'sent')"
+                                " AND epoch <= ?", (tag_id, epoch)).fetchall():
             conn.execute("UPDATE revisions SET state = 'failed', last_status = ?, detail = ?, finished_at = ?"
                          " WHERE tag_id = ? AND revision = ?", (status_name(status_code), detail, now_iso, tag_id,
                                                                 row["revision"]))
@@ -1166,6 +1207,13 @@ class QueueStore:
                              " next_attempt_ts = ? WHERE tag_id = ? AND revision = ?",
                              (epoch, bridge_addr, self.op_ids.next(), now_ts, tag_id, rev["revision"]))
             self._mark_dirty(conn, tag_id, now_iso)
+
+    def cleared_at(self, tag_id: int, epoch: int) -> bool:
+        """Whether this companion already cleared the tag at ``epoch`` (and nothing was shown since)."""
+        with self.db.reading() as conn:
+            row = conn.execute("SELECT cleared_epoch, displayed_revision FROM tag_views WHERE tag_id = ?",
+                               (tag_id,)).fetchone()
+        return row is not None and int(row["cleared_epoch"]) >= epoch and int(row["displayed_revision"]) == 0
 
     def on_cleared(self, tag_id: int, epoch: int) -> None:
         """``clear_tag`` succeeded: the tag shows white at revision 0 of ``epoch`` and the bridge forgot
@@ -1443,7 +1491,7 @@ class QueueStore:
 
 
 __all__ = [
-    "INSTRUCTION_KINDS", "LAYOUT_STATUSES", "LINK_STATUSES", "SECURITY_STATUSES", "STAGES", "STAGE_RANK",
+    "INSTRUCTION_KINDS", "LAYOUT_STATUSES", "LINK_STATUSES", "NOT_FOUND_ESCALATE", "SECURITY_STATUSES", "STAGES", "STAGE_RANK",
     "STALE_REVISION_JUMP", "CommandRow", "ComposeInput", "Effects", "JobRow", "OpResult", "OutboxRow",
     "PageOutcome", "QueueStore", "RevisionRow", "StreamRow", "SyncOutcome", "TagView", "status_name", "ts_iso",
 ]

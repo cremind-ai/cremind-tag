@@ -62,3 +62,36 @@ def test_card_fields() -> None:
     assert card_problem({"title": 5}) == "title is not text"
     assert card_problem({"title": "Fine", "body": None, "link": "https://x/?token=abc"}) is None  # links: compose
     assert card_problem(None) is None
+
+
+@pytest.mark.parametrize(("body", "reason"), [
+    ("Your code:\n482913", "one-time code"),
+    ("Your code is &#52;&#56;&#50;&#57;&#49;&#51;", "one-time code"),
+    ("Login code: **482**913", "one-time code"),
+    ("code:" + " " * 30 + "482913", "one-time code"),
+    ("Authorization: Bearer&nbsp;abcdEFGH12345678", "credential"),
+    ("<b>PIN</b> <i>4321</i>", "one-time code"),
+    ("key: hunter22", "credential"),
+])
+def test_what_the_tag_would_show_is_checked(body: str, reason: str) -> None:
+    """Review regression: the raw text passed while its plain-text rendering showed a code or token."""
+    assert card_problem({"title": "Fine", "body": body}) == f"{reason} in body"
+    assert card_problem({"title": body}) == f"{reason} in title"
+
+
+def test_rendered_forms() -> None:
+    from cremind_tag.daemon.validator import displayed_forms
+
+    assert displayed_forms("plain") == ["plain"]
+    assert "Your code is 482913" in displayed_forms("Your code is &#52;&#56;&#50;&#57;&#49;&#51;")
+
+
+def test_time_zones_are_normalised_for_the_composer() -> None:
+    from cremind_tag.daemon.screens import iana_timezone
+
+    assert iana_timezone("Asia/Ho_Chi_Minh") == "Asia/Ho_Chi_Minh"
+    assert iana_timezone("SE Asia Standard Time") == "Asia/Bangkok"  # a Windows id
+    assert iana_timezone("+07:00") == "GMT+07:00"
+    assert iana_timezone("UTC-5") == "GMT-05:00"
+    assert iana_timezone("") == iana_timezone(None) == "UTC"
+    assert iana_timezone("Mars/Olympus") == "UTC"

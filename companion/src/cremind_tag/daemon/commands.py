@@ -6,11 +6,14 @@ gateway request of a command is a *step* whose ``op_id`` is persisted (in the
 command's ``progress`` and in ``gateway_ops``) BEFORE the request is sent; the
 retained result (``EVT_ASSIGN_RESULT``, ``EVT_PROVISIONED``, ``EVT_RESULT`` of a
 ``TAG_COMMAND`` …) is committed by the event handler before it is ACKed. On
-restart a step re-sends with the same op id — the gateway answers a repeated op
-id from memory (§1.4) — or finds its result already recorded. A gateway reboot
-(new ``boot_id``) or a step timeout re-sends with a new op id; every step is
-idempotent at the device (assigning the same key again, removing an absent
-assignment, clearing a white screen).
+restart, or when no result came within the step's timeout, a step re-sends
+with the SAME op id — the gateway answers a repeated op id from memory (§1.4)
+and does no new work, so a tag away for a day gets one ``CLEAR``, not one per
+timeout — or finds its result already recorded. Only a gateway reboot (new
+``boot_id``: its memory and queue are gone) sends under a new op id. Every step
+is idempotent at the device (assigning the same key again, removing an absent
+assignment, clearing a white screen). An ``EVT_RESULT NOT_FOUND`` is retried
+(§10) and fails the step only after ``NOT_FOUND_ESCALATE`` answers.
 
 Commands touching one tag (``assign_tag`` → ``clear_tag`` of a claim, ``identify``,
 ``refresh_tag``) run one after another in arrival order; mesh changes
@@ -46,6 +49,10 @@ TRANSIENT_STEP = frozenset({Status.TIMEOUT, Status.BUSY, Status.NO_RESOURCES, St
                             Status.CONNECT_FAILED, Status.MESH_SUSPEND_FAILED, Status.MESH_RESUME_FAILED,
                             Status.PROVISIONING_ACTIVE, Status.INTERNAL, Status.INCOMPLETE})
 TRANSIENT_ACK = frozenset({Status.BUSY, Status.NO_RESOURCES, Status.PROVISIONING_ACTIVE})
+NOT_FOUND_ESCALATE = 3
+"""``NOT_FOUND`` results of one step before it fails (§10: ambiguous in ``EVT_RESULT``)."""
+OWNERSHIP_KINDS = frozenset({"assign_tag", "clear_tag"})
+"""Run to completion even past their expiry; Cremind accepts a late ``succeeded`` (connector-api.md)."""
 
 STEP_TIMEOUT_S = {"assign": 60.0, "unassign": 60.0, "provision": 180.0, "configure": 180.0, "remove": 90.0,
                   "clear": 900.0}
@@ -126,6 +133,8 @@ class CommandExecutor:
         svc = self.svc
         self.running[row.command_id] = row.kind
         timeout = None if row.expires_ts is None else max(1.0, row.expires_ts - svc.clock())
+        if row.kind in OWNERSHIP_KINDS:
+            timeout = None  # finished late is better than never: Cremind accepts a late `succeeded`
         status, result, error = "failed", None, None
         log.info("command %s %s: start %s", row.kind, row.command_id, _safe_args(row))
         try:
@@ -177,6 +186,7 @@ class CommandExecutor:
         timeout = timeout or STEP_TIMEOUT_S.get(step, 120.0)
         key = f"op:{step}"
         tries = 0
+        not_found = 0
         delay = svc.settings.retry_initial_s
         while True:
             progress = await self._progress(row)
@@ -186,7 +196,11 @@ class CommandExecutor:
                 if done is not None:
                     if done.status == Status.OK:
                         return done
-                    if _status(done.status) in TRANSIENT_STEP and (attempts is None or tries < attempts):
+                    status = _status(done.status)
+                    if status == Status.NOT_FOUND:
+                        not_found += 1
+                    if (status in TRANSIENT_STEP and (attempts is None or tries < attempts)) \
+                            or (status == Status.NOT_FOUND and not_found < NOT_FOUND_ESCALATE):
                         tries += 1
                         log.info("command %s: step %s answered %s; retrying", row.command_id, step,
                                  status_name(done.status))
@@ -217,9 +231,12 @@ class CommandExecutor:
                 raise CommandError(f"{ack.msg.name} answered {status_name(ack.status)}"
                                    + (f": {ack.text}" if ack.text else ""))
             done = await self._wait_op(int(op_id), generation, timeout)
-            if done is None:  # timed out, or the gateway rebooted: send again under a new op id
-                log.info("command %s: step %s got no result; re-sending", row.command_id, step)
-                await self._save(row, **{key: None})
+            if done is None:
+                if svc.boot_generation != generation:  # the gateway rebooted: its op memory is gone
+                    log.info("command %s: step %s lost in a gateway reboot; sending again", row.command_id, step)
+                    await self._save(row, **{key: None})
+                else:  # still waiting (a tag away): ask again with the same op id, which does no new work
+                    log.info("command %s: step %s has no result yet; still waiting", row.command_id, step)
 
     async def _wait_op(self, op_id: int, generation: int, timeout: float) -> OpResult | None:
         svc = self.svc
@@ -277,6 +294,8 @@ class CommandExecutor:
             svc.request_inventory()  # reports the epoch this companion used; Cremind re-queues above it
             raise CommandError(f"epoch {epoch} is older than epoch {tag.epoch} this companion already used for "
                                f"tag {tag.hw_id}; the inventory now reports it")
+        if not progress.get("assigned") and (tag.epoch, tag.bridge_addr) == (epoch, bridge.addr):
+            progress = await self._save(row, assigned=True)  # already done (an earlier copy of this command)
         if not progress.get("assigned"):
             if svc.secrets is None:
                 raise CommandError("no secret store is available to derive K_epoch")
@@ -311,6 +330,9 @@ class CommandExecutor:
             raise CommandError(f"the tag is already at epoch {tag.epoch} (> {epoch}); the inventory reports it")
         if tag.epoch < epoch or not tag.bridge_addr:
             raise CommandError(f"the tag is assigned at epoch {tag.epoch}, not {epoch}: assign_tag must succeed first")
+        if await svc.db.run(svc.store.cleared_at, tag.tag_id, epoch):
+            # Cremind re-queued a clear this companion already did (its result was late): nothing to send.
+            return {"tag_id": tag.hw_id, "epoch": epoch, "revision": 0, "already_cleared": True}
         bridge = tag.bridge_addr
         result = await self._step(row, "clear", lambda gw, op: gw.tag_command(
             bridge=bridge, tag_id=tag.tag_id, epoch=epoch, cmd=TagCommand.CLEAR, op_id=op))
@@ -358,7 +380,8 @@ class CommandExecutor:
             await svc.db.run(svc.store.set_override, tag.tag_id, None, None)
             svc.wake_scheduler()
             raise
-        await svc.db.run(svc.store.set_override, tag.tag_id, "identify", svc.clock() + svc.settings.identify_hold_s)
+        await svc.db.run(lambda: svc.store.set_override(tag.tag_id, "identify",
+                                                        svc.clock() + svc.settings.identify_hold_s, force=False))
         svc.wake_scheduler()
         return result
 

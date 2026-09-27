@@ -72,6 +72,7 @@ def run_daemon(
     import asyncio
 
     import cremind_tag.connector.settings  # noqa: F401  - registers [cremind]
+    from cremind_tag.connector import ConnectorTlsError
     from cremind_tag.daemon import DaemonConfigError, DaemonOptions, DaemonService
     from cremind_tag.daemon.settings import DaemonSettings
     from cremind_tag.secrets import SecretStoreError
@@ -103,7 +104,7 @@ def run_daemon(
     except KeyboardInterrupt:
         console.print("daemon stopped")
         return
-    except DaemonConfigError as exc:
+    except (DaemonConfigError, ConnectorTlsError) as exc:  # e.g. the configured CA file is missing
         fail(str(exc))
     finally:
         teardown_logging()
@@ -111,9 +112,11 @@ def run_daemon(
         queue = summary.get("queue", {})
         console.print(f"done: queue depth {queue.get('depth')}, revisions {queue.get('revisions')}, "
                       f"outbox {queue.get('outbox') or {}}")
-        failed = {k: v for k, v in summary.get("credentials", {}).items() if v.get("state") == "stopped"}
+        failed = {k: v for k, v in summary.get("credentials", {}).items()
+                  if v.get("state") in ("stopped", "tls_error")}
         if failed:
-            fail("credential(s) stopped: " + "; ".join(f"{k}: {v.get('error')}" for k, v in failed.items()))
+            fail("credential(s) not working: " + "; ".join(f"{k}: {v.get('state')}: {v.get('error')}"
+                                                         for k, v in failed.items()))
         if not summary.get("caught_up"):
             fail(f"not caught up after {max_seconds:.0f}s (see {log_path})")
 

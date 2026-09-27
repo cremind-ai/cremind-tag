@@ -146,3 +146,61 @@ def test_transient_errors_are_retried(make_rig: Any) -> None:
             assert not rig.fake.fail_next["receipts"] and not rig.fake.fail_next["events"]
 
     run_scenario(scenario(), timeout=100)
+
+
+def test_an_epoch_mismatch_rejection_resyncs_and_resends(make_rig: Any) -> None:
+    async def scenario() -> None:
+        async with make_rig() as rig:
+            rig.sim_tag().out_of_range = True
+            svc = await rig.start()
+            did = rig.fake.add_job("alice", rig.hw(), title="Epoch moves under it")
+            await rig.wait(lambda: rig.stage(did) in IN_FLIGHT, what="in flight")
+            worker = svc.content_workers[rig.content_cred.id]
+            syncs = worker.syncs
+            rig.fake.delivery(did)["epoch"] = 2  # Cremind moved the delivery to another epoch meanwhile
+            rig.sim_tag().out_of_range = False
+            await rig.wait(lambda: any(r["delivery_id"] == did and r["reason"] == "epoch_mismatch"
+                                       for r in rig.fake.rejected_log), what="the rejection")
+            await rig.wait(lambda: rig.stage(did) == "displayed", what="re-sent with the new epoch")
+            assert worker.syncs > syncs
+            final = [r for r in rig.fake.receipt_log if r["delivery_id"] == did and r["outcome"] == "displayed"]
+            assert [r["epoch"] for r in final][-1] == 2
+            rig.assert_consistent_receipts()
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_a_tls_error_pauses_and_retries_instead_of_stopping(make_rig: Any) -> None:
+    async def scenario() -> None:
+        async with make_rig(settings={"tls_retry_s": 0.5}) as rig:
+            rig.fake.tls_fail_next = 3  # the first requests meet an untrusted certificate
+            svc = await rig.start()
+            await rig.wait(lambda: any(v.get("state") == "tls_error"
+                                       for v in svc.status_snapshot()["credentials"].values()), what="reported")
+            did = rig.fake.add_job("alice", rig.hw(), title="After the certificate was fixed")
+            await rig.wait(lambda: rig.stage(did) == "displayed", what="displayed after the retry")
+            assert not svc.failed_credentials
+            await rig.wait(lambda: not svc.credential_warnings, what="the warning cleared")
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_jobs_already_final_in_cremind_are_recorded_not_shown(make_rig: Any) -> None:
+    async def scenario() -> None:
+        async with make_rig() as rig:
+            await rig.start()
+            first = rig.fake.add_job("alice", rig.hw(), title="Before the break")
+            await rig.wait(lambda: rig.stage(first) == "displayed", what="first displayed")
+            await rig.stop()
+            cancelled = rig.fake.add_job("alice", rig.hw(), title="Cancelled while away")
+            rig.fake._end(rig.fake.delivery(cancelled), "cancelled", "cancelled by the user")
+            later = rig.fake.add_job("alice", rig.hw(), title="Shown after the break")
+            await rig.start()
+            await rig.wait(lambda: rig.stage(later) == "displayed", what="the live job displayed")
+            assert rig.job_state(cancelled) == ("cancelled", "cancelled")
+            with rig.db() as db, db.reading() as conn:
+                shown = [eval(r[0]) for r in conn.execute("SELECT delivery_ids FROM revisions")]
+            assert all(cancelled not in ids for ids in shown)
+            assert not [r for r in rig.fake.receipt_log if r["delivery_id"] == cancelled]
+
+    run_scenario(scenario(), timeout=100)

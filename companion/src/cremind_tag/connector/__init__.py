@@ -29,6 +29,8 @@ from .models import (
     MalformedResponse,
     ProfileSettings,
     Receipt,
+    ReceiptsResult,
+    Rejection,
     SyncResult,
     TagInfo,
     WhoAmI,
@@ -44,7 +46,7 @@ __all__ = [
     "API_PREFIX", "PERMANENT_ERRORS", "Assignment", "Backoff", "Command", "ConnectorAuthError", "ConnectorClient",
     "ConnectorConflict", "ConnectorError", "ConnectorNotFound", "ConnectorRejected", "ConnectorTlsError",
     "ConnectorUnavailable", "CremindSettings", "Credential", "CredentialError", "CursorExpired", "EventsPage",
-    "HeartbeatResult", "InventoryResult", "Job", "MalformedResponse", "ProfileSettings", "Receipt", "SyncResult",
+    "HeartbeatResult", "InventoryResult", "Job", "MalformedResponse", "ProfileSettings", "Receipt", "ReceiptsResult", "Rejection", "SyncResult",
     "TagInfo", "WhoAmI", "iso", "iso_now", "normalize_base_url", "parse_credential", "parse_tag_hw_id",
     "parse_time", "ssl_context", "tag_hw_id",
 ]

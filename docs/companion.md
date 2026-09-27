@@ -54,7 +54,9 @@ Every setting has an environment override: `CREMIND_TAG_<FIELD>` for
 `CREMIND_TAG_DAEMON_<FIELD>`, `CREMIND_TAG_SECRETS_BACKEND`. State lives in the
 data directory (`paths.data_dir`, `CREMIND_TAG_DATA_DIR`): `companion.sqlite3`,
 `logs/daemon.log`, `daemon-status.json` and, without an OS keyring,
-`secrets.json` (mode 0600).
+`secrets.json` (owner-only: mode 0600, and on Windows a protected ACL for your
+user and SYSTEM — Windows ignores the mode and a file would inherit its
+folder's ACL; several processes may use it at once, under a lock).
 
 ## 2. Connect to Cremind
 
@@ -132,19 +134,44 @@ in the database and resumes at the next start.
 | gateway event handler | `EVT_STAGE`/`EVT_RESULT`/assignment and provisioning results → the queue, committed before the event is ACKed |
 | outbox (per credential) | `accepted`, `receipts`, `previews`, command results, until Cremind confirms |
 
-A 401/403 (revoked, invalid, wrong kind) or a TLS misconfiguration stops only
-the loops of that credential; `daemon status` shows it. Transient failures
-(5xx, network) retry with bounded exponential back-off and jitter
-(`connector_retry_max_s`, 60 s).
+A 401/403 (revoked, invalid, wrong kind) stops only the loops of that
+credential. A TLS configuration error (an untrusted certificate, an `https://`
+URL for a plain-HTTP server, a plain-HTTP URL for a server that moved to HTTPS)
+pauses them and retries every `tls_retry_s` (300 s) — it may be fixed on the
+server side. `daemon status` shows both (`stopped` / `tls_error`). Transient
+failures — 5xx, network errors, and an EOF or reset during the TLS handshake (a
+restarting server, a proxy dropping the connection) — retry with bounded
+exponential back-off and jitter (`connector_retry_max_s`, 60 s).
+
+`POST receipts` may answer `rejected` receipts (`{"delivery_id", "reason"}`):
+`terminal`, `not_owned` and `unknown` are dropped (Cremind already has the final
+word, or the delivery is not this profile's); `epoch_mismatch` — an assignment
+moved the delivery to another epoch — makes the credential re-sync, and the
+sync sends the terminal receipt again with the current epoch. Connector
+timestamps are accepted with or without milliseconds. Previews carry the tag
+`epoch` they were rendered for; a preview Cremind refuses with 409
+`epoch_mismatch` (the tag changed hands or was reassigned) is dropped, not
+retried, and the credential re-syncs.
+
+A command whose claim failed — including a claim Cremind committed although its
+answer was lost (Cremind never offers a claimed command again) — stays
+`claiming` locally and is claimed again, with back-off, before every command
+poll; `409 already_claimed` with status `claimed` then means it is ours.
 
 ## 5. From a job to a screen
 
 **Jobs and the card set.** A job is one Cremind delivery (connector-api.md "Job
 shape"). Per tag the companion keeps the *card set*: the owner's active jobs.
-A `resolved` job removes the cards whose `replace_key` equals its `resolves`;
+Every content job has a `replace_key` (`delivery:<id>` when it shares none). A
+`resolved` job removes the cards whose `replace_key` equals its `resolves`;
 a job with a `replace_key` replaces older cards with that key; `clear` removes
 every older card and blanks the tag until new content arrives. Cremind already
-ended the replaced deliveries, so these need no receipt.
+ended the replaced deliveries, so these need no receipt. A cancel in Cremind
+arrives the same way — a `resolved` job naming the card's key: a card that is on
+a screen still being delivered leaves it (the screen is composed again) and is
+never receipted `displayed`. `events` may also return jobs that are already
+final in Cremind (cancelled or expired while the companion was away): they are
+recorded by their `stage` and never shown.
 
 **Validation (defence in depth).** Before a card joins the set, its `title` and
 `body` are checked with the rules of Cremind's sanitiser: one-time codes next to
@@ -156,8 +183,10 @@ receipted `failed` with detail `refused_by_companion`; its text is never logged.
 **Composition.** The screen is `compose_screen` of the card set (headline,
 up to three more cards, footer "N more updates waiting…", [layout.md](layout.md)),
 `compose_identify` for an `identify` command, `compose_blank` after a `clear`.
-It is composed again only when its inputs change (cards, panel, rotation,
-profile settings, font pack — not the clock) and, even then, sent only when the
+Times are shown in the profile's `timezone` (an IANA name; a Windows zone id
+or a bare UTC offset is mapped defensively, anything else shows UTC). It is
+composed again only when its inputs change (cards, panel, rotation, profile
+settings, font pack — not the clock) and, even then, sent only when the
 layout digest differs from the current revision's. A change that only moves a
 progress bar waits until `progress_cadence_s` (profile setting, 300 s) after
 the previous revision. A tag nothing was shown on yet, with no cards, is left
@@ -189,11 +218,16 @@ layout is at most `LAYOUT_SERIAL_MAX` (4000) bytes.
 | `REVISION_CONFLICT` | compose again under a new revision |
 | `SUPERSEDED` | nothing (a newer revision carries the cards) |
 | link failures: `TIMEOUT`, `DISCONNECTED`, `CONNECT_FAILED`, `MESH_SUSPEND_FAILED`, `MESH_RESUME_FAILED`, `INCOMPLETE`, `DIGEST_MISMATCH`, `PANEL_ERROR`, `REFRESH_TIMEOUT`, `STORAGE_ERROR`, `INTERNAL`, `CANCELLED` | same revision, new op id, exponential back-off (`retry_initial_s` 5 s … `retry_max_s` 600 s) until the jobs expire (`expired`) |
-| `AUTH_FAILED`, `SECURITY_CONFIG`, `NOT_ASSIGNED`, `STALE_EPOCH`, `VERSION_MISMATCH`, `NOT_FOUND` | stop the tag's work of that epoch: its unfinished jobs are receipted `failed` with the status code and a detail, the tag is **blocked**, and the assignment is re-synced (`sync` + `inventory`); a successful `assign_tag` unblocks it |
+| `NOT_FOUND` | ambiguous in `EVT_RESULT` (the bridge lost the transfer, or the tag refused its id, §10): retried like a link failure; the third `NOT_FOUND` for one revision is treated as below. A later `OK` for that revision is still recorded as displayed and lifts the block |
+| `AUTH_FAILED`, `SECURITY_CONFIG`, `NOT_ASSIGNED`, `STALE_EPOCH`, `VERSION_MISMATCH` (and a repeated `NOT_FOUND`) | stop the tag's work of that epoch: its unfinished jobs of that epoch or older are receipted `failed` with the status code and a detail, the tag is **blocked**, and the assignment is re-synced (`sync` + `inventory`); a successful `assign_tag` unblocks it. Such a result for an older attempt, or for an epoch below the tag's current one (a bridge still holding an old key), is ignored |
 | `FONTPACK_MISMATCH` | the revision's jobs `failed`; the tag waits (blocked) until the bridge reports the companion's pack, `install_fontpack` succeeds or the daemon restarts |
 | `INVALID`, `TOO_LARGE`, `UNSUPPORTED` | the revision and the cards it shows `failed` |
 | a revision `sent` without any result for `result_timeout_s` (30 min) | sent again (a result lost from the gateway's retention ring, §1.2) |
 | gateway `boot_id` changed (also across companion restarts) | every sent-but-unresolved revision is sent again |
+
+The gateway emits exactly one `EVT_RESULT` per `update_id`, and a `LAYOUT_COMMIT`
+repeated after a lost `LAYOUT_STATUS` answers `DUPLICATE` (never `NOT_FOUND`)
+— docs/protocol.md §10; the simulator follows both rules.
 
 **The `STALE_REVISION` rule.** The refusal says only that the tag (or bridge)
 has seen a higher revision than this database knows — after a restored or lost
@@ -211,6 +245,10 @@ must go first). `assign_tag` derives `K_epoch` from the tag secret, sends
 and revisions to the new epoch/bridge, then `UNASSIGN_TAG` on the previous
 bridge. `clear_tag` sends `TAG_COMMAND CLEAR` at the new epoch and succeeds only
 on `EVT_RESULT OK`; the tag is then white at revision 0 and content resumes.
+While the tag is away, the step's timeout (15 min) re-sends the request with
+the **same** op id — the gateway answers from memory and queues nothing new, so
+the bridge holds one `CLEAR`, not one per timeout; only a gateway reboot sends
+under a new op id.
 
 ## 6. Hardware commands
 
@@ -220,7 +258,7 @@ on `EVT_RESULT OK`; the tag is then white at revision 0 and content resumes.
 | `provision_bridge {uuid, name}` | `PROVISION` → `EVT_PROVISIONED` → `CONFIGURE_NODE` → `EVT_NODE_CONFIGURED`; inventory updated |
 | `configure_bridge {hw_id}` | `CONFIGURE_NODE` → `EVT_NODE_CONFIGURED` |
 | `remove_bridge {hw_id}` | `REMOVE_NODE` → `EVT_NODE_REMOVED`; the bridge leaves the inventory |
-| `identify {hw_id}` | a bridge: `IDENTIFY_NODE`; a tag: the identify screen as a new revision, held `identify_hold_s` (60 s) after it is displayed |
+| `identify {hw_id}` | a bridge: `IDENTIFY_NODE`; a tag: the identify screen as one new revision, held `identify_hold_s` (60 s) after it is displayed, then the regular screen returns |
 | `refresh_tag {tag_id}` | the current screen as a new revision; succeeds when it is displayed |
 | `assign_tag {tag_id, bridge_hw_id, epoch}` | see §5 |
 | `clear_tag {tag_id, epoch}` | see §5 |
@@ -228,6 +266,10 @@ on `EVT_RESULT OK`; the tag is then white at revision 0 and content resumes.
 | `collect_diagnostics {}` | companion version/host, queue statistics, blocked tags, gateway `INFO` counters, bridge info |
 
 Commands of one tag run in arrival order; mesh changes are serialised.
+`assign_tag` and `clear_tag` run to completion even past their expiry — Cremind
+accepts a late `succeeded` — and a `clear_tag` Cremind re-queued for a clear this
+companion already performed at that epoch succeeds at once
+(`already_cleared`) without refreshing the panel again.
 
 ## 7. Durability
 
@@ -300,7 +342,8 @@ the tail of the daemon logs.
 | Symptom | Look at |
 |---|---|
 | `daemon status`: credential `stopped` with `credential_revoked` | the credential was revoked in Cremind: create a new one, `connect add-…`, restart |
-| TLS error "not trusted" | `connect server URL --ca-file CA.pem` (the CA Cremind's HTTPS setup exports) |
+| TLS error "not trusted" (`tls_error` in `daemon status`) | `connect server URL --ca-file CA.pem` (the CA Cremind's HTTPS setup exports); the daemon retries every 5 min |
+| doctor: "secrets file … grants access to …" | the secrets file is readable by other users (an old file, or a data directory outside your profile): the next write fixes it, or `CREMIND_TAG_DATA_DIR` under your profile |
 | "now serves HTTPS" | `connect server https://…` |
 | a tag `blocked (stale_epoch)` / `(not_assigned)` | the tag's key is older than its epoch: Cremind's re-queued `assign_tag` unblocks it; else re-assign it in Cremind (admin → Tags hardware → Assign) |
 | a tag `blocked (not_enrolled)` | Cremind routes jobs to a tag this database does not know (a lost database): enroll/register it again |

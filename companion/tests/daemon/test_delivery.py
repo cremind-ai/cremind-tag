@@ -278,3 +278,111 @@ def test_progress_updates_follow_the_cadence(make_rig: Any) -> None:
             rig.assert_consistent_receipts()
 
     run_scenario(scenario(), timeout=100)
+
+
+def test_a_lost_layout_status_is_not_a_failure(make_rig: Any) -> None:
+    """Review regression: a lost LAYOUT_STATUS OK used to come back as EVT_RESULT NOT_FOUND and block the tag."""
+
+    async def scenario() -> None:
+        async with make_rig() as rig:
+            rig.sim.mesh.faults.drop_status = 1
+            await rig.start()
+            older = rig.fake.add_job("alice", rig.hw(), title="Older card")
+            await displayed(rig, older)
+            rig.sim.mesh.faults.drop_status = 1  # the next delivery's OK is lost once
+            newer = rig.fake.add_job("alice", rig.hw(), title="Newer card")
+            await displayed(rig, older, newer)
+            assert rig.sim.bridge(0).counters["commit_repeats"] >= 1
+            assert rig.svc is not None and rig.svc.store.get_view(rig.tag_id()).blocked_reason is None
+            assert not [r for r in rig.fake.receipt_log if r.get("outcome") == "failed"]
+            assert all(r["last_status"] in ("OK", None) for r in revisions(rig))
+            later = rig.fake.add_job("alice", rig.hw(), title="Still delivered")
+            await displayed(rig, later)
+            rig.assert_consistent_receipts()
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_no_busy_loop_while_the_gateway_is_away(make_rig: Any) -> None:
+    async def scenario() -> None:
+        async with make_rig(settings={"scan_interval_s": 1.0}) as rig:
+            svc = await rig.start(gateway_url="socket://127.0.0.1:9")  # nothing listens there
+            passes = 0
+            original = svc.scheduler.pass_once
+
+            async def counting() -> float | None:
+                nonlocal passes
+                passes += 1
+                return await original()
+
+            svc.scheduler.pass_once = counting  # type: ignore[method-assign]
+            rig.fake.add_job("alice", rig.hw(), title="Waits for the gateway")
+            await rig.wait(lambda: any(r["state"] == "pending" for r in revisions(rig)), what="a pending revision")
+            before = passes
+            await asyncio.sleep(3.0)
+            assert passes - before <= 6, passes - before  # about one per scan interval (plus wake-ups)
+            assert svc.gateway_hw_id is None  # never connected: no gateway id invented from the URL
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_gateway_id_is_derived_per_session(make_rig: Any) -> None:
+    from cremind_tag.cli._hardware import gateway_hw_id
+
+    async def scenario() -> None:
+        async with make_rig() as rig:
+            svc = await rig.start()
+            await rig.wait(lambda: svc.gateway_hw_id is not None, what="the first session")
+            assert svc.gateway_hw_id == gateway_hw_id(rig.sim.gateway_url)
+            beat = await svc.hardware.build_heartbeat() if svc.hardware else {}
+            assert {"hw_id": svc.gateway_hw_id, "kind": "gateway", "status": "ok"} in beat["devices"]
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_a_cremind_cancel_resolves_a_card_that_is_on_its_way(make_rig: Any) -> None:
+    """A cancel arrives as a `resolved` job naming the card's replace_key: the card leaves the screen being
+    delivered and is never receipted displayed."""
+
+    async def scenario() -> None:
+        async with make_rig() as rig:
+            rig.sim_tag().out_of_range = True
+            await rig.start()
+            keep = rig.fake.add_job("alice", rig.hw(), title="Stays")
+            gone = rig.fake.add_job("alice", rig.hw(), title="Cancelled before it was shown")
+            assert rig.fake.delivery(gone)["replace_key"] == f"delivery:{gone}"
+            await rig.wait(lambda: any(gone in eval(r["delivery_ids"]) and r["state"] == "sent"
+                                       for r in revisions(rig)), what="the card on its way")
+            resolving = rig.fake.cancel(gone)
+            await rig.wait(lambda: rig.job_state(gone)[0] == "resolved", what="the cancel applied")
+            rig.sim_tag().out_of_range = False
+            await displayed(rig, keep, resolving)
+            last = max(revisions(rig), key=lambda r: r["revision"])
+            assert gone not in eval(last["delivery_ids"]) and keep in eval(last["delivery_ids"])
+            assert rig.stage(gone) == "cancelled"
+            assert not [r for r in rig.fake.receipt_log if r["delivery_id"] == gone and r.get("outcome")]
+            rig.assert_consistent_receipts()
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_previews_carry_their_epoch_and_a_refusal_is_not_retried(make_rig: Any) -> None:
+    async def scenario() -> None:
+        async with make_rig() as rig:
+            svc = await rig.start()
+            first = rig.fake.add_job("alice", rig.hw(), title="Previewed")
+            await displayed(rig, first)
+            await rig.wait(lambda: (rig.hw(), "displayed") in rig.fake.previews, what="displayed preview")
+            assert {p.get("epoch") for p in rig.fake.preview_log} == {1}
+            rig.fake.tag(rig.hw())["epoch"] = 5  # Cremind moved on (an assignment the companion has not run yet)
+            worker = svc.content_workers[rig.content_cred.id]
+            syncs = worker.syncs
+            rig.fake.add_job("alice", rig.hw(), title="Previewed at the old epoch")
+            await rig.wait(lambda: any(p.get("refused") == "epoch_mismatch" for p in rig.fake.preview_log),
+                           what="a refused preview")
+            await rig.wait(lambda: worker.syncs > syncs, what="the re-sync")
+            with rig.db() as db, db.reading() as conn:
+                rows = conn.execute("SELECT COUNT(*) FROM outbox WHERE kind = 'previews'").fetchone()[0]
+            assert rows == 0  # dropped, not retried forever (and not kept as dead)
+
+    run_scenario(scenario(), timeout=100)

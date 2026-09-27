@@ -20,7 +20,8 @@ the scheduler's comparisons):
   scheduler's flags (dirty, force, blank, identify override, block reason).
 - ``revisions`` — every composed screen: layout, digests, the deliveries it
   shows, the ``op_id`` persisted BEFORE the ``DELIVER_LAYOUT`` that uses it,
-  attempts and the retry time.
+  attempts and the retry time (v3: ``not_found_count``, consecutive
+  ``EVT_RESULT NOT_FOUND`` answers, docs/protocol.md §10).
 - ``outbox`` — receipts, accepted acknowledgements, previews and command
   results, kept until Cremind confirms them.
 - ``commands`` — hardware commands, persisted before they are claimed; the
@@ -202,7 +203,14 @@ CREATE TABLE daemon_state (
 );
 """
 
-QUEUE_MIGRATIONS: tuple[Migration, ...] = (Migration(2, "delivery_queue", _V2_QUEUE),)
+_V3_NOT_FOUND = """
+ALTER TABLE revisions ADD COLUMN not_found_count INTEGER NOT NULL DEFAULT 0;
+"""
+
+QUEUE_MIGRATIONS: tuple[Migration, ...] = (
+    Migration(2, "delivery_queue", _V2_QUEUE),
+    Migration(3, "revision_not_found_count", _V3_NOT_FOUND),
+)
 """The queue's schema versions (append new ones; never edit an applied migration)."""
 
 
