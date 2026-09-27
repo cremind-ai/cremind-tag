@@ -4,8 +4,9 @@
  *
  * - tag_core_conv: bridge conversations scripted with the companion's Python
  *   reference (gen_conversation.py -> conversation.h), replayed byte for byte;
- * - tag_core_fixtures: protocol/fixtures session.json (handshake, records,
- *   tampering), tag_txn.json (FRAME_BEGIN table, boot rule) and render.json
+ * - tag_core_fixtures: protocol/fixtures session.json (handshake over the
+ *   fixture CAPS, records, tampering, a relayed CAPS), tag_txn.json
+ *   (FRAME_BEGIN table, boot rule) and render.json
  *   (frame digests over the fixture's plane bytes), driven by a C bridge built
  *   on the bridge role of ctag_session;
  * - tag_core_rules: pacing, timeouts, protocol violations, storage and panel
@@ -83,6 +84,7 @@ static void start(uint32_t tag_id, const uint8_t *secret, uint8_t planes, uint16
 		.plane_flags = plane_flags,
 		.flags = panel_ok ? TAG_CFG_PANEL_OK : 0u,
 	};
+	fake_caps_for(tag_id, planes, plane_len, plane_flags);
 	tag_core_init(&core, &cfg);
 }
 
@@ -116,6 +118,7 @@ static void run_conv(const struct conv *cv)
 	}
 	start(CONV_TAG_ID, conv_secret, cv->frame->planes, cv->frame->plane_len,
 	      cv->frame->plane_flags, cv->panel_ok);
+	memcpy(fake_caps, cv->caps, sizeof(fake_caps));
 
 	for (size_t i = 0; i < cv->count; i++) {
 		const struct conv_step *s = &cv->steps[i];
@@ -262,6 +265,16 @@ ZTEST(tag_core_conv, test_auth_failure)
 	zassert_equal(core.s.state, CTAG_SESSION_FAILED);
 }
 
+/* 5.4: the bridge read a CAPS a relay had rewritten (plane_flags): its
+ * transcript differs, AUTH fails, the panel is never touched. */
+ZTEST(tag_core_conv, test_relayed_caps_fail_auth)
+{
+	run_conv(&conv_caps_relayed);
+	zassert_equal(core.auth_failures, 1);
+	zassert_equal(core.s.state, CTAG_SESSION_FAILED);
+	zassert_equal(fake_panel.begin + fake_panel.write + fake_panel.commit, 0);
+}
+
 ZTEST(tag_core_conv, test_disconnect_restarts_from_zero)
 {
 	run_conv(&conv_restart_from_zero);
@@ -400,15 +413,18 @@ static int recv_msg(const uint8_t **msg, size_t *len)
 	return -1;
 }
 
-static void expect_ctrl_error(uint8_t status)
+/* ERROR{status, stored_epoch}: the tag's stored epoch is always filled (5.4). */
+static void expect_ctrl_error(uint8_t status, uint32_t stored_epoch)
 {
 	const uint8_t *m;
 	size_t len;
 
 	zassert_equal(recv_msg(&m, &len), TAG_CHR_CTRL);
-	zassert_equal(len, 2u);
+	zassert_equal(len, CTAG_SESSION_ERROR_LEN);
 	zassert_equal(m[0], CTAG_CTRL_ERROR);
 	zassert_equal(m[1], status, "ERROR{%u}, expected %u", m[1], status);
+	zassert_equal(ctag_get_le32(&m[2]), stored_epoch, "stored epoch %u, expected %u",
+		      ctag_get_le32(&m[2]), stored_epoch);
 	zassert_true(tag_core_closing(&core));
 }
 
@@ -462,7 +478,9 @@ static uint8_t handshake(uint32_t epoch, struct ctag_ctrl_challenge *seen)
 	zassert_ok(ctag_session_bridge_hello(&br.s, core.cfg.tag_id, epoch, k, nonce_b, hello));
 	send_msg(TAG_CHR_CTRL, hello, sizeof(hello), true);
 	zassert_equal(recv_msg(&m, &len), TAG_CHR_CTRL);
-	st = ctag_session_bridge_challenge(&br.s, m, len, seen != NULL ? seen : &ch, auth);
+	/* The bridge hashes the CAPS it read: the one the tag serves. */
+	st = ctag_session_bridge_challenge(&br.s, fake_caps, sizeof(fake_caps), m, len,
+					   seen != NULL ? seen : &ch, auth);
 	if (st != CTAG_STATUS_OK) {
 		return st;
 	}
@@ -532,6 +550,8 @@ static void session_fixture_setup(void)
 	put_record(&r);
 	put_epoch(V_SESSION_TAG_ID, 2);
 	start(V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, 1, 15000, 0x01, true);
+	zassert_equal(V_SESSION_CAPS_LEN, sizeof(fake_caps));
+	memcpy(fake_caps, V_SESSION_CAPS, sizeof(fake_caps)); /* the fixture tag's CAPS */
 	link_up();
 }
 
@@ -625,7 +645,7 @@ ZTEST(tag_core_fixtures, test_session_tampered_records)
 		}
 		zassert_equal(core.s.rx.counter, v->counter, "%s", v->name);
 		send_msg(TAG_CHR_DATA, v->record, v->len, true);
-		expect_ctrl_error(CTAG_STATUS_AUTH_FAILED);
+		expect_ctrl_error(CTAG_STATUS_AUTH_FAILED, V_SESSION_EPOCH);
 	}
 	zassert_true(tested >= 5, "B2T tampered records: %d", tested);
 }
@@ -642,8 +662,43 @@ ZTEST(tag_core_fixtures, test_session_bad_mac_b)
 	zassert_equal(recv_msg(&m, &len), TAG_CHR_CTRL);
 	memcpy(&auth[1], V_SESSION_BAD_MAC_B, CTAG_TAG_MAC_LEN);
 	feed_ctrl(auth, sizeof(auth));
-	expect_ctrl_error(CTAG_STATUS_AUTH_FAILED);
+	expect_ctrl_error(CTAG_STATUS_AUTH_FAILED, 2u);
 	zassert_equal(get_epoch(), 2, "a failed AUTH never stores its epoch");
+}
+
+/* session.json caps_relayed: the AUTH of a bridge that read a rewritten CAPS. */
+ZTEST(tag_core_fixtures, test_session_caps_relayed)
+{
+	const uint8_t *m;
+	size_t len;
+
+	session_fixture_setup();
+	fake_set_nonce(V_SESSION_NONCE_T, V_SESSION_NONCE_T_LEN);
+	feed_ctrl(V_SESSION_HELLO, V_SESSION_HELLO_LEN);
+	zassert_equal(recv_msg(&m, &len), TAG_CHR_CTRL);
+	zassert_mem_equal(m, V_SESSION_CHALLENGE, len);
+	feed_ctrl(V_SESSION_RELAYED_AUTH, V_SESSION_RELAYED_AUTH_LEN);
+	expect_ctrl_error(CTAG_STATUS_AUTH_FAILED, 2u);
+	zassert_equal(get_epoch(), 2, "never authenticated: the epoch is not stored");
+	zassert_equal(core.auth_failures, 1);
+}
+
+/* session.json stale_epoch: the fixture HELLO (epoch 3) to a tag storing 4. */
+ZTEST(tag_core_fixtures, test_session_stale_epoch_error)
+{
+	const uint8_t *m;
+	size_t len;
+
+	session_fixture_setup();
+	put_epoch(V_SESSION_TAG_ID, V_SESSION_STALE_STORED_EPOCH);
+	start(V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, 1, 15000, 0x01, true);
+	memcpy(fake_caps, V_SESSION_CAPS, sizeof(fake_caps));
+	link_up();
+	feed_ctrl(V_SESSION_HELLO, V_SESSION_HELLO_LEN);
+	zassert_equal(recv_msg(&m, &len), TAG_CHR_CTRL);
+	zassert_equal(len, V_SESSION_STALE_ERROR_LEN);
+	zassert_mem_equal(m, V_SESSION_STALE_ERROR, len, "ERROR differs from session.json");
+	zassert_true(tag_core_closing(&core));
 }
 
 static void txn_store(const struct v_txn_rec *v)
@@ -814,9 +869,11 @@ ZTEST(tag_core_rules, test_three_auth_failures_skip_a_window)
 						     (const uint8_t[16]){1}, hello));
 		send_msg(TAG_CHR_CTRL, hello, sizeof(hello), true);
 		zassert_equal(recv_msg(&m, &len), TAG_CHR_CTRL);
-		zassert_equal(ctag_session_bridge_challenge(&br.s, m, len, &ch, auth), 0);
+		zassert_equal(ctag_session_bridge_challenge(&br.s, fake_caps, sizeof(fake_caps), m, len,
+							    &ch, auth),
+			      0);
 		send_msg(TAG_CHR_CTRL, auth, sizeof(auth), true);
-		expect_ctrl_error(CTAG_STATUS_AUTH_FAILED);
+		expect_ctrl_error(CTAG_STATUS_AUTH_FAILED, 0u);
 		tag_core_link_down(&core);
 	}
 	zassert_true(tag_core_take_skip(&core), "5.4: skip the next wake window");
@@ -871,7 +928,7 @@ ZTEST(tag_core_rules, test_record_without_credit)
 	send_record(CTAG_REC_CMD, cmd, sizeof(cmd), false);
 	send_record(CTAG_REC_CMD, cmd, sizeof(cmd), false);
 	tag_core_poll(&core);
-	expect_ctrl_error(CTAG_STATUS_INVALID);
+	expect_ctrl_error(CTAG_STATUS_INVALID, 1u);
 }
 
 ZTEST(tag_core_rules, test_ctrl_after_established)
@@ -880,7 +937,7 @@ ZTEST(tag_core_rules, test_ctrl_after_established)
 
 	rules_established();
 	send_msg(TAG_CHR_CTRL, hello, sizeof(hello), true);
-	expect_ctrl_error(CTAG_STATUS_INVALID);
+	expect_ctrl_error(CTAG_STATUS_INVALID, 1u);
 }
 
 ZTEST(tag_core_rules, test_data_before_auth)
@@ -889,7 +946,7 @@ ZTEST(tag_core_rules, test_data_before_auth)
 
 	rules_setup();
 	send_msg(TAG_CHR_DATA, rec, sizeof(rec), true);
-	expect_ctrl_error(CTAG_STATUS_INVALID);
+	expect_ctrl_error(CTAG_STATUS_INVALID, 0u);
 }
 
 ZTEST(tag_core_rules, test_malformed_record_plaintext)
@@ -898,7 +955,7 @@ ZTEST(tag_core_rules, test_malformed_record_plaintext)
 
 	rules_established();
 	send_record(CTAG_REC_FRAME_BEGIN, bad, sizeof(bad), true);
-	expect_ctrl_error(CTAG_STATUS_INVALID);
+	expect_ctrl_error(CTAG_STATUS_INVALID, 1u);
 }
 
 ZTEST(tag_core_rules, test_corrupt_record_reports_storage_error)
@@ -941,10 +998,18 @@ ZTEST(tag_core_rules, test_intent_write_failure)
 
 ZTEST(tag_core_rules, test_epoch_write_failure)
 {
+	struct ctag_ctrl_challenge seen;
+	uint8_t st = 0;
+	uint32_t stored = 1u;
+
 	rules_setup();
 	fake_store.fail_write = true;
-	zassert_equal(handshake(1, NULL), CTAG_STATUS_STORAGE_ERROR);
+	zassert_equal(handshake(1, &seen), CTAG_STATUS_STORAGE_ERROR);
 	zassert_true(tag_core_closing(&core));
+	/* ERROR{STORAGE_ERROR} still reports the epoch the tag kept (0). */
+	zassert_true(ctag_session_error_unpack(br.ctrl_buf, CTAG_SESSION_ERROR_LEN, &st, &stored));
+	zassert_equal(st, CTAG_STATUS_STORAGE_ERROR);
+	zassert_equal(stored, 0u);
 }
 
 ZTEST(tag_core_rules, test_panel_failures)

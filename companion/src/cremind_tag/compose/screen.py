@@ -25,7 +25,11 @@ right); each text is aligned by its own paragraph direction.
 The screen must stay within ``MAX_BYTES`` = ``min(LAYOUT_HARD_MAX,
 LAYOUT_SERIAL_MAX)`` bytes (4000: DELIVER_LAYOUT's CBOR envelope has to fit one
 serial frame), ``LAYOUT_MAX_GLYPHS`` glyphs and ``LAYOUT_MAX_COMMANDS``
-commands. The body gets whatever budget the rest leaves (fewer lines, down to
+commands, and within the render-cost bounds of §4.3 (``LAYOUT_MAX_QR`` QR
+codes, ``LAYOUT_MAX_LINE_STEPS`` line steps, line endpoints inside the canvas
+box): the composer draws at most one QR code and three separator lines inside
+the canvas (at most 3 x 2048 steps), and its budget refuses anything more. The
+body gets whatever budget the rest leaves (fewer lines, down to
 none); beyond that the composer walks the
 fixed `PLANS` list — fewer list rows, fewer and then smaller title lines —
 and takes the first plan that fits. Everything is a pure function of the
@@ -52,6 +56,8 @@ from cremind_tag.protocol.ids import (
     LAYOUT_HARD_MAX,
     LAYOUT_MAX_COMMANDS,
     LAYOUT_MAX_GLYPHS,
+    LAYOUT_MAX_LINE_STEPS,
+    LAYOUT_MAX_QR,
     LAYOUT_SERIAL_MAX,
     Color,
     Icon,
@@ -69,6 +75,7 @@ from cremind_tag.protocol.layout import (
     check_panel,
     check_strikes,
     encode_layout,
+    line_steps,
     qr_code,
 )
 from cremind_tag.protocol.layout import Icon as IconCmd
@@ -151,6 +158,8 @@ class _Screen:
         self.commands: list[Command] = []
         self.glyphs = 0
         self.bytes = LayoutHeader.LEN
+        self.qrs = 0
+        self.line_steps = 0
         self.red = panel.planes == 2
         self.uses_red = False
         self.unsupported: dict[str, None] = {}
@@ -166,17 +175,27 @@ class _Screen:
     def cost(cmds: Sequence[Command]) -> tuple[int, int, int]:
         return (sum(len(c.glyphs) for c in cmds if isinstance(c, Glyphs)), len(cmds), sum(_cost(c) for c in cmds))
 
+    @staticmethod
+    def render_cost(cmds: Sequence[Command]) -> tuple[int, int]:
+        """QR commands and LINE steps (the render-cost bounds of §4.3)."""
+        return (sum(isinstance(c, Qr) for c in cmds), sum(line_steps(c) for c in cmds if isinstance(c, Line)))
+
     def fits(self, cmds: Sequence[Command]) -> bool:
         g, n, b = self.cost(cmds)
         rg, rn, rb = self.room()
-        return g <= rg and n <= rn and b <= rb
+        qrs, steps = self.render_cost(cmds)
+        return (g <= rg and n <= rn and b <= rb and self.qrs + qrs <= LAYOUT_MAX_QR
+                and self.line_steps + steps <= LAYOUT_MAX_LINE_STEPS)
 
     def add(self, cmds: Sequence[Command]) -> None:
         if not self.fits(cmds):
             raise _Budget
         g, n, b = self.cost(cmds)
+        qrs, steps = self.render_cost(cmds)
         self.glyphs += g
         self.bytes += b
+        self.qrs += qrs
+        self.line_steps += steps
         self.commands.extend(cmds)
         if any(getattr(c, "color", Color.BLACK) == Color.RED for c in cmds):
             self.uses_red = True

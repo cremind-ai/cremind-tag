@@ -74,8 +74,26 @@ static bool bad_color(uint8_t color)
 	return color > CTAG_COLOR_RED;
 }
 
-/* Field bounds of 4.3 in field order. */
-static uint8_t check_fields(const struct ctag_layout_command *cmd)
+/* 4.3 render cost: a LINE endpoint coordinate lies in [-side, 2 * side). */
+static bool in_box(int16_t v, uint16_t side)
+{
+	return (int32_t)v >= -(int32_t)side && (int32_t)v < 2 * (int32_t)side;
+}
+
+/* Bresenham steps of a LINE: max(|dx|, |dy|) + 1 (at most 6144 in the box). */
+static uint32_t line_steps(const struct ctag_layout_cmd_line *l)
+{
+	int32_t dx = (int32_t)l->x1 - l->x0;
+	int32_t dy = (int32_t)l->y1 - l->y0;
+
+	dx = dx < 0 ? -dx : dx;
+	dy = dy < 0 ? -dy : dy;
+	return (uint32_t)(dx > dy ? dx : dy) + 1u;
+}
+
+/* Field bounds of 4.3 in field order (LINE endpoints: [-W, 2W) x [-H, 2H)). */
+static uint8_t check_fields(const struct ctag_layout_command *cmd,
+			    const struct ctag_layout_header *h)
 {
 	uint8_t color;
 	uint8_t i;
@@ -91,7 +109,9 @@ static uint8_t check_fields(const struct ctag_layout_command *cmd)
 		color = cmd->u.icon.color;
 		break;
 	case CTAG_LAYOUT_CMD_LINE:
-		if (cmd->u.line.width < 1u || cmd->u.line.width > 8u) {
+		if (!in_box(cmd->u.line.x0, h->width) || !in_box(cmd->u.line.y0, h->height) ||
+		    !in_box(cmd->u.line.x1, h->width) || !in_box(cmd->u.line.y1, h->height) ||
+		    cmd->u.line.width < 1u || cmd->u.line.width > 8u) {
 			return CTAG_STATUS_INVALID;
 		}
 		color = cmd->u.line.color;
@@ -152,6 +172,8 @@ uint8_t ctag_layout_validate(const uint8_t *data, size_t len, ctag_layout_has_st
 	struct ctag_layout_iter it;
 	struct ctag_layout_command cmd;
 	uint32_t glyphs = 0u;
+	uint32_t qrs = 0u;
+	uint32_t steps = 0u;
 	uint8_t st;
 
 	if (len > CTAG_LAYOUT_HARD_MAX) {
@@ -173,15 +195,25 @@ uint8_t ctag_layout_validate(const uint8_t *data, size_t len, ctag_layout_has_st
 	while (it.left > 0u) {
 		st = read_cmd(data, len, &it.pos, &cmd);
 		if (st == CTAG_STATUS_OK) {
-			st = check_fields(&cmd);
+			st = check_fields(&cmd, &h);
 		}
 		if (st != CTAG_STATUS_OK) {
 			return st;
 		}
+		/* Running totals: glyphs, then the render cost (QR count, LINE steps). */
 		if (cmd.op == CTAG_LAYOUT_CMD_GLYPHS) {
 			glyphs += cmd.u.glyphs.count;
 			if (glyphs > CTAG_LAYOUT_MAX_GLYPHS) {
 				return CTAG_STATUS_TOO_LARGE;
+			}
+		} else if (cmd.op == CTAG_LAYOUT_CMD_QR) {
+			if (++qrs > CTAG_LAYOUT_MAX_QR) {
+				return CTAG_STATUS_INVALID;
+			}
+		} else if (cmd.op == CTAG_LAYOUT_CMD_LINE) {
+			steps += line_steps(&cmd.u.line);
+			if (steps > CTAG_LAYOUT_MAX_LINE_STEPS) {
+				return CTAG_STATUS_INVALID;
 			}
 		}
 		it.left--;

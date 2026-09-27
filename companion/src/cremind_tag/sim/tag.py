@@ -3,7 +3,8 @@
 The tag wakes every ``TAG_WAKE_PERIOD_MS ± TAG_WAKE_JITTER_MS`` (uniform) and
 advertises for ``TAG_ADV_WINDOW_MS``. A bridge that connects gets the real
 session: CAPS read, the plaintext handshake on CTRL (``protocol.session`` key
-schedule and MACs), then AES-CCM records on DATA/STATUS with credits, all
+schedule and MACs; the transcript binds the CAPS bytes the tag serves; every
+``ERROR`` carries the stored epoch), then AES-CCM records on DATA/STATUS with credits, all
 fragmented at ``ATT_VALUE_MAX`` by ``protocol.fragments``.
 
 Display transaction (§6) on a persisted record (``TagNvs``, the tag's NVS):
@@ -424,7 +425,8 @@ class _TagSession:
         tag.result_pending = False
 
     def error(self, status: Status) -> None:
-        self.send_ctrl(bytes([CtrlMsg.ERROR]) + CtrlError(status).pack())
+        """``ERROR{status, stored_epoch}`` (every ERROR carries the stored epoch, §5.4), then disconnect."""
+        self.send_ctrl(bytes([CtrlMsg.ERROR]) + CtrlError(status, self.tag.nvs.stored_epoch).pack())
         self.tag.stats[f"error_{status.name}"] += 1
         raise _EndSession
 
@@ -436,10 +438,10 @@ class _TagSession:
         try:
             if kind == CtrlMsg.HELLO and self.hello is None:
                 hello = CtrlHello.unpack(body)
+                if hello.tag_id != tag.tag_id:  # §5.4 order: malformed, tag_id, proto, epoch
+                    self.error(Status.NOT_FOUND)
                 if hello.proto != PROTO_VERSION:
                     self.error(Status.VERSION_MISMATCH)
-                if hello.tag_id != tag.tag_id:
-                    self.error(Status.NOT_FOUND)
                 if hello.epoch < nvs.stored_epoch:
                     tag.stats["stale_epoch_refused"] += 1
                     self.error(Status.STALE_EPOCH)
@@ -452,9 +454,13 @@ class _TagSession:
                 self.challenge_msg = bytes([CtrlMsg.CHALLENGE]) + challenge.pack()
                 self.send_ctrl(self.challenge_msg)
             elif kind == CtrlMsg.AUTH and self.hello is not None and self.receiver is None:
-                auth = CtrlAuth.unpack(body)
+                try:
+                    auth = CtrlAuth.unpack(body)
+                except MessageError:
+                    self.error(Status.AUTH_FAILED)  # a malformed AUTH is AUTH_FAILED (§5.4)
                 k_epoch = crypto.derive_k_epoch(tag.spec.secret, tag.tag_id, self.epoch)
-                th = crypto.transcript_hash(self.hello_msg, self.challenge_msg)
+                th = crypto.transcript_hash(tag.spec.caps().pack(), self.hello_msg,
+                                            self.challenge_msg)  # the CAPS bytes it serves (§5.4)
                 ok = crypto.constant_time_equal(crypto.mac_b(k_epoch, th), auth.mac_b)
                 if tag.faults.auth_fail > 0:
                     tag.faults.auth_fail -= 1

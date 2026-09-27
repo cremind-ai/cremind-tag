@@ -78,27 +78,35 @@ struct dlv_assignment {
  * it ends the tag's jobs. */
 #define DLV_UNAUTH_REPEATS 3u
 
-struct dlv_timing {
+/*
+ * What a tag session reports with a result (DELIVERY_RESULT): the timing, the
+ * tag's stored epoch (from its CHALLENGE or ERROR, after AUTH_OK at least the
+ * session's epoch; 0 = unknown) and the CTAG_RESULT_FLAG_* flags.
+ */
+struct dlv_report {
 	uint16_t wake_ms;
 	uint16_t suspend_ms;
 	uint16_t transfer_ms;
 	uint16_t refresh_ms;
+	uint32_t stored_epoch;
+	uint8_t flags;
 };
 
-/* Last accepted revision of the assigned tag and its final result (3.3, 10). */
+/* Last accepted revision of the assigned tag and its final result (3.3, 10).
+ * Ordered for size (72 bytes on 32-bit targets). */
 struct dlv_history {
-	uint8_t valid;
-	uint8_t has_result;
-	uint8_t status;
-	uint16_t result_seq; /* of the result reported for update_id */
+	uint64_t update_id; /* the revision's current update_id */
 	uint32_t tag_id;
 	uint32_t epoch;
 	uint32_t revision;
-	uint64_t update_id; /* the revision's current update_id */
+	struct dlv_report report;
+	uint16_t result_seq; /* of the result reported for update_id */
+	uint16_t battery_mv;
+	uint8_t valid;
+	uint8_t has_result;
+	uint8_t status;
 	uint8_t digest[CTAG_LAYOUT_DIGEST_LEN];
 	uint8_t digest8[8];
-	uint16_t battery_mv;
-	struct dlv_timing timing;
 };
 
 enum dlv_result_state {
@@ -233,11 +241,14 @@ int dlv_job_layout(struct dlv *d, const struct dlv_job *job, const uint8_t **lay
 /* Whether the shared buffer still holds the job's layout (a commit borrows it). */
 bool dlv_job_layout_held(const struct dlv *d, const struct dlv_job *job);
 void dlv_stage(struct dlv *d, const struct dlv_job *job, uint8_t stage);
-/* Final result of a job (removes it, persists history, sends DELIVERY_RESULT). */
+/* Final result of a job (removes it, persists history, sends DELIVERY_RESULT);
+ * report NULL: nothing from a tag session (zero timing, epoch and flags). */
 void dlv_finish(struct dlv *d, struct dlv_job *job, uint8_t status, const uint8_t digest8[8],
-		uint16_t battery_mv, const struct dlv_timing *timing, uint32_t now);
-/* End the tag's jobs of that epoch with status (see dlv_unauth_status()). */
-void dlv_fail_epoch(struct dlv *d, uint32_t tag_id, uint32_t epoch, uint8_t status, uint32_t now);
+		uint16_t battery_mv, const struct dlv_report *report, uint32_t now);
+/* End the tag's jobs of that epoch with status (see dlv_unauth_status()),
+ * reporting the tag's stored epoch and CTAG_RESULT_FLAG_ESCALATED. */
+void dlv_fail_epoch(struct dlv *d, uint32_t tag_id, uint32_t epoch, uint8_t status,
+		    uint32_t stored_epoch, uint32_t now);
 /*
  * 10: a session ended with a security status that was not inside an
  * authenticated record (AUTH_FAILED, STALE_EPOCH, VERSION_MISMATCH,

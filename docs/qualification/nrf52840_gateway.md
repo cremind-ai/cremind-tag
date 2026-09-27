@@ -43,7 +43,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| gateway-nrf52840dk | `apps/gateway` | 229,816 / 1,015,808 | 77.4 % (15 %) | 100,244 / 262,144 | 161,900 (none) | pass (edtlib) | ok | 2026-09-27 |
+| gateway-nrf52840dk | `apps/gateway` | 229,912 / 1,015,808 | 77.4 % (15 %) | 100,372 / 262,144 | 161,772 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -86,3 +86,4 @@ Measure with development equipment disconnected, after a power-on reset.
 |---|---|---|
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
 | 2026-09-28 | buildable | `gateway-nrf52840dk` builds (flash 229,816 B = 22.6 % of the 992 KiB code partition, RAM 100,244 B of 256 KiB), `verify_stack.py` 16/16; core ztests and the native_sim interop test pass. |
+| 2026-09-28 | buildable | Protocol v1 finalisation: `EVT_RESULT` carries the bridge's `flags` and the tag's `stored_epoch` (retained slot `CTAG_GW_EVENT_MAX` 104 B): flash 229,912 B (77.4 % free), RAM 100,372 B of 256 KiB (161,772 B free); `verify_stack.py` 16/16; host tests, 894 twister cases on native_sim, the gateway interop (8/8) and the bridge maintenance interop pass. |

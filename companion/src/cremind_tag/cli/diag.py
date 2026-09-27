@@ -70,8 +70,8 @@ def _queue(db: Any) -> dict[str, Any]:
         outbox = [dict(r) for r in conn.execute(
             "SELECT id, kind, credential_id, attempts, dead, last_error, created_at FROM outbox ORDER BY id LIMIT 500")]
         views = [dict(r) for r in conn.execute(
-            "SELECT tag_id, credential_id, profile, epoch, clear_required, blocked_reason, displayed_revision,"
-            " displayed_digest, dirty, stale_jumps FROM tag_views")]
+            "SELECT tag_id, credential_id, profile, epoch, epoch_floor, clear_required, blocked_reason,"
+            " displayed_revision, displayed_digest, dirty, stale_jumps FROM tag_views")]
         commands = [dict(r) for r in conn.execute(
             "SELECT command_id, kind, state, error, created_at, updated_at FROM commands ORDER BY created_at DESC"
             " LIMIT 100")]

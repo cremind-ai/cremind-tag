@@ -4,6 +4,8 @@
  * handles are known:
  *
  *   CAPS read -> HELLO -> CHALLENGE -> AUTH -> AUTH_OK -> first CREDIT
+ *   (the transcript covers the CAPS read, 5.4: what is rendered from it is
+ *   what the tag authenticated)
  *   per job, in arrival order:
  *     CMD:    wait credit -> CMD -> RESULT
  *     layout: load it into the shared buffer (dlv_job_layout) ->
@@ -104,8 +106,11 @@ struct tsess {
 	uint8_t key[CTAG_TAG_KEY_LEN];
 	uint32_t connected_ms;
 	uint32_t suspend_ms;
-	struct ctag_tag_caps caps;
+	struct ctag_tag_caps caps; /* as read; rendering and the transcript use it */
 	struct ctag_ctrl_challenge ch;
+	/* The tag's stored epoch as its CHALLENGE or ERROR reported it (after
+	 * AUTH_OK at least this session's epoch); 0 = not known yet. */
+	uint32_t tag_epoch;
 	struct ctag_session sess;
 	/* Fragmentation (5.3), one per characteristic and direction. */
 	struct ctag_frag_tx ctrl_tx;

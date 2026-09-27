@@ -134,7 +134,7 @@ in the database and resumes at the next start.
 | Loop | Does |
 |---|---|
 | content (per content credential) | `POST sync` at start, every `resync_s` (300 s), after `410 cursor_expired`, a changed `stream_id` or an unknown tag; then `GET events` every `active_poll_s` (2 s) while jobs arrive, doubling to `idle_poll_s` (10 s) when idle |
-| hardware (hardware credential) | `POST inventory` at start and on every hardware change; `POST heartbeat` every 30 s; long-poll `GET commands` → claim → execute → result |
+| hardware (hardware credential) | `POST inventory` at start and on every hardware change (bridges carry `max_tags` from their CAPS and `assigned`, the gateway's assignments for them, when the gateway has reported them; tags carry `max(epoch, epoch floor)`); `POST heartbeat` every 30 s; long-poll `GET commands` → claim → execute → result |
 | scheduler | expiry; composes changed card sets into revisions; sends due revisions as `DELIVER_LAYOUT` |
 | gateway event handler | `EVT_STAGE`/`EVT_RESULT`/assignment and provisioning results → the queue, committed before the event is ACKed |
 | outbox (per credential) | `accepted`, `receipts`, `previews`, command results, until Cremind confirms |
@@ -217,14 +217,15 @@ layout is at most `LAYOUT_SERIAL_MAX` (4000) bytes.
 | `ACCEPTED` (or a `DUPLICATE` of it) | revision `sent`; receipts `gateway_received` |
 | `BUSY`, `NO_RESOURCES` | retry shortly with the same op id (not remembered by the gateway) |
 | `EVT_STAGE` | receipts `bridge_received` / `transferring` / `refreshing` |
-| `EVT_RESULT OK` | revision `displayed`; its `delivery_ids` receipted `displayed`; displayed preview uploaded; older undelivered revisions superseded |
+| `EVT_RESULT OK` | revision `displayed`; its `delivery_ids` receipted `displayed`; displayed preview uploaded; older undelivered revisions superseded. With `flags` bit0 (`RESULT_FLAG_DUPLICATE`: the tag answered from its stored ACK, the revision was already on the panel and nothing was redrawn) the receipts carry `detail` "duplicate (stored acknowledgement)" |
 | `DISPLAY_STATE_UNKNOWN` | re-deliver the **same** revision (new op id) — the tag repeats the refresh (§6); a job whose TTL runs out meanwhile is receipted `uncertain` |
 | `STALE_REVISION` | jump the allocator (below) and compose again |
 | `REVISION_CONFLICT` | compose again under a new revision |
 | `SUPERSEDED` | nothing (a newer revision carries the cards) |
 | link failures: `TIMEOUT`, `DISCONNECTED`, `CONNECT_FAILED`, `MESH_SUSPEND_FAILED`, `MESH_RESUME_FAILED`, `INCOMPLETE`, `DIGEST_MISMATCH`, `PANEL_ERROR`, `REFRESH_TIMEOUT`, `STORAGE_ERROR`, `INTERNAL`, `CANCELLED` | same revision, new op id, exponential back-off (`retry_initial_s` 5 s … `retry_max_s` 600 s) until the jobs expire (`expired`) |
 | `NOT_FOUND` | ambiguous in `EVT_RESULT` (the bridge lost the transfer, or the tag refused its id, §10): retried like a link failure; the third `NOT_FOUND` for one revision is treated as below. A later `OK` for that revision is still recorded as displayed and lifts the block |
-| `AUTH_FAILED`, `SECURITY_CONFIG`, `NOT_ASSIGNED`, `STALE_EPOCH`, `VERSION_MISMATCH` (and a repeated `NOT_FOUND`) | stop the tag's work of that epoch: its unfinished jobs of that epoch or older are receipted `failed` with the status code and a detail, the tag is **blocked**, and the assignment is re-synced (`sync` + `inventory`); a successful `assign_tag` unblocks it. Such a result for an older attempt, or for an epoch below the tag's current one (a bridge still holding an old key), is ignored |
+| `STALE_EPOCH` whose `stored_epoch` is above the attempt's epoch | the tag authenticated a newer epoch (an assignment this database lost, a restore): the **epoch floor** rule below — the tag is held (blocked `stale_epoch`, its jobs stay active), the inventory reports the floor, Cremind re-queues `assign_tag` above it, and the successful assignment moves the held work to the new epoch |
+| `AUTH_FAILED`, `SECURITY_CONFIG`, `NOT_ASSIGNED`, `STALE_EPOCH` (any other), `VERSION_MISMATCH` (and a repeated `NOT_FOUND`) | stop the tag's work of that epoch: its unfinished jobs of that epoch or older are receipted `failed` with the status code and a detail, the tag is **blocked**, and the assignment is re-synced (`sync` + `inventory`); a successful `assign_tag` unblocks it. Such a result for an older attempt, or for an epoch below the tag's current one (a bridge still holding an old key), is ignored |
 | `FONTPACK_MISMATCH` | the revision's jobs `failed`; the tag waits (blocked) until the bridge reports the companion's pack, `install_fontpack` succeeds or the daemon restarts |
 | `INVALID`, `TOO_LARGE`, `UNSUPPORTED` | the revision and the cards it shows `failed` |
 | a revision `sent` without any result for `result_timeout_s` (30 min) | sent again (a result lost from the gateway's retention ring, §1.2) |
@@ -241,6 +242,28 @@ allocator to `max(last used, refused revision) + 65 536 × 2^k` and composes
 again, where `k` counts consecutive refusals of that tag (at most 8, reset by a
 displayed revision). 65 536 revisions are more than a year of one screen change
 every ten minutes; the doubling bounds the number of retries.
+
+**Epoch floor (the `STALE_EPOCH` rule).** Every `EVT_RESULT` carries the tag's
+`stored_epoch` as the bridge last heard it (protocol.md §3.4); the bridge ends
+jobs with a tag's `STALE_EPOCH` only after 3 consecutive refusals (`flags`
+bit1, §10). When that `stored_epoch` is above every epoch this database knows
+for the tag — its assignment, Cremind's epoch from `sync`, an earlier floor —
+the tag has authenticated an assignment the companion lost (a restored or lost
+database, a second companion). The companion records it as the tag's **epoch
+floor** (`tag_views.epoch_floor`, schema v4), reports `max(epoch, floor)` as the
+tag's inventory `epoch`, and Cremind — which keeps `max(stored, reported)` —
+re-queues the owner's `assign_tag` (and a pending `clear_tag`) at `floor + 1`.
+Until then the tag is held (`blocked (stale_epoch)`, no job fails); the
+assignment unblocks it and moves its jobs and pending revisions to the new
+epoch, and the tag accepts it. The value is unauthenticated (a plaintext
+`ERROR`), so one report raises the floor by at most **256** above the highest
+known epoch (`EPOCH_FLOOR_STEP`; a real gap larger than that closes in a few
+rounds of 3 sessions each), never above `2^32 − 2`, and never lowers anything:
+a forged `stored_epoch` costs epoch numbers, never access. An `assign_tag` at or
+below the floor fails at once (the inventory reports the floor, Cremind
+re-queues above it). A `STALE_EPOCH` without a higher `stored_epoch` (the
+bridge's own refusal of an older epoch, `stored_epoch = 0`) still stops the tag
+as in the table.
 
 **Assignment and ownership.** Cremind's claim bumps the tag's epoch, sets
 `clear_required` and queues `assign_tag` then `clear_tag`. While
@@ -265,7 +288,7 @@ under a new op id.
 | `remove_bridge {hw_id}` | `REMOVE_NODE` → `EVT_NODE_REMOVED`; the bridge leaves the inventory |
 | `identify {hw_id}` | a bridge: `IDENTIFY_NODE`; a tag: the identify screen as one new revision, held `identify_hold_s` (60 s) after it is displayed, then the regular screen returns |
 | `refresh_tag {tag_id}` | the current screen as a new revision; succeeds when it is displayed |
-| `assign_tag {tag_id, bridge_hw_id, epoch}` | see §5 |
+| `assign_tag {tag_id, bridge_hw_id, epoch}` | see §5. A bridge whose assignment table is full (`ASSIGN_SET` answers `NO_RESOURCES`: `CAPS max_tags` tags, 10 on an nRF52832 bridge, 20 on an nRF52840) fails it at once, not retried, with error `bridge_full` and result `{"error": "bridge_full", "max_tags": n}` (`max_tags` from the gateway's inventory, left out when unknown); Cremind marks the tag `assign_failed`, drops it from that bridge and records `max_tags` |
 | `clear_tag {tag_id, epoch}` | see §5 |
 | `install_fontpack {bridge_hw_id}` | with a maintenance port (`daemon.bridge_maintenance`, or `hardware.bridge_url` when there is one bridge): `FONT_*` install of the configured pack; otherwise fails with the operator instruction |
 | `collect_diagnostics {}` | companion version/host, queue statistics, blocked tags, gateway `INFO` counters, bridge info |
@@ -350,7 +373,8 @@ the tail of the daemon logs.
 | TLS error "not trusted" (`tls_error` in `daemon status`) | `connect server URL --ca-file CA.pem` (the CA Cremind's HTTPS setup exports); the daemon retries every 5 min |
 | doctor: "secrets file … grants access to …" | the secrets file is readable by other users (an old file, or a data directory outside your profile): the next write fixes it, or `CREMIND_TAG_DATA_DIR` under your profile |
 | "now serves HTTPS" | `connect server https://…` |
-| a tag `blocked (stale_epoch)` / `(not_assigned)` | the tag's key is older than its epoch: Cremind's re-queued `assign_tag` unblocks it; else re-assign it in Cremind (admin → Tags hardware → Assign) |
+| a tag `blocked (stale_epoch)` / `(not_assigned)` | the tag's key is older than its epoch: the inventory reports the tag's epoch floor and Cremind's re-queued `assign_tag` unblocks it (§5 "Epoch floor"; it takes 3 refused sessions, about 1.5 min); else re-assign it in Cremind (admin → Tags hardware → Assign) |
+| a tag `assign_failed` in Cremind, command error `bridge_full` | the bridge holds `max_tags` tags already: assign the tag to another bridge (or release one) |
 | a tag `blocked (not_enrolled)` | Cremind routes jobs to a tag this database does not know (a lost database): enroll/register it again |
 | deliveries `failed` with `FONTPACK_MISMATCH` | install the companion's pack on the bridge (`bridge fonts-install` or `install_fontpack`) |
 | `held (waiting for clear_tag)` | the claim's `clear_tag` has not succeeded yet (the tag must wake up: about 30 s) |
@@ -362,9 +386,11 @@ the tail of the daemon logs.
 Cremind (`companion/tests/daemon/fake_cremind.py`, `httpx.MockTransport`) and the
 simulator: jobs to displayed receipts and previews, crash injection at every
 durability boundary with a restart, resynchronisation (expired cursor, restored
-Cremind, lost database), duplicates, `STALE_REVISION`, power loss during a
-refresh, expiry, progress cadence, the claim's `clear_required` hold, epoch
-changes, refused cards and revoked credentials.
+Cremind, lost database), duplicates, `STALE_REVISION`, the epoch floor healing
+a `STALE_EPOCH` end to end (the fake Cremind re-queues `assign_tag` above a
+reported epoch as Cremind does), `bridge_full`, power loss during a refresh,
+expiry, progress cadence, the claim's `clear_required` hold, epoch changes,
+refused cards and revoked credentials.
 
 The first vertical slice runs the real Cremind: `CREMIND_E2E=1 uv run pytest
 tests/e2e -q` or `uv run --project companion python tools/e2e_slice.py` (from the

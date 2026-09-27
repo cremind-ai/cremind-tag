@@ -127,18 +127,23 @@ access-layer loss and failed sends as faults.
 
 **Bridge.** One layout being assembled (a new `xfer_id` replaces it); §3.3
 validation in order; `SUPERSEDED` for an older pending layout; `DUPLICATE`
-re-sends the stored result for a displayed revision; the assignment table
-(`ASSIGN_SET`/`ASSIGN_DEL`, `STALE_EPOCH`, `MAX_TAGS_PER_BRIDGE`); result
-re-sends every `MESH_RESULT_RETRY_MS` up to `MESH_RESULT_RETRIES` times; the §5.2
-scheduler (rate limit per rolling minute, per-tag back-off, wait for own mesh
-sends, suspend → connect → resume, `suspend_ms`); the GATT central side with the
-real handshake, ≤ 4 records per connection event and the tag's credits;
-external flash with two font-pack slots, the slot directory, `FONT_*`
-installation and `FLASH_TEST`.
+re-sends the stored result for a displayed revision (with its `stored_epoch`
+and `flags`); the assignment table (`ASSIGN_SET`/`ASSIGN_DEL`, `STALE_EPOCH`,
+`NO_RESOURCES` beyond `max_tags`: `MAX_TAGS_PER_BRIDGE`, 10 for an nRF52832
+board, or `BridgeSpec.max_tags`); result re-sends every `MESH_RESULT_RETRY_MS`
+up to `MESH_RESULT_RETRIES` times; `DELIVERY_RESULT` carries the tag's
+`stored_epoch` and `flags` (bit0 the tag's stored ACK, bit1 escalated, §3.4);
+the §5.2 scheduler (rate limit per rolling minute, per-tag back-off, wait for
+own mesh sends, suspend → connect → resume, `suspend_ms`); the GATT central
+side with the real handshake (the transcript binds the CAPS bytes read),
+≤ 4 records per connection event and the tag's credits; external flash with two
+font-pack slots, the slot directory, `FONT_*` installation and `FLASH_TEST`.
 
 **Tag.** Wake period with uniform jitter, advertising window and legacy
-advertising payload (§5.1); CAPS; handshake checks (`STALE_EPOCH`,
-`AUTH_FAILED`, epoch persisted only after AUTH); three consecutive
+advertising payload (§5.1); CAPS; handshake checks in §5.4 order (`NOT_FOUND`,
+`VERSION_MISMATCH`, `STALE_EPOCH`; a malformed `AUTH` or a wrong `mac_b` is
+`AUTH_FAILED`; epoch persisted only after AUTH; every `ERROR` carries the
+stored epoch; the transcript binds the CAPS bytes it serves); three consecutive
 authentication failures skip the next window; credits (two buffers); the
 FRAME_BEGIN table; offset/order checks and the incremental digest; the §6
 transaction (`REFRESH_INTENT` → refresh → `DISPLAYED` → `RESULT`); boot recovery
@@ -172,8 +177,14 @@ firmware should do the same unless the protocol document says otherwise.
   the tag repeats the refresh.
 - After `FRAME_BEGIN` the bridge waits for that record's credit (or the tag's
   immediate `RESULT`) before streaming plane data.
-- `AUTH_FAILED`, `STALE_EPOCH`, `VERSION_MISMATCH` and `NOT_FOUND` from a tag end
-  the tag's jobs of that epoch; link-level failures (`DISCONNECTED`, `TIMEOUT`,
+- `AUTH_FAILED`, `STALE_EPOCH`, `VERSION_MISMATCH` and `NOT_FOUND` from a tag
+  before `AUTH_OK` (CAPS, a plaintext `ERROR`, a `CHALLENGE` with another
+  `proto`, a wrong `mac_t`) are unauthenticated: they back off like a link
+  failure until the same status ends 3 consecutive sessions for the tag and
+  epoch (another status restarts the count, `AUTH_OK` and a new assignment
+  reset it; counters `unauth_statuses`, `unauth_final`); only then do they end
+  the tag's jobs of that epoch, flagged `RESULT_FLAG_ESCALATED` with the tag's
+  `stored_epoch` (§10). Link-level failures (`DISCONNECTED`, `TIMEOUT`,
   `CONNECT_FAILED`, `MESH_*`) are retried after the per-tag back-off and never
   produce a result on their own.
 - A successful `CLEAR` resets the bridge's history for the tag to revision 0,

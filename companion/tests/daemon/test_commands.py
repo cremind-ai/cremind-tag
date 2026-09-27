@@ -87,29 +87,62 @@ def test_assign_moves_the_tag_to_another_bridge(make_rig: Any) -> None:
     run_scenario(scenario(), timeout=120)
 
 
-def test_stale_epoch_blocks_the_tag_until_reassigned(make_rig: Any) -> None:
+def test_stale_epoch_heals_through_the_reported_epoch_floor(make_rig: Any) -> None:
+    """§10: a STALE_EPOCH whose stored_epoch is above every epoch known here (an assignment this companion
+    lost, a restore) is recorded as the tag's epoch floor and reported as its inventory epoch; Cremind
+    re-queues assign_tag above it and the refused card is shown at the new epoch, never failed."""
     async def scenario() -> None:
         async with make_rig(bridges=2) as rig:
             await rig.start()
             first = rig.fake.add_job("alice", rig.hw(), title="Shown at epoch 1")
             await rig.wait(lambda: rig.stage(first) == "displayed", what="first displayed")
             # The tag authenticated epoch 3 elsewhere (e.g. a restored companion): it now refuses the
-            # epoch-1 key this companion still uses.
+            # epoch-1 key this companion still uses, three sessions in a row.
             rig.sim_tag().nvs.stored_epoch = 3
-            blocked = rig.fake.add_job("alice", rig.hw(), title="Refused")
-            await rig.wait(lambda: rig.stage(blocked) == "failed", what="stale epoch failure")
-            delivery = rig.fake.delivery(blocked)
-            assert delivery["status_code"] == int(Status.STALE_EPOCH)
+            refused = rig.fake.add_job("alice", rig.hw(), title="Refused at 1, shown at 4")
+            await rig.wait(lambda: rig.fake.epoch_raises, 60, what="Cremind raising the epoch")
+            assert rig.fake.epoch_raises == [(rig.hw(), 3, 4)]  # reported the floor 3, re-queued at 4
+            assert any(t["epoch"] == 3 for inv in rig.fake.inventories for t in inv["tags"])
+            await rig.wait(lambda: rig.stage(refused) == "displayed", 60, what="the card after the reassignment")
+            delivery = rig.fake.delivery(refused)
+            assert delivery["epoch"] == 4 and delivery["outcome"] == "displayed"
+            assert rig.sim_tag().nvs.stored_epoch == 4
             view = rig.svc.store.get_view(rig.tag_id())
-            assert view is not None and view.blocked_reason == "stale_epoch"
-            # Cremind learns the epoch and re-assigns above it.
-            rig.fake.tag(rig.hw())["epoch"] = 3
-            command = rig.fake.assign(rig.hw(), rig.bridge_hw(0))
-            assert (await command_done(rig, command))["status"] == "succeeded"
-            after = rig.fake.add_job("alice", rig.hw(), title="Back at epoch 4")
-            await rig.wait(lambda: rig.stage(after) == "displayed", what="delivery after reassignment")
-            assert rig.fake.delivery(after)["epoch"] == 4
+            assert view is not None and view.epoch_floor == 3 and view.blocked_reason is None
+            assert rig.svc.db.find_tag(rig.tag_id()).epoch == 4
+            await rig.wait(lambda: rig.fake.inventories[-1]["tags"][0]["epoch"] == 4, what="inventory at epoch 4")
+            assert not any(r.get("outcome") == "failed" for r in rig.fake.receipt_log)
             rig.assert_consistent_receipts()
+
+    run_scenario(scenario(), timeout=120)
+
+
+def test_assign_to_a_full_bridge_fails_bridge_full(make_rig: Any) -> None:
+    """ASSIGN_SET NO_RESOURCES (the bridge's table is full) fails assign_tag at once with
+    {"error": "bridge_full", "max_tags": n}; the inventory reports each bridge's max_tags and assigned."""
+    async def scenario() -> None:
+        rig = make_rig(tags=2, bridges=2)
+        rig.sim.bridges[0].max_tags = 1  # tag 0 fills it; the gateway learns max_tags from CAPS at boot
+        async with rig:
+            await rig.start()
+            full, other = rig.bridge_hw(0), rig.bridge_hw(1)
+            await rig.wait(lambda: any(b.get("max_tags") == 1 for inv in rig.fake.inventories
+                                       for b in inv["bridges"]), what="max_tags in the inventory")
+            bridges = {b["hw_id"]: b for b in rig.fake.inventories[-1]["bridges"]}
+            assert (bridges[full]["max_tags"], bridges[full]["assigned"]) == (1, 1)
+            assert (bridges[other]["max_tags"], bridges[other]["assigned"]) == (20, 1)
+            command = rig.fake.assign(rig.hw(1), full)
+            done = await command_done(rig, command)
+            assert done["status"] == "failed", done
+            assert done["error"] == "bridge_full" and done["result"] == {"error": "bridge_full", "max_tags": 1}
+            assert rig.fake.tag(rig.hw(1))["status"] == "assign_failed"
+            assert rig.fake.tag(rig.hw(1))["bridge_hw_id"] is None
+            assert rig.sim.bridges[0].counters["assign_full"] == 1  # refused once, not retried
+            assert rig.tag_id(1) not in rig.sim.bridges[0].assignments
+            assert rig.sim.bridges[1].assignments[rig.tag_id(1)].epoch == 1  # still on its old bridge
+            with rig.db() as db:
+                tag = db.get_tag(rig.tag_id(1))
+            assert (tag.epoch, tag.bridge_addr) == (1, rig.sim.bridges[1].addr)
 
     run_scenario(scenario(), timeout=120)
 

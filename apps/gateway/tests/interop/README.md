@@ -38,6 +38,7 @@ every scenario passed; the script prints a Markdown results table.
 | Results | `DELIVERY_STAGE` `TRANSFERRING`, `REFRESHING`, then `DELIVERY_RESULT OK` with `digest = SHA-256(layout)[0:8]`, re-sent every 500 ms until `RESULT_ACK` |
 | `tag_id 0xDEAD0001` | chunk 1 of its first transfer is lost once → `LAYOUT_STATUS INCOMPLETE` → the gateway resends exactly that chunk |
 | `tag_id 0xDEAD0002` | the first `LAYOUT_STATUS OK` is lost and the result held 11 s → the gateway re-commits after 10 s → `DUPLICATE` |
+| `DELIVERY_RESULT.stored_epoch`, `flags` | every result reports the tag's stored epoch = the delivery's epoch; `tag_id 0xDEAD0003`'s result is the tag's stored ACK (`flags` bit0), which `EVT_RESULT` must carry to the companion |
 | Configuration client | every step answered (relay state, TTL echoed); a node reset makes the device unprovisioned again |
 | `REBOOT` | the core restarts with a new `boot_id` (the PTY stays open, as a UART does); the CDB survives |
 

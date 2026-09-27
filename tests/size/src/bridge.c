@@ -89,6 +89,6 @@ void size_bridge(void)
 	}
 
 	(void)ctag_session_bridge_hello(&session, 1, 1, digest, digest, tx_buf);
-	(void)ctag_session_bridge_challenge(&session, rx_buf, 30, &ch, tx_buf);
+	(void)ctag_session_bridge_challenge(&session, rx_buf, 18, rx_buf, 30, &ch, tx_buf);
 	(void)ctag_session_bridge_auth_ok(&session, rx_buf, 17);
 }

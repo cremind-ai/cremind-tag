@@ -117,6 +117,8 @@ uint16_t send_ack(uint32_t seq);
 /* Mesh input helpers. */
 void mesh_status(uint16_t src, uint16_t xfer_id, uint8_t status, uint32_t missing);
 void mesh_result(uint16_t src, uint16_t result_seq, uint64_t update_id, uint8_t status);
+/* A DELIVERY_RESULT with every field given. */
+void mesh_result_msg(uint16_t src, const struct ctag_mesh_delivery_result *r);
 void mesh_assign_status(uint16_t src, uint32_t tag_id, uint32_t epoch, uint8_t status);
 
 /* Complete the segmented lane's sends until the commit, OK each end; returns

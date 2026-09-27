@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import cbor2
 import pytest
 
 from cremind_tag.gateway import Ack, OpIdGenerator, ResultEvent, SessionStarted, StageEvent, UnknownEvent
 from cremind_tag.gateway.events import parse_event
 from cremind_tag.gateway.results import BridgeInfo, FlashTestResult, HelloInfo, to_status
 from cremind_tag.protocol import cbor_msgs
-from cremind_tag.protocol.ids import DeliveryStage, SerialMsg, Status
+from cremind_tag.protocol.ids import (
+    RESULT_FLAG_DUPLICATE,
+    RESULT_FLAG_ESCALATED,
+    CborKey,
+    DeliveryStage,
+    SerialMsg,
+    Status,
+)
 
 
 def test_op_ids_are_monotonic_and_time_based() -> None:
@@ -27,11 +35,32 @@ def test_op_ids_are_monotonic_and_time_based() -> None:
 def test_result_event_parsing() -> None:
     fields = {"seq": 4, "update_id": 501, "bridge": 2, "tag_id": 0x1A2B3C4D, "epoch": 3, "revision": 18,
               "status": 23, "digest": bytes(8), "battery_mv": 2900,
-              "timing": {"wake_ms": 1, "mesh_ms": 2, "transfer_ms": 3, "refresh_ms": 4, "suspend_ms": 5}}
+              "timing": {"wake_ms": 1, "mesh_ms": 2, "transfer_ms": 3, "refresh_ms": 4, "suspend_ms": 5},
+              "flags": 0, "stored_epoch": 3}
     event = parse_event(SerialMsg.EVT_RESULT, cbor_msgs.encode_event(SerialMsg.EVT_RESULT, fields), 99)
     assert isinstance(event, ResultEvent) and event.retained and event.seq == 4 and event.boot_id == 99
     assert event.status == Status.DISPLAY_STATE_UNKNOWN and not event.displayed
     assert event.timing.as_dict() == fields["timing"]
+    assert event.stored_epoch == 3 and event.flags == 0 and not event.duplicate and not event.escalated
+
+
+def test_result_event_carries_the_tag_report() -> None:
+    """§3.4: flags (bit0 duplicate stored ACK, bit1 escalated) and the tag's stored_epoch (CBOR keys 32, 62)."""
+    fields = {"seq": 5, "update_id": 502, "bridge": 2, "tag_id": 7, "epoch": 3, "revision": 0,
+              "status": Status.STALE_EPOCH, "digest": bytes(8), "battery_mv": 0,
+              "timing": {"wake_ms": 0, "mesh_ms": 0, "transfer_ms": 0, "refresh_ms": 0, "suspend_ms": 0},
+              "flags": RESULT_FLAG_ESCALATED, "stored_epoch": 9}
+    payload = cbor_msgs.encode_event(SerialMsg.EVT_RESULT, fields)
+    wire = cbor2.loads(payload)
+    assert wire[CborKey.FLAGS] == RESULT_FLAG_ESCALATED and wire[CborKey.STORED_EPOCH] == 9
+    event = parse_event(SerialMsg.EVT_RESULT, payload, 1)
+    assert isinstance(event, ResultEvent) and event.escalated and not event.duplicate and event.stored_epoch == 9
+    dup = parse_event(SerialMsg.EVT_RESULT, cbor_msgs.encode_event(SerialMsg.EVT_RESULT, {
+        **fields, "status": Status.OK, "flags": RESULT_FLAG_DUPLICATE}), 1)
+    assert isinstance(dup, ResultEvent) and dup.duplicate and dup.displayed
+    missing = {k: v for k, v in fields.items() if k != "stored_epoch"}
+    with pytest.raises(cbor_msgs.CborError):  # both keys are required in protocol v1
+        parse_event(SerialMsg.EVT_RESULT, cbor_msgs.encode_map(missing), 1)
 
 
 def test_stage_and_unknown_events() -> None:

@@ -9,10 +9,13 @@ gateway re-sends it after the next HELLO and the handler, idempotent by
 
 - ``EVT_RESULT``: a tag command's result (``update_id`` = the op id a command
   persisted) goes to ``gateway_ops``; any other result is a delivery's
-  (:meth:`QueueStore.apply_result`: displayed -> receipts + displayed preview;
-  ``DISPLAY_STATE_UNKNOWN`` -> re-deliver; ``STALE_REVISION`` -> jump the
-  allocator; security statuses -> block the tag and re-sync; link failures ->
-  back-off).
+  (:meth:`QueueStore.apply_result`: displayed -> receipts + displayed preview,
+  ``detail`` "duplicate (stored acknowledgement)" when the tag answered from
+  its stored ACK; ``DISPLAY_STATE_UNKNOWN`` -> re-deliver; ``STALE_REVISION``
+  -> jump the allocator; ``STALE_EPOCH`` with the tag's ``stored_epoch`` above
+  the attempt's -> raise the epoch floor, report it and wait for Cremind's
+  re-assignment; other security statuses -> block the tag and re-sync; link
+  failures -> back-off).
 - ``EVT_ASSIGN_RESULT``, ``EVT_PROVISIONED``, ``EVT_NODE_CONFIGURED``,
   ``EVT_NODE_REMOVED``: results of command steps (by ``op_id``).
 - ``EVT_STAGE``: non-terminal receipts (best effort, not retained).
@@ -38,7 +41,8 @@ from ..gateway.events import (
     StageEvent,
     TagSeen,
 )
-from ..protocol.ids import DeliveryStage
+from ..protocol.ids import DeliveryStage, Status
+from .commands import bridge_capacity
 from .store import status_name
 
 if TYPE_CHECKING:
@@ -80,21 +84,32 @@ class GatewayEventHandler:
     async def _result(self, event: ResultEvent) -> None:
         svc = self.svc
         svc.crash.hit("handler_before_commit")
+        report = _report(event)
         if await svc.db.run(svc.store.is_op, event.update_id):
+            if event.status == Status.STALE_EPOCH and event.stored_epoch:
+                # A tag command refused for an epoch the tag has left: record the floor first (idempotent),
+                # so the inventory that follows the failed step already reports it.
+                floor = await svc.db.run(svc.store.raise_epoch_floor, event.tag_id, event.stored_epoch)
+                if floor is not None:
+                    log.warning("gateway: tag %08X stores epoch %d: epoch floor %d reported", event.tag_id,
+                                event.stored_epoch, floor)
+                    svc.request_inventory()
             fields = {"tag_id": event.tag_id, "bridge": event.bridge, "epoch": event.epoch,
-                      "revision": event.revision, "digest": event.digest.hex(), "battery_mv": event.battery_mv}
+                      "revision": event.revision, "digest": event.digest.hex(), "battery_mv": event.battery_mv,
+                      "flags": event.flags, "stored_epoch": event.stored_epoch}
             await svc.db.run(svc.store.record_op_result, event.update_id, int(event.status), fields)
             svc.ops.resolve(event.update_id)
-            log.info("gateway: command op %d tag %08X: %s", event.update_id, event.tag_id, status_name(event.status))
+            log.info("gateway: command op %d tag %08X: %s%s", event.update_id, event.tag_id,
+                     status_name(event.status), report)
         else:
             effects = await svc.db.run(lambda: svc.store.apply_result(
                 update_id=event.update_id, tag_id=event.tag_id, epoch=event.epoch, revision=event.revision,
                 status=int(event.status), digest=bytes(event.digest), battery_mv=event.battery_mv,
-                timing=event.timing.as_dict()))
+                timing=event.timing.as_dict(), flags=event.flags, stored_epoch=event.stored_epoch))
             self.results += 1
-            log.info("gateway: result tag %08X revision %d epoch %d: %s (digest %s, refresh %d ms)", event.tag_id,
+            log.info("gateway: result tag %08X revision %d epoch %d: %s (digest %s, refresh %d ms)%s", event.tag_id,
                      event.revision, event.epoch, status_name(event.status), event.digest.hex(),
-                     event.timing.refresh_ms)
+                     event.timing.refresh_ms, report)
             svc.apply_effects(effects)
         svc.crash.hit("result_committed")
         svc.wake_scheduler()
@@ -127,12 +142,24 @@ class GatewayEventHandler:
         svc = self.svc
         info = event.info
         pack = info.fontpack_id.hex() if info.fontpack_id and any(info.fontpack_id) else None
-        changed = await svc.db.run(svc.note_bridge_info, info.addr, pack, info.fw)
+        changed = await svc.db.run(svc.note_bridge_info, info.addr, pack, info.fw, bridge_capacity(info))
         if changed:
             svc.request_inventory()
         if pack is not None and svc.fonts is not None and pack == svc.fonts.pack_id.hex():
             if await svc.db.run(svc.store.unblock_all, "fontpack_mismatch"):
                 svc.wake_scheduler()
+
+
+def _report(event: ResultEvent) -> str:
+    """The bridge's report of what the tag said (§3.4), for the log."""
+    parts = []
+    if event.duplicate:
+        parts.append("stored acknowledgement")
+    if event.escalated:
+        parts.append("escalated after 3 unauthenticated refusals")
+    if event.stored_epoch:
+        parts.append(f"tag epoch {event.stored_epoch}")
+    return f" [{', '.join(parts)}]" if parts else ""
 
 
 __all__ = ["GatewayEventHandler", "STAGE_NAMES"]

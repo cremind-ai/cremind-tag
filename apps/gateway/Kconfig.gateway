@@ -30,11 +30,12 @@ config CTAG_GW_TX_FRAME
 
 config CTAG_GW_EVENT_MAX
 	int "Serial: largest retained event payload (bytes)"
-	default 96
-	range 64 255
+	default 104
+	range 100 255
 	help
 	  One slot of the SERIAL_EVENT_RETAIN ring. EVT_RESULT, the largest
-	  retained event, encodes to at most 86 bytes.
+	  retained event, encodes to at most 100 bytes (every field at its
+	  largest value, flags and stored_epoch included).
 
 config CTAG_GW_EVQ_BYTES
 	int "Serial: best-effort event FIFO (bytes)"

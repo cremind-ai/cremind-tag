@@ -85,6 +85,7 @@ from cremind_tag.protocol.msgs import (  # noqa: E402
     CtrlAuth,
     CtrlAuthOk,
     CtrlChallenge,
+    CtrlError,
     CtrlHello,
     LayoutHeader,
     MessageError,
@@ -95,6 +96,7 @@ from cremind_tag.protocol.msgs import (  # noqa: E402
     RecPlaneData,
     RecProgress,
     RecResult,
+    TagCaps,
 )
 from cremind_tag.protocol.serial_frame import Frame, SerialFrameError, decode_frame, encode_frame  # noqa: E402
 from cremind_tag.render.reference import Panel, render_frame  # noqa: E402
@@ -334,6 +336,13 @@ def valid_layouts(pack: FontPack) -> dict[str, Layout]:
         )),
         "qr_only": Layout(64, 64, 0, W, (Qr(4, 4, 2, 3, B, b"HTTPS://CREMIND.IO/T/42"),)),
         "empty": Layout(1, 1, 0, B, ()),
+        # §4.3 render cost, at the limits: LAYOUT_MAX_QR QR commands; LINE endpoints on the edges of the box
+        # [-W, 2W) x [-H, 2H); exactly LAYOUT_MAX_LINE_STEPS steps (2 x 6144 + 4096).
+        "four_qr": Layout(64, 64, 0, W, tuple(Qr(2 + 16 * (i % 2), 2 + 16 * (i // 2), 1, 0, B, b"https://a.b/%d" % i)
+                                              for i in range(4))),
+        "line_box_edges": Layout(16, 16, 0, W, (Line(-16, -16, 31, 31, 1, B), Line(31, -16, -16, 31, 2, B))),
+        "line_steps_limit": Layout(2048, 16, 0, W, (Line(-2048, 0, 4095, 0, 1, B), Line(4095, 15, -2048, 15, 1, B),
+                                                    Line(0, 8, 4095, 8, 1, B))),
     }
 
 
@@ -389,6 +398,14 @@ def invalid_layouts(pack: FontPack) -> list[tuple[str, bytes]]:
         ("CLEAR colour 3", one(b"\x01\x03")),
         ("LINE width 0", raw(lay(Line(0, 0, 5, 5, 0, 1)))),
         ("LINE width 9", raw(lay(Line(0, 0, 5, 5, 9, 1)))),
+        ("LINE x0 -W-1", raw(lay(Line(-17, 0, 5, 5, 1, 1)))),
+        ("LINE y0 -H-1", raw(lay(Line(0, -17, 5, 5, 1, 1)))),
+        ("LINE x1 2W", raw(lay(Line(0, 0, 32, 5, 1, 1)))),
+        ("LINE y1 2H", raw(lay(Line(0, 0, 5, 32, 1, 1)))),
+        ("LINE extreme endpoints (-32768..32767)", raw(lay(Line(-32768, 5, 32767, 5, 1, 1)))),
+        ("LINE steps 16385", raw(Layout(2048, 16, 0, Color.WHITE, (
+            Line(-2048, 0, 4095, 0, 1, 1), Line(4095, 15, -2048, 15, 1, 1), Line(0, 8, 4095, 8, 1, 1),
+            Line(3, 3, 3, 3, 1, 1))))),
         ("RECT colour 7", raw(lay(Rect(0, 0, 5, 5, 0, 7)))),
         ("GLYPHS entries truncated", raw(lay(Glyphs(1, 16, 1, 0, 10, (Glyph(2, 0, 0), Glyph(3, 5, 0)))))[:-2]),
         ("GLYPHS total 513", raw(lay(*(Glyphs(1, 16, 1, 0, 10, glyph_run) for _ in range(3))))),
@@ -399,7 +416,13 @@ def invalid_layouts(pack: FontPack) -> list[tuple[str, bytes]]:
         ("QR len 97", raw(lay(Qr(0, 0, 1, 0, 1, b"https://cremind.io/" + b"x" * 78)))),
         ("QR space in text", raw(lay(Qr(0, 0, 1, 0, 1, b"https://a.b/c d")))),
         ("QR text truncated", raw(lay(Qr(0, 0, 1, 0, 1, b"https://a.b")))[:-1]),
+        ("5 QR commands", raw(lay(*(Qr(0, 0, 1, 0, 1, b"https://a.b") for _ in range(5))))),
+        ("5th QR before the 513th glyph", raw(lay(*(Qr(0, 0, 1, 0, 1, b"https://a.b") for _ in range(5)),
+                                               *(Glyphs(1, 16, 1, 0, 10, glyph_run) for _ in range(3))))),
+        ("513th glyph before the 5th QR", raw(lay(*(Glyphs(1, 16, 1, 0, 10, glyph_run) for _ in range(3)),
+                                               *(Qr(0, 0, 1, 0, 1, b"https://a.b") for _ in range(5))))),
         ("size 4097", raw(Layout(16, 16, 0, Color.WHITE, (Qr(0, 0, 1, 0, 1, b"x" * 96),) * 39))[:4097]),
+        ("LINE endpoint before a missing strike", raw(lay(Icon(1, 48, 1, 0, 0), Line(0, 0, 40, 0, 1, 1)))),
         ("GLYPHS strike (7, 16) missing", raw(lay(Glyphs(7, 16, 1, 0, 10, (Glyph(2, 0, 0),))))),
         ("GLYPHS strike (1, 32) missing", raw(lay(Glyphs(1, 32, 1, 0, 10, (Glyph(2, 0, 0),))))),
         ("ICON strike 48 missing", raw(lay(Icon(1, 48, 1, 0, 0)))),
@@ -464,7 +487,11 @@ def render_scenarios(pack: FontPack) -> list[tuple[str, str, Panel, Layout]]:
         Icon(1, 16, B, -8, 12),
         Glyphs(1, 24, B, 30, 30, (Glyph(13, 0, 0),)),
         Qr(28, -10, 1, 0, B, b"https://a.b"),
-        Line(-32768, 5, 32767, 5, 1, B),
+        # Lines that leave the canvas across every edge, their endpoints inside the §4.3 box [-W, 2W) x [-H, 2H).
+        Line(-40, 5, 79, 5, 1, B),
+        Line(20, -24, 20, 47, 2, B),
+        Line(-40, -24, 79, 47, 1, B),
+        Line(79, -24, -40, 47, 3, B),
     ))
     thick = Layout(64, 48, 0, W, tuple(
         Line(32, 24, 32 + dx, 24 + dy, width, B)
@@ -676,7 +703,12 @@ def serial_fixture(pack: FontPack) -> dict[str, Any]:
             "seq": 7, "update_id": 501, "bridge": 2, "tag_id": 0x1A2B3C4D, "epoch": 3, "revision": 18,
             "status": 0, "digest": bytes.fromhex("0011223344556677"), "battery_mv": 2950,
             "timing": {"wake_ms": 12000, "mesh_ms": 800, "transfer_ms": 4100, "refresh_ms": 3900,
-                       "suspend_ms": 640}}),
+                       "suspend_ms": 640}, "flags": 1, "stored_epoch": 3}),
+        ("result event, escalated stale epoch", "event", SerialMsg.EVT_RESULT, 0, E, 0, {
+            "seq": 8, "update_id": 502, "bridge": 3, "tag_id": 0x1A2B3C4D, "epoch": 3, "revision": 19,
+            "status": int(Status.STALE_EPOCH), "digest": bytes(8), "battery_mv": 0,
+            "timing": {"wake_ms": 0, "mesh_ms": 900, "transfer_ms": 0, "refresh_ms": 0, "suspend_ms": 0},
+            "flags": 2, "stored_epoch": 0xFFFFFFFF}),
         ("counters response", "response", SerialMsg.GET_COUNTERS, 10, R, 0, {
             "status": 0, "counters": {"crc_errors": 0, "overruns": 2, "events_dropped": 0, "len_errors": 1}}),
         ("event ack", "request", SerialMsg.EVENT_ACK, 11, 0, 0, {"seq": 7}),
@@ -742,7 +774,8 @@ def mesh_fixture() -> dict[str, Any]:
                                     stage=int(DeliveryStage.TRANSFERRING)),
         MeshOp.DELIVERY_RESULT: dict(result_seq=77, update_id=501, tag_id=0x1A2B3C4D, epoch=3, revision=18,
                                      status=0, digest=bytes.fromhex("0011223344556677"), battery_mv=2950,
-                                     wake_ms=12000, suspend_ms=640, transfer_ms=4100, refresh_ms=3900),
+                                     wake_ms=12000, suspend_ms=640, transfer_ms=4100, refresh_ms=3900,
+                                     stored_epoch=0x00010003, flags=0x01),
         MeshOp.RESULT_ACK: dict(result_seq=77),
         MeshOp.CAPS_GET: {},
         MeshOp.CAPS_STATUS: dict(proto=1, fw_major=0, fw_minor=1, fw_patch=0, board=int(Board.NRF52840_BRIDGE),
@@ -852,13 +885,20 @@ def _enrollment_blob() -> bytes:
     return enrollment.pack_blob(TAG_ID, SECRET, Board.LAOWU_BWR_NRF51802, PanelId.UC8176_420_BWR)
 
 
+def session_caps(plane_flags: int = 0x01) -> bytes:
+    """The fixture tag's CAPS value: a Laowu 4.2" black/white tag, 400 x 300, one plane."""
+    return TagCaps(1, TAG_ID, Board.LAOWU_BW_NRF51822, PanelId.UC8176_420_BW, 400, 300, 1, plane_flags,
+                   0, 1, 0, 192, 2).pack()
+
+
 def session_fixture(pack: FontPack) -> dict[str, Any]:
     nonce_b = bytes(range(0xA0, 0xB0))
     nonce_t = bytes(range(0xB0, 0xC0))
+    caps = session_caps()
     hello = bytes([CtrlMsg.HELLO]) + CtrlHello(1, TAG_ID, EPOCH, nonce_b).pack()
     challenge = bytes([CtrlMsg.CHALLENGE]) + CtrlChallenge(1, nonce_t, 2, 17, 0, 2950, 0).pack()
     k_epoch = session.derive_k_epoch(SECRET, TAG_ID, EPOCH)
-    th = session.transcript_hash(hello, challenge)
+    th = session.transcript_hash(caps, hello, challenge)
     mac_b = session.mac_b(k_epoch, th)
     mac_t = session.mac_t(k_epoch, th, mac_b)
     k_b2t, k_t2b = session.session_keys(k_epoch, th)
@@ -917,14 +957,28 @@ def session_fixture(pack: FontPack) -> dict[str, Any]:
         bad_mac = "OK"
     except session.AuthError:
         bad_mac = "AUTH_FAILED"
+    # An active relay flips plane_flags bit0 in the CAPS value the bridge reads: the bridge's transcript
+    # differs from the tag's, so the tag refuses the bridge's AUTH (§5.4) and nothing is ever rendered
+    # with the altered polarity.
+    relayed_caps = session_caps(0x00)
+    relayed_th = session.transcript_hash(relayed_caps, hello, challenge)
+    relayed_mac_b = session.mac_b(k_epoch, relayed_th)
+    try:
+        session.verify_mac_b(k_epoch, th, relayed_mac_b)
+        relayed = "OK"
+    except session.AuthError:
+        relayed = "AUTH_FAILED"
+    stale_error = bytes([CtrlMsg.ERROR]) + CtrlError(Status.STALE_EPOCH, EPOCH + 1).pack()
     return {
-        "description": "Handshake and records (docs/protocol.md §5.4-5.5). HELLO/CHALLENGE/AUTH/AUTH_OK are the "
-                       "reassembled CTRL messages including their type byte.",
+        "description": "Handshake and records (docs/protocol.md §5.4-5.5). HELLO/CHALLENGE/AUTH/AUTH_OK/ERROR are the "
+                       "reassembled CTRL messages including their type byte; caps is the CAPS characteristic value "
+                       "bound into th = SHA-256(caps | hello | challenge).",
         "tag_secret": _hex(SECRET),
         "tag_id": TAG_ID,
         "epoch": EPOCH,
         "nonce_b": _hex(nonce_b),
         "nonce_t": _hex(nonce_t),
+        "caps": _hex(caps),
         "hello": _hex(hello),
         "challenge": _hex(challenge),
         "k_epoch": _hex(k_epoch),
@@ -940,6 +994,14 @@ def session_fixture(pack: FontPack) -> dict[str, Any]:
         "records": records,
         "tampered": tamper_cases,
         "bad_mac_b": {"mac_b": _hex(flip(mac_b, 0)), "status_name": bad_mac},
+        "caps_relayed": {"description": "CAPS as an active relay rewrote it (plane_flags bit0 flipped): the bridge's "
+                                        "th and AUTH; the tag answers ERROR{AUTH_FAILED}",
+                         "caps": _hex(relayed_caps), "th": _hex(relayed_th),
+                         "auth": _hex(bytes([CtrlMsg.AUTH]) + CtrlAuth(relayed_mac_b).pack()),
+                         "status_name": relayed},
+        "stale_epoch": {"description": "The fixture HELLO (epoch 3) to the tag with stored epoch 4: ERROR carries the "
+                                       "tag's stored epoch",
+                        "stored_epoch": EPOCH + 1, "error": _hex(stale_error), **_status(Status.STALE_EPOCH)},
     }
 
 

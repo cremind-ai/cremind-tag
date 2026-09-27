@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <app_version.h>
 #include <zephyr/bluetooth/addr.h>
 #include <zephyr/kernel.h>
 
@@ -26,10 +27,14 @@
 #include "sched.h"
 #include "tagsess.h"
 
-#define BRIDGE_FW_MAJOR 0
-#define BRIDGE_FW_MINOR 1
-#define BRIDGE_FW_PATCH 0
-#define BRIDGE_FW       "0.1.0"
+/* The firmware version: apps/bridge/VERSION (tools/version.py keeps it equal
+ * to the repository's VERSION), as the tag's CAPS and the gateway's HELLO
+ * report theirs. CAPS_STATUS and the Health server carry the numbers, the
+ * maintenance port's HELLO/INFO the string. */
+#define BRIDGE_FW_MAJOR APP_VERSION_MAJOR
+#define BRIDGE_FW_MINOR APP_VERSION_MINOR
+#define BRIDGE_FW_PATCH APP_PATCHLEVEL
+#define BRIDGE_FW       APP_VERSION_STRING
 
 /* INFO counters, written straight into items[max] (n: entries used) so the
  * lists are not copied on the maintenance stack. */

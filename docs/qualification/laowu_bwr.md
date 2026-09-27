@@ -43,7 +43,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| tag-laowu-bwr | `apps/tag` | 95,516 / 258,048 | 63.0 % (15 %) | 14,324 / 16,384 | 2,060 (2,048) | pass (edtlib) | ok | 2026-09-27 |
+| tag-laowu-bwr | `apps/tag` | 95,628 / 258,048 | 62.9 % (15 %) | 14,324 / 16,384 | 2,060 (2,048) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -100,3 +100,4 @@ Measure with development equipment disconnected, after a power-on reset.
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
 | 2026-09-27 | documented | Board definition `boards/cremind/laowu_bwr` configures, links and passes `verify_stack.py` with a board-check app (not the tag app). |
 | 2026-09-28 | buildable | `apps/tag` (tag-laowu-bwr) links within the exact geometry: flash 95,516 / 258,048 B (63.0 % free), RAM 14,324 / 16,384 B (2,060 B free); `verify_stack.py` pass. Not yet run on hardware. |
+| 2026-09-28 | buildable | Protocol v1 finalisation: CAPS bound into the handshake transcript, `ERROR{status, stored_epoch}` always filled, the stored ACK clears `result_pending`. `tag-laowu-bwr`: flash 95,628 / 258,048 B (62.9 % free, +112 B), RAM 14,324 / 16,384 B (2,060 B free, unchanged); `verify_stack.py` pass; host tests, 894 twister cases on native_sim, the gateway interop (8/8) and the bridge maintenance interop pass. Not yet run on hardware. |

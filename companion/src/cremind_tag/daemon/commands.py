@@ -35,7 +35,7 @@ from .. import __version__
 from ..connector.models import MalformedResponse, parse_tag_hw_id, tag_hw_id
 from ..gateway.errors import GatewayError
 from ..gateway.events import UnprovBeacon
-from ..gateway.results import Ack
+from ..gateway.results import Ack, BridgeInfo
 from ..protocol.ids import Status, TagCommand
 from ..store.db import BridgeRecord, TagRecord, normalize_uuid
 from .store import CommandRow, OpResult, status_name
@@ -60,7 +60,25 @@ STEP_TIMEOUT_S = {"assign": 60.0, "unassign": 60.0, "provision": 180.0, "configu
 
 
 class CommandError(Exception):
-    """The command failed; the message is reported to Cremind as the result's ``error``."""
+    """The command failed; the message is reported to Cremind as the result's ``error`` (and ``result``,
+    when given, as the result's ``result``)."""
+
+    def __init__(self, message: str, *, result: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.result = result
+
+
+class StepFailed(CommandError):
+    """A step's gateway request answered a final status."""
+
+    def __init__(self, message: str, status: Status | int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+BRIDGE_FULL = "bridge_full"
+"""``assign_tag`` error when the bridge's assignment table is full (``ASSIGN_SET NO_RESOURCES``):
+Cremind marks the tag ``assign_failed``, drops it from that bridge and records ``max_tags``."""
 
 
 class OpWaiters:
@@ -144,7 +162,7 @@ class CommandExecutor:
             result = await asyncio.wait_for(handler(row), timeout)
             status = "succeeded"
         except CommandError as exc:
-            error = str(exc)
+            error, result = str(exc), exc.result
         except TimeoutError:
             error = "the command expired before it completed"
         except (KeyError, ValueError, TypeError, MalformedResponse) as exc:
@@ -180,8 +198,10 @@ class CommandExecutor:
         return await self.svc.db.run(lambda: self.svc.store.command_progress(row.command_id, **values))
 
     async def _step(self, row: CommandRow, step: str, send: Callable[[Any, int], Awaitable[Ack]], *,
-                    timeout: float | None = None, attempts: int | None = None) -> OpResult:
-        """Run one side-effecting gateway request to its retained result (module docstring)."""
+                    timeout: float | None = None, attempts: int | None = None,
+                    final: frozenset[Status] = frozenset()) -> OpResult:
+        """Run one side-effecting gateway request to its retained result (module docstring); a retained
+        status in ``final`` fails the step at once even when it is otherwise retried (:class:`StepFailed`)."""
         svc = self.svc
         timeout = timeout or STEP_TIMEOUT_S.get(step, 120.0)
         key = f"op:{step}"
@@ -199,8 +219,9 @@ class CommandExecutor:
                     status = _status(done.status)
                     if status == Status.NOT_FOUND:
                         not_found += 1
-                    if (status in TRANSIENT_STEP and (attempts is None or tries < attempts)) \
-                            or (status == Status.NOT_FOUND and not_found < NOT_FOUND_ESCALATE):
+                    if status not in final and (
+                            (status in TRANSIENT_STEP and (attempts is None or tries < attempts))
+                            or (status == Status.NOT_FOUND and not_found < NOT_FOUND_ESCALATE)):
                         tries += 1
                         log.info("command %s: step %s answered %s; retrying", row.command_id, step,
                                  status_name(done.status))
@@ -208,7 +229,7 @@ class CommandExecutor:
                         await asyncio.sleep(delay)
                         delay = min(delay * 2, svc.settings.retry_max_s)
                         continue
-                    raise CommandError(f"{step} answered {status_name(done.status)}")
+                    raise StepFailed(f"{step} answered {status_name(done.status)}", status)
             gateway = await self._gateway()
             if op_id is None:
                 op_id = svc.op_ids.next()
@@ -255,6 +276,20 @@ class CommandExecutor:
         finally:
             svc.ops.forget(op_id)
 
+    async def _max_tags(self, bridge: BridgeRecord) -> int | None:
+        """The bridge's ``max_tags`` (CAPS) as the gateway reports it now, else the last one seen."""
+        svc = self.svc
+        gateway = svc.gateway
+        if gateway is not None and gateway.connected:
+            try:
+                for info in await asyncio.wait_for(gateway.get_inventory(), 10):
+                    if info.addr == bridge.addr:
+                        svc.note_capacity(bridge.hw_id, bridge_capacity(info))
+                        break
+            except (GatewayError, TimeoutError) as exc:
+                log.info("command: bridge inventory unavailable (%s)", exc)
+        return svc.bridge_capacity.get(bridge.hw_id, {}).get("max_tags")
+
     async def _tag(self, hw_id: Any) -> TagRecord:
         tag_id = parse_tag_hw_id(str(hw_id).upper())
         tag = await self.svc.db.run(self.svc.db.find_tag, tag_id)
@@ -294,13 +329,34 @@ class CommandExecutor:
             svc.request_inventory()  # reports the epoch this companion used; Cremind re-queues above it
             raise CommandError(f"epoch {epoch} is older than epoch {tag.epoch} this companion already used for "
                                f"tag {tag.hw_id}; the inventory now reports it")
+        view = await svc.db.run(svc.store.get_view, tag.tag_id)
+        floor = view.epoch_floor if view is not None else 0
+        if epoch <= floor and not progress.get("assigned"):
+            svc.request_inventory()  # reports the floor; Cremind re-queues above it
+            raise CommandError(f"epoch {epoch} is not above epoch {floor}, which tag {tag.hw_id} reported as its "
+                               "stored epoch (STALE_EPOCH); the inventory now reports it")
         if not progress.get("assigned") and (tag.epoch, tag.bridge_addr) == (epoch, bridge.addr):
             progress = await self._save(row, assigned=True)  # already done (an earlier copy of this command)
         if not progress.get("assigned"):
             if svc.secrets is None:
                 raise CommandError("no secret store is available to derive K_epoch")
             key = await asyncio.to_thread(svc.secrets.k_epoch, tag.tag_id, epoch, tag.secret_ref)
-            await self._step(row, "assign", lambda gw, op: gw.assign_tag(addr, tag.tag_id, epoch, key, op_id=op))
+            try:
+                await self._step(row, "assign", lambda gw, op: gw.assign_tag(addr, tag.tag_id, epoch, key, op_id=op),
+                                 final=frozenset({Status.NO_RESOURCES}))
+            except StepFailed as exc:
+                if exc.status != Status.NO_RESOURCES:
+                    raise
+                # ASSIGN_SET NO_RESOURCES: the bridge's assignment table is full (CAPS max_tags). Retrying
+                # cannot help; Cremind marks the tag assign_failed and an admin picks another bridge.
+                max_tags = await self._max_tags(bridge)
+                log.warning("command %s: bridge %s is full (max_tags %s): tag %s not assigned", row.command_id,
+                            bridge.hw_id, max_tags, tag.hw_id)
+                svc.request_inventory()
+                result: dict[str, Any] = {"error": BRIDGE_FULL}
+                if max_tags is not None:
+                    result["max_tags"] = max_tags
+                raise CommandError(BRIDGE_FULL, result=result) from None
             await svc.db.run(lambda: svc.store.on_assigned(tag.tag_id, epoch=epoch, bridge_addr=addr,
                                                            bridge_hw_id=bridge.hw_id))
             progress = await self._save(row, assigned=True)
@@ -526,6 +582,13 @@ class CommandExecutor:
         return out
 
 
+def bridge_capacity(info: BridgeInfo) -> dict[str, int | None]:
+    """``max_tags`` (the bridge's ``CAPS_STATUS``, as the gateway caches it) and ``assigned`` (the
+    assignments the gateway holds for that bridge) of one ``GET_INVENTORY`` item."""
+    max_tags = info.caps.max_tags
+    valid = isinstance(max_tags, int) and 1 <= max_tags <= 255
+    return {"max_tags": max_tags if valid else None, "assigned": min(len(info.assigned), 255)}
+
 def _status(value: int) -> Status | int:
     try:
         return Status(value)
@@ -538,4 +601,4 @@ def _safe_args(row: CommandRow) -> str:
         "tag_id", "epoch", "bridge_hw_id", "hw_id", "uuid", "duration_s"))
 
 
-__all__ = ["CommandError", "CommandExecutor", "OpWaiters"]
+__all__ = ["BRIDGE_FULL", "CommandError", "CommandExecutor", "OpWaiters", "StepFailed", "bridge_capacity"]

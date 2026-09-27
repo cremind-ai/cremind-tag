@@ -32,6 +32,18 @@ config CTAG_RENDER
 	  Bit-exact strip renderer (docs/protocol.md 4.4), font-pack reader
 	  (docs/fontpack.md) and the vendored Nayuki qrcodegen v1.8.0. Bridge.
 
+config CTAG_RENDER_QR_SLOTS
+	int "QR symbols the renderer keeps across the strips of a frame"
+	depends on CTAG_RENDER
+	default 4
+	range 1 4
+	help
+	  408 bytes of ctag_render_work each. With one per QR command
+	  (docs/protocol.md 4.3 allows LAYOUT_MAX_QR = 4) every symbol is
+	  encoded once per frame; with fewer the commands beyond the slots
+	  share the last one and are re-encoded, with their remembered mask,
+	  for every strip they reach.
+
 config CTAG_FRAG
 	bool "GATT fragmentation"
 	help

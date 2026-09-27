@@ -1,7 +1,8 @@
 """Logical screen ("layout") codec and validator (docs/protocol.md §4.1–§4.3).
 
 ``decode_layout`` performs the structural checks of §4.3 in their normative
-order and raises ``LayoutError`` carrying the spec status of the first failure;
+order (the render-cost bounds included: LINE endpoints and steps, QR count)
+and raises ``LayoutError`` carrying the spec status of the first failure;
 ``check_strikes`` is the font-pack step that runs only on a structurally valid
 layout, and ``check_panel`` the panel-geometry rule of §4.4. Commands without
 a variable part are the generated fixed-layout classes; ``Glyphs`` and ``Qr``
@@ -23,6 +24,8 @@ from .ids import (
     LAYOUT_MAGIC,
     LAYOUT_MAX_COMMANDS,
     LAYOUT_MAX_GLYPHS,
+    LAYOUT_MAX_LINE_STEPS,
+    LAYOUT_MAX_QR,
     LAYOUT_QR_MAX_TEXT,
     PROTO_VERSION,
     Color,
@@ -162,11 +165,21 @@ def _check_color(color: int, what: str) -> None:
         raise _invalid(f"{what}: colour {color}")
 
 
-def _check_command(cmd: Command) -> None:
-    """Field bounds of §4.3, in field order."""
+def line_steps(cmd: Line) -> int:
+    """Bresenham steps of a LINE: max(|dx|, |dy|) + 1 (§4.3 render cost)."""
+    return max(abs(cmd.x1 - cmd.x0), abs(cmd.y1 - cmd.y0)) + 1
+
+
+def _check_command(cmd: Command, width: int, height: int) -> None:
+    """Field bounds of §4.3, in field order (LINE endpoints: the box [-W, 2W) x [-H, 2H))."""
     name = type(cmd).__name__
-    if isinstance(cmd, Line) and not 1 <= cmd.width <= 8:
-        raise _invalid(f"LINE width {cmd.width}")
+    if isinstance(cmd, Line):
+        for field, value, side in (("x0", cmd.x0, width), ("y0", cmd.y0, height), ("x1", cmd.x1, width),
+                                   ("y1", cmd.y1, height)):
+            if not -side <= value < 2 * side:
+                raise _invalid(f"LINE {field} {value} outside [{-side}, {2 * side})")
+        if not 1 <= cmd.width <= 8:
+            raise _invalid(f"LINE width {cmd.width}")
     if isinstance(cmd, Qr):
         if not 1 <= cmd.module_px <= 8:
             raise _invalid(f"QR module_px {cmd.module_px}")
@@ -224,17 +237,25 @@ def decode_layout(data: bytes) -> Layout:
     if h.cmd_count > LAYOUT_MAX_COMMANDS:
         raise LayoutError(Status.TOO_LARGE, f"{h.cmd_count} commands > {LAYOUT_MAX_COMMANDS}")
     pos = LayoutHeader.LEN
-    glyph_total = 0
+    glyph_total = qr_total = step_total = 0
     commands: list[Command] = []
     for index in range(h.cmd_count):
         if pos >= len(data):
             raise _invalid(f"command {index} missing")
         cmd, pos = _read_command(data, pos)
-        _check_command(cmd)
+        _check_command(cmd, h.width, h.height)
         if isinstance(cmd, Glyphs):
             glyph_total += len(cmd.glyphs)
             if glyph_total > LAYOUT_MAX_GLYPHS:
                 raise LayoutError(Status.TOO_LARGE, f"more than {LAYOUT_MAX_GLYPHS} glyphs")
+        elif isinstance(cmd, Qr):
+            qr_total += 1
+            if qr_total > LAYOUT_MAX_QR:
+                raise _invalid(f"more than {LAYOUT_MAX_QR} QR commands")
+        elif isinstance(cmd, Line):
+            step_total += line_steps(cmd)
+            if step_total > LAYOUT_MAX_LINE_STEPS:
+                raise _invalid(f"LINE steps above {LAYOUT_MAX_LINE_STEPS}")
         commands.append(cmd)
     if pos != len(data):
         raise _invalid(f"{len(data) - pos} bytes after the last command")

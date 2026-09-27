@@ -15,6 +15,7 @@ struct fake_panel fake_panel;
 struct fake_store fake_store;
 uint32_t fake_now;
 uint16_t fake_battery;
+uint8_t fake_caps[CTAG_TAG_CAPS_LEN];
 
 static uint8_t nonce[16];
 static bool nonce_set;
@@ -35,7 +36,31 @@ void fake_set_nonce(const uint8_t *n, size_t len)
 	nonce_set = true;
 }
 
+void fake_caps_for(uint32_t tag_id, uint8_t planes, uint16_t plane_len, uint8_t plane_flags)
+{
+	const struct ctag_tag_caps caps = {
+		.proto = CTAG_PROTO_VERSION,
+		.tag_id = tag_id,
+		.board = CTAG_BOARD_NRF52DK_TAG,
+		.panel = CTAG_PANEL_NONE,
+		.width = 64u,
+		.height = (uint16_t)(plane_len / 8u),
+		.planes = planes,
+		.plane_flags = plane_flags,
+		.fw_minor = 1u,
+		.max_record = CTAG_TAG_RECORD_PAYLOAD_MAX,
+		.credits = TAG_CREDITS,
+	};
+
+	(void)ctag_tag_caps_pack(&caps, fake_caps, sizeof(fake_caps));
+}
+
 /* ---- platform hooks ---- */
+
+void tag_hal_caps(uint8_t caps[CTAG_TAG_CAPS_LEN])
+{
+	memcpy(caps, fake_caps, CTAG_TAG_CAPS_LEN);
+}
 
 uint16_t tag_hal_battery_mv(void)
 {

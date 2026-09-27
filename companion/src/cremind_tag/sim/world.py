@@ -51,6 +51,7 @@ class BridgeSpec:
     flash_size: int = 64 * MIB
     bad_sectors: tuple[int, ...] = ()
     maintenance_port: bool = True
+    max_tags: int | None = None  # assignment table size (CAPS max_tags); None: MAX_TAGS_PER_BRIDGE
 
 
 @dataclass
@@ -167,7 +168,8 @@ class Simulator:
             rng = rng_stream(seed, "bridge", index)
             bridge = SimBridge(spec.name or f"bridge-{index + 1}", uuid=rng.randbytes(16), clock=self.clock,
                                mesh=self.mesh, air=self.air, rng=rng, flash_size=spec.flash_size,
-                               board=Board.NRF52840_BRIDGE, faults=config.faults.bridge, bad_sectors=spec.bad_sectors)
+                               board=Board.NRF52840_BRIDGE, faults=config.faults.bridge, bad_sectors=spec.bad_sectors,
+                               max_tags=spec.max_tags)
             self.bridges.append(bridge)
         self.gateway = SimGateway(clock=self.clock, mesh=self.mesh, rng=rng_stream(seed, "gateway"),
                                   bridges=self.bridges, delivery_queue=config.delivery_queue,

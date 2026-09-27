@@ -139,14 +139,14 @@ static void txq_commit(struct tag_core *c, size_t len)
 	c->txq_tail = (uint8_t)(c->txq_tail + 2u + len);
 }
 
-/* A two-byte plaintext message: ERROR on CTRL or CREDIT on STATUS. */
-static void send_plain(struct tag_core *c, uint8_t chr, uint8_t type, uint8_t arg)
+/* CREDIT{n} on STATUS (plaintext). */
+static void send_credit(struct tag_core *c, uint8_t n)
 {
-	uint8_t *p = txq_begin(c, chr, 2u);
+	uint8_t *p = txq_begin(c, TAG_CHR_STATUS, 2u);
 
 	if (p != NULL) {
-		p[0] = type;
-		p[1] = arg;
+		p[0] = CTAG_PLAIN_CREDIT;
+		p[1] = n;
 		txq_commit(c, 2u);
 	}
 }
@@ -169,10 +169,16 @@ static FRAME bool send_record(struct tag_core *c, uint8_t type, const uint8_t *p
 	return true;
 }
 
-/* ERROR{status} on CTRL, then disconnect (5.4: any failure ends the session). */
+/* ERROR{status, stored_epoch} on CTRL, then disconnect (5.4: any failure ends
+ * the session; the stored epoch is not secret and tells the bridge how far
+ * behind a STALE_EPOCH is). */
 static void fail(struct tag_core *c, uint8_t status)
 {
-	send_plain(c, TAG_CHR_CTRL, CTAG_CTRL_ERROR, status);
+	uint8_t *p = txq_begin(c, TAG_CHR_CTRL, CTAG_SESSION_ERROR_LEN);
+
+	if (p != NULL) {
+		txq_commit(c, ctag_session_error_pack(p, status, c->stored_epoch));
+	}
 	memset(&c->s, 0, sizeof(c->s)); /* record keys are dead from here on */
 	c->closing = 1u;
 }
@@ -180,7 +186,7 @@ static void fail(struct tag_core *c, uint8_t status)
 static void credit(struct tag_core *c)
 {
 	c->bridge_credits++;
-	send_plain(c, TAG_CHR_STATUS, CTAG_PLAIN_CREDIT, 1u);
+	send_credit(c, 1u);
 }
 
 static FRAME void result(struct tag_core *c, uint64_t update_id, uint32_t revision, uint8_t status,
@@ -213,12 +219,14 @@ static FRAME void result(struct tag_core *c, uint64_t update_id, uint32_t revisi
 static FRAME void on_hello(struct tag_core *c)
 {
 	struct ctag_ctrl_challenge ch;
+	uint8_t caps[CTAG_TAG_CAPS_LEN];
 	uint8_t *out = txq_begin(c, TAG_CHR_CTRL, CTAG_SESSION_CHALLENGE_LEN);
 	size_t n = 0;
 
 	if (out == NULL) {
 		return;
 	}
+	tag_hal_caps(caps); /* 5.4: the transcript covers the CAPS this tag serves */
 	memset(&ch, 0, sizeof(ch));
 	ch.stored_epoch = c->stored_epoch;
 	if (c->rec_state == TAG_REC_VALID) {
@@ -237,8 +245,8 @@ static FRAME void on_hello(struct tag_core *c)
 		c->closing = 1u;
 		return;
 	}
-	if (ctag_session_tag_hello(&c->s, c->cfg.tag_id, c->cfg.secret, &ch, c->pt, c->ctrl_len, out,
-				   &n) != CTAG_STATUS_OK) {
+	if (ctag_session_tag_hello(&c->s, c->cfg.tag_id, c->cfg.secret, caps, sizeof(caps), &ch, c->pt,
+				   c->ctrl_len, out, &n) != CTAG_STATUS_OK) {
 		c->closing = 1u;
 	}
 	txq_commit(c, n);
@@ -253,20 +261,18 @@ static FRAME void on_auth(struct tag_core *c)
 	if (out == NULL) {
 		return;
 	}
-	st = ctag_session_tag_auth(&c->s, c->pt, c->ctrl_len, out, &n);
+	st = ctag_session_tag_auth(&c->s, c->stored_epoch, c->pt, c->ctrl_len, out, &n);
 	/* 5.4: a newer epoch is persisted only now, and before AUTH_OK leaves. */
 	if (st == CTAG_STATUS_OK && c->s.epoch > c->stored_epoch && save_epoch(c, c->s.epoch) != 0) {
 		memset(&c->s, 0, sizeof(c->s));
 		st = CTAG_STATUS_STORAGE_ERROR;
-		out[0] = CTAG_CTRL_ERROR;
-		out[1] = st;
-		n = CTAG_SESSION_ERROR_LEN;
+		n = ctag_session_error_pack(out, st, c->stored_epoch);
 	}
 	txq_commit(c, n);
 	if (st == CTAG_STATUS_OK) {
 		c->auth_failures = 0u;
 		c->bridge_credits = TAG_CREDITS;
-		send_plain(c, TAG_CHR_STATUS, CTAG_PLAIN_CREDIT, TAG_CREDITS);
+		send_credit(c, TAG_CREDITS);
 		return;
 	}
 	if (st == CTAG_STATUS_AUTH_FAILED && ++c->auth_failures >= AUTH_FAILURES_BEFORE_SKIP) {

@@ -1,8 +1,9 @@
 /*
  * The bridge's tag session against a fake tag built from the tag-side
- * libraries (ctag_session tag role, ctag_txn, ctag_frag): handshake, credits,
- * the render pre-pass digest, strip streaming, results, and the failure paths
- * of docs/protocol.md 5.4-5.6 and 10.
+ * libraries (ctag_session tag role, ctag_txn, ctag_frag): handshake (over the
+ * CAPS the tag serves), credits, the render pre-pass digest, strip streaming,
+ * results (with the tag's stored epoch and the result flags), and the failure
+ * paths of docs/protocol.md 5.4-5.6 and 10.
  */
 #include <string.h>
 
@@ -86,6 +87,9 @@ static int next_event(void)
 
 struct fake_tag {
 	struct ctag_tag_caps caps;
+	/* An active relay: the bridge reads relay_caps, the tag hashes caps. */
+	bool relay;
+	struct ctag_tag_caps relay_caps;
 	struct ctag_session s;
 	struct ctag_frag_rx ctrl_rx;
 	struct ctag_frag_rx data_rx;
@@ -211,11 +215,15 @@ static void tag_ctrl_msg(const uint8_t *msg, size_t len)
 			.flags = ctag_txn_unknown_pending(tag.has_rec ? &tag.rec : NULL) ? 1u : 0u,
 		};
 
+		uint8_t caps[CTAG_TAG_CAPS_LEN];
+
 		zassert_ok(ctag_crypto_random(ch.nonce_t, sizeof(ch.nonce_t)));
-		(void)ctag_session_tag_hello(&tag.s, TAG, secret, &ch, msg, len, out, &out_len);
+		(void)ctag_tag_caps_pack(&tag.caps, caps, sizeof(caps)); /* the CAPS it serves */
+		(void)ctag_session_tag_hello(&tag.s, TAG, secret, caps, sizeof(caps), &ch, msg, len, out,
+					     &out_len);
 		tag_notify(&tag.ctrl_tx, EV_CTRL_IND, out, out_len);
 	} else if (msg[0] == CTAG_CTRL_AUTH) {
-		uint8_t st = ctag_session_tag_auth(&tag.s, msg, len, out, &out_len);
+		uint8_t st = ctag_session_tag_auth(&tag.s, tag.stored_epoch, msg, len, out, &out_len);
 
 		tag_notify(&tag.ctrl_tx, EV_CTRL_IND, out, out_len);
 		if (st == CTAG_STATUS_OK) {
@@ -403,7 +411,7 @@ static int io_read_caps(void *ctx)
 {
 	uint8_t buf[CTAG_TAG_CAPS_LEN];
 
-	(void)ctag_tag_caps_pack(&tag.caps, buf, sizeof(buf));
+	(void)ctag_tag_caps_pack(tag.relay ? &tag.relay_caps : &tag.caps, buf, sizeof(buf));
 	push(EV_CAPS, buf, sizeof(buf));
 	return 0;
 }
@@ -631,6 +639,8 @@ static void end_to_end(const char *name, bool ind_first)
 	zassert_equal(r.refresh_ms, 1234);
 	zassert_equal(r.battery_mv, 2950);
 	zassert_equal(r.wake_ms, 5000 - 1000);
+	zassert_equal(r.flags, 0u, "drawn: no result flag");
+	zassert_equal(r.stored_epoch, EPOCH, "the tag stores the session's epoch after AUTH_OK");
 	zassert_true(stage_sent(42, CTAG_STAGE_TRANSFERRING));
 	zassert_true(stage_sent(42, CTAG_STAGE_REFRESHING));
 	zassert_true(max_in_event <= TSESS_RECORDS_PER_EVENT, "%u records in one event",
@@ -675,6 +685,9 @@ ZTEST(bridge_session, test_duplicate_answered_by_tag)
 	zassert_equal(tag.plane_records, 0, "no image transfer for a displayed revision");
 	zassert_equal(tag.refreshes, 1);
 	zassert_mem_equal(r.digest, v->frame_digest, 8);
+	/* The tag's duplicate flag reaches the gateway (bit0). */
+	zassert_equal(r.flags, CTAG_RESULT_FLAG_DUPLICATE);
+	zassert_equal(r.stored_epoch, EPOCH);
 }
 
 ZTEST(bridge_session, test_disconnect_mid_transfer)
@@ -745,6 +758,10 @@ ZTEST(bridge_session, test_stale_epoch_ends_jobs)
 	zassert_equal(r.status, CTAG_STATUS_STALE_EPOCH);
 	zassert_false(dlv_has_work(&benv.dlv, TAG));
 	zassert_equal(sess.c.unauth_statuses, DLV_UNAUTH_REPEATS);
+	/* The tag's ERROR carried its stored epoch: the companion reassigns above
+	 * it. The status was escalated from unauthenticated refusals (bit1). */
+	zassert_equal(r.stored_epoch, EPOCH + 1u);
+	zassert_equal(r.flags, CTAG_RESULT_FLAG_ESCALATED);
 }
 
 ZTEST(bridge_session, test_wrong_key_auth_failed)
@@ -762,7 +779,44 @@ ZTEST(bridge_session, test_wrong_key_auth_failed)
 	zassert_equal(run(10), CTAG_STATUS_AUTH_FAILED);
 	zassert_true(last_result(42, &r));
 	zassert_equal(r.status, CTAG_STATUS_AUTH_FAILED);
+	zassert_equal(r.flags, CTAG_RESULT_FLAG_ESCALATED);
+	zassert_equal(r.stored_epoch, 0u, "from the tag's CHALLENGE and ERROR");
 	zassert_equal(tag.stored_epoch, 0, "a failed AUTH never raises the tag's epoch");
+}
+
+/*
+ * 5.4, review finding "CAPS is never authenticated": an active relay rewrites
+ * plane_flags in the CAPS the bridge reads. The transcript covers CAPS, so the
+ * tag refuses the bridge's AUTH: nothing is rendered with the altered polarity,
+ * and the unauthenticated AUTH_FAILED ends the job only in the third session.
+ */
+ZTEST(bridge_session, test_relayed_caps_fail_the_handshake)
+{
+	const struct v_render *v = scenario("rot0_bw_status_card");
+	struct ctag_mesh_delivery_result r;
+
+	setup(v, NULL);
+	send(v, 1, 42);
+	tag.relay = true;
+	tag.relay_caps = tag.caps;
+	tag.relay_caps.plane_flags ^= 0x01u;
+	for (int i = 0; i < (int)DLV_UNAUTH_REPEATS - 1; i++) {
+		zassert_equal(run(10), CTAG_STATUS_AUTH_FAILED);
+		zassert_false(last_result(42, &r));
+	}
+	zassert_equal(run(10), CTAG_STATUS_AUTH_FAILED);
+	zassert_true(last_result(42, &r));
+	zassert_equal(r.status, CTAG_STATUS_AUTH_FAILED);
+	zassert_equal(r.flags, CTAG_RESULT_FLAG_ESCALATED);
+	zassert_equal(tag.records, 0u, "no record, no frame, after a failed AUTH");
+	zassert_equal(tag.frames_begun + tag.refreshes, 0u);
+	/* Without the relay the same tag and key deliver. */
+	tag.relay = false;
+	send(v, 2, 43);
+	zassert_equal(run(10), CTAG_STATUS_OK);
+	zassert_true(last_result(43, &r));
+	zassert_equal(r.status, CTAG_STATUS_OK);
+	zassert_mem_equal(r.digest, v->frame_digest, 8);
 }
 
 /* 10: the count of an unauthenticated status restarts after an

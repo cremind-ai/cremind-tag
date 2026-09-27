@@ -492,10 +492,21 @@ def gen_enrollment(root: Path) -> Header:
 def gen_session(root: Path) -> Header:
     fx = load(root, "session.json")
     h = Header("v_session", ("ctag/proto_ids.h",))
-    for key in ("tag_secret", "nonce_b", "nonce_t", "hello", "challenge", "k_epoch", "th", "mac_b", "mac_t",
-                "auth", "auth_ok", "k_b2t", "k_t2b"):
+    for key in ("tag_secret", "nonce_b", "nonce_t", "caps", "hello", "challenge", "k_epoch", "th", "mac_b",
+                "mac_t", "auth", "auth_ok", "k_b2t", "k_t2b"):
         ident, n = h.hexblob(fx[key])
         h.body += [f"#define V_SESSION_{key.upper()} {ident}", f"#define V_SESSION_{key.upper()}_LEN {n}u"]
+    relayed = fx["caps_relayed"]
+    for key in ("caps", "th", "auth"):
+        ident, n = h.hexblob(relayed[key])
+        h.body += [f"#define V_SESSION_RELAYED_{key.upper()} {ident}",
+                   f"#define V_SESSION_RELAYED_{key.upper()}_LEN {n}u"]
+    assert relayed["status_name"] == "AUTH_FAILED"
+    stale = fx["stale_epoch"]
+    ident, n = h.hexblob(stale["error"])
+    h.body += [f"#define V_SESSION_STALE_STORED_EPOCH {stale['stored_epoch']}u",
+               f"#define V_SESSION_STALE_ERROR {ident}", f"#define V_SESSION_STALE_ERROR_LEN {n}u",
+               f"#define V_SESSION_STALE_STATUS {status(stale['status_name'])}"]
     nxt, _ = h.hexblob(fx["k_epoch_next"]["k_epoch"])
     bad, _ = h.hexblob(fx["bad_mac_b"]["mac_b"])
     ex = fx["nonce_example"]

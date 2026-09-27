@@ -9,7 +9,15 @@ import pytest
 from cremind_tag.protocol import session
 from cremind_tag.protocol.fragments import MAX_MESSAGE, Fragmenter, FragmentError, Reassembler
 from cremind_tag.protocol.ids import CtrlMsg, GattChr, MeshOp, RecordDir, RecordType, Status, mesh_opcode_bytes
-from cremind_tag.protocol.msgs import MESH_MESSAGES, CtrlChallenge, CtrlHello, OversizeError, TruncatedError
+from cremind_tag.protocol.msgs import (
+    MESH_MESSAGES,
+    CtrlChallenge,
+    CtrlError,
+    CtrlHello,
+    OversizeError,
+    TagCaps,
+    TruncatedError,
+)
 
 
 def test_fragment_vectors(fixture: Any) -> None:
@@ -60,7 +68,9 @@ def test_handshake_vector(fixture: Any) -> None:
     k_epoch = session.derive_k_epoch(secret, fx["tag_id"], fx["epoch"])
     assert k_epoch.hex() == fx["k_epoch"]
     assert session.derive_k_epoch(secret, fx["tag_id"], fx["k_epoch_next"]["epoch"]).hex() == fx["k_epoch_next"]["k_epoch"]
-    th = session.transcript_hash(hello, bytes.fromhex(fx["challenge"]))
+    caps = bytes.fromhex(fx["caps"])
+    assert TagCaps.unpack(caps).tag_id == fx["tag_id"]
+    th = session.transcript_hash(caps, hello, bytes.fromhex(fx["challenge"]))
     assert th.hex() == fx["th"]
     mac_b = session.mac_b(k_epoch, th)
     assert mac_b.hex() == fx["mac_b"] == fx["auth"][2:]
@@ -73,6 +83,32 @@ def test_handshake_vector(fixture: Any) -> None:
     assert (k_b2t.hex(), k_t2b.hex()) == (fx["k_b2t"], fx["k_t2b"])
     example = fx["nonce_example"]
     assert session.record_nonce(RecordDir[example["direction"]], example["counter"]).hex() == example["nonce"]
+
+
+def test_caps_bound_into_the_transcript(fixture: Any) -> None:
+    """§5.4: th covers CAPS, so a relay that rewrites the CAPS the bridge reads breaks the handshake."""
+    fx = fixture("session.json")
+    k_epoch = bytes.fromhex(fx["k_epoch"])
+    hello, challenge = bytes.fromhex(fx["hello"]), bytes.fromhex(fx["challenge"])
+    tag_th = session.transcript_hash(bytes.fromhex(fx["caps"]), hello, challenge)
+    relayed = fx["caps_relayed"]
+    relayed_caps = bytes.fromhex(relayed["caps"])
+    assert TagCaps.unpack(relayed_caps).plane_flags != TagCaps.unpack(bytes.fromhex(fx["caps"])).plane_flags
+    bridge_th = session.transcript_hash(relayed_caps, hello, challenge)
+    assert bridge_th.hex() == relayed["th"] != tag_th.hex()
+    mac_b = bytes.fromhex(relayed["auth"])[1:]
+    assert mac_b == session.mac_b(k_epoch, bridge_th)
+    with pytest.raises(session.AuthError):
+        session.verify_mac_b(k_epoch, tag_th, mac_b)
+    assert relayed["status_name"] == "AUTH_FAILED"
+
+
+def test_error_carries_the_stored_epoch(fixture: Any) -> None:
+    case = fixture("session.json")["stale_epoch"]
+    msg = bytes.fromhex(case["error"])
+    assert msg[0] == CtrlMsg.ERROR and len(msg) == 1 + CtrlError.LEN == 6
+    assert CtrlError.unpack(msg[1:]) == CtrlError(Status.STALE_EPOCH, case["stored_epoch"])
+    assert case["status_name"] == "STALE_EPOCH"
 
 
 def test_record_vectors(fixture: Any) -> None:

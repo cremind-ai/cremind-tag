@@ -18,6 +18,7 @@
 #define GLYPH_REACH_LO 128
 #define GLYPH_REACH_HI (128 + 255)
 #define QR_MAX_MODULES 57 /* version 10 */
+#define QR_NONE        0xFFFFu /* no command: layout offsets are below LAYOUT_HARD_MAX */
 
 struct strip {
 	const struct ctag_render *r;
@@ -274,30 +275,116 @@ static void paint_progress(const struct strip *s, const struct ctag_layout_cmd_p
 	}
 }
 
+/* The memo entry of a QR command (4.3: at most LAYOUT_MAX_QR per layout, so
+ * a validated layout always finds one; NO_MEMO otherwise). */
+#define NO_MEMO ((size_t)CTAG_LAYOUT_MAX_QR)
+
+static size_t qr_memo(struct ctag_render_work *w, uint16_t offset)
+{
+	size_t i;
+
+	for (i = 0; i < CTAG_LAYOUT_MAX_QR; i++) {
+		if (w->memo_cmd[i] == offset || w->memo_cmd[i] == QR_NONE) {
+			w->memo_cmd[i] = offset;
+			return i;
+		}
+	}
+	return NO_MEMO;
+}
+
+static uint8_t memo_size(const struct ctag_render_work *w, size_t memo)
+{
+	return memo < NO_MEMO ? w->memo_size[memo] : 0u;
+}
+
+/*
+ * The mask Nayuki's automatic choice took, read back from the symbol's first
+ * format-bit copy: bits = (data << 10 | BCH) ^ 0x5412 with data = ecl << 3 |
+ * mask, and bits 10, 11, 12 are drawn at (4, 8), (3, 8), (2, 8).
+ */
+static uint8_t qr_mask(const uint8_t *qr)
+{
+	return (uint8_t)((qrcodegen_getModule(qr, 4, 8) ? 0u : 1u) |
+			 (qrcodegen_getModule(qr, 3, 8) ? 2u : 0u) |
+			 (qrcodegen_getModule(qr, 2, 8) ? 0u : 4u));
+}
+
+/* The command's symbol: from its slot, else encoded into a free slot or the
+ * shared last one (the remembered mask gives the same symbol faster). */
+static const uint8_t *qr_symbol(struct ctag_render_work *w, const struct ctag_layout_command *cmd,
+				size_t memo)
+{
+	const struct ctag_layout_cmd_qr *q = &cmd->u.qr;
+	enum qrcodegen_Mask mask = qrcodegen_Mask_AUTO;
+	size_t slot = CTAG_RENDER_QR_SLOTS - 1u;
+	size_t i;
+
+	for (i = 0; i < CTAG_RENDER_QR_SLOTS; i++) {
+		if (w->qr_cmd[i] == cmd->offset) {
+			return w->qr[i];
+		}
+	}
+	for (i = 0; i < CTAG_RENDER_QR_SLOTS; i++) {
+		if (w->qr_cmd[i] == QR_NONE) {
+			slot = i;
+			break;
+		}
+	}
+	if (memo_size(w, memo) != 0u) {
+		mask = (enum qrcodegen_Mask)w->memo_mask[memo];
+	}
+	memcpy(w->text, cmd->var, q->len);
+	w->text[q->len] = '\0';
+	w->qr_cmd[slot] = QR_NONE;
+	if (!qrcodegen_encodeText(w->text, w->tmp, w->qr[slot], (enum qrcodegen_Ecc)q->ecc, 1, 10,
+				  mask, true)) {
+		return NULL;
+	}
+	w->qr_cmd[slot] = cmd->offset;
+	if (memo < NO_MEMO) {
+		w->memo_size[memo] = (uint8_t)qrcodegen_getSize(w->qr[slot]);
+		w->memo_mask[memo] = qr_mask(w->qr[slot]);
+	}
+	return w->qr[slot];
+}
+
+static int32_t floor_div(int32_t a, int32_t m)
+{
+	return a >= 0 ? a / m : -((-a + m - 1) / m);
+}
+
+/* Modules [*lo, *hi) of a row or column of n squares of m pixels from o that
+ * reach the clip range [c0, c1): (k + 1) * m > c0 - o and k * m < c1 - o. */
+static void module_span(int32_t o, int32_t m, int32_t n, int32_t c0, int32_t c1, int32_t *lo,
+			int32_t *hi)
+{
+	*lo = max32(0, floor_div(c0 - o, m));
+	*hi = min32(n, -floor_div(o - c1, m));
+}
+
 static int paint_qr(const struct strip *s, const struct ctag_layout_command *cmd)
 {
 	const struct ctag_layout_cmd_qr *q = &cmd->u.qr;
 	struct ctag_render_work *w = s->r->work;
 	int32_t m = q->module_px;
-	int32_t n, mx, my;
+	size_t memo = qr_memo(w, cmd->offset);
+	int32_t n = memo_size(w, memo) != 0u ? memo_size(w, memo) : QR_MAX_MODULES;
+	int32_t mx, my, mx0, mx1, my1;
+	const uint8_t *qr;
 
-	if (!box_hits(s, q->x, q->y, q->x + QR_MAX_MODULES * m, q->y + QR_MAX_MODULES * m)) {
+	if (!box_hits(s, q->x, q->y, q->x + n * m, q->y + n * m)) {
 		return 0;
 	}
-	if (w->qr_cmd != (int32_t)cmd->offset) {
-		memcpy(w->text, cmd->var, q->len);
-		w->text[q->len] = '\0';
-		w->qr_cmd = -1;
-		if (!qrcodegen_encodeText(w->text, w->tmp, w->qr, (enum qrcodegen_Ecc)q->ecc, 1, 10,
-					  qrcodegen_Mask_AUTO, true)) {
-			return -EINVAL;
-		}
-		w->qr_cmd = cmd->offset;
+	qr = qr_symbol(w, cmd, memo);
+	if (qr == NULL) {
+		return -EINVAL;
 	}
-	n = qrcodegen_getSize(w->qr);
-	for (my = 0; my < n; my++) {
-		for (mx = 0; mx < n; mx++) {
-			if (qrcodegen_getModule(w->qr, mx, my)) {
+	n = qrcodegen_getSize(qr);
+	module_span(q->x, m, n, s->cx0, s->cx1, &mx0, &mx1);
+	module_span(q->y, m, n, s->cy0, s->cy1, &my, &my1);
+	for (; my < my1; my++) {
+		for (mx = mx0; mx < mx1; mx++) {
+			if (qrcodegen_getModule(qr, mx, my)) {
 				fill(s, q->x + mx * m, q->y + my * m, q->x + (mx + 1) * m,
 				     q->y + (my + 1) * m, q->color);
 			}
@@ -386,7 +473,9 @@ uint8_t ctag_render_init(struct ctag_render *r, const uint8_t *layout, size_t le
 	r->panel = *panel;
 	r->glyphs = glyphs;
 	r->work = work;
-	work->qr_cmd = -1;
+	memset(work->qr_cmd, 0xFF, sizeof(work->qr_cmd));
+	memset(work->memo_cmd, 0xFF, sizeof(work->memo_cmd));
+	memset(work->memo_size, 0, sizeof(work->memo_size));
 	return CTAG_STATUS_OK;
 }
 

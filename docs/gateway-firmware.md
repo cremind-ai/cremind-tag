@@ -13,7 +13,7 @@ implements the same rules; §12 lists every place the firmware differs and why.
 | Target | Board | Status | Memory |
 |---|---|---|---|
 | `gateway-nrf52840dk` | `nrf52840dk/nrf52840` | builds, `verify_stack.py` 16/16, meets its targets; not yet run on hardware | [§8](#8-memory) |
-| `gateway-nrf52dk` | `nrf52dk/nrf52832` (stand-in for the nRF52832 + CH340 board) | builds, `verify_stack.py` 16/16; **4,816 B RAM free with a reduced queue and unmeasured stacks — subject to resource qualification** | [§8](#8-memory) |
+| `gateway-nrf52dk` | `nrf52dk/nrf52832` (stand-in for the nRF52832 + CH340 board) | builds, `verify_stack.py` 16/16; **4,688 B RAM free with a reduced queue and unmeasured stacks — subject to resource qualification** | [§8](#8-memory) |
 
 Build: `python tools/build.py gateway-nrf52840dk gateway-nrf52dk` (on Windows:
 `unset VIRTUAL_ENV; companion/.venv/Scripts/python.exe tools/build.py …`); see
@@ -106,7 +106,7 @@ error in the `mesh_init` counter and requests to bridges fail.
 | HELLO (§10) | Exempt from credits. Requires `proto` and `name`; `proto` ≠ 1 answers `VERSION_MISMATCH` and opens no session. Drops unsent answers and queued best-effort events, sets the gateway's send window to `SERIAL_DEFAULT_CREDITS` + the request's grant byte, answers at once with grant byte 0 and `caps {max_frame 4096, credits 4, role GATEWAY, board, max_bridges 5, max_tags 20}`, then re-sends every retained event. |
 | Credits (§1.3) | `caps.credits` = `CONFIG_CTAG_GW_SERIAL_CREDITS` (4) answer slots. A request is processed when its frame completes; its answer waits in a slot until the gateway holds a host credit, and **the request's credit is returned in the grant byte of its own answer**, so a host that respects credits never has more than four requests outstanding. The gateway sends only while it holds host credits; each received frame's grant byte adds to them. A frame the host sent without credit is processed if a slot is free, else dropped (`overruns`); `credit_violations` counts them. |
 | Order of output | HELLO answer, then answers, then retained events not yet sent this session, then best-effort events. |
-| Retained events (§1.2) | `EVT_PROVISIONED`, `EVT_NODE_CONFIGURED`, `EVT_NODE_REMOVED`, `EVT_ASSIGN_RESULT`, `EVT_RESULT` get `seq` from 1 per boot and are kept encoded in a ring of `SERIAL_EVENT_RETAIN` (16) slots of 96 bytes until `EVENT_ACK {seq}` (cumulative). Overflow drops the oldest (`events_dropped`). Counters `retained` and `event_seq` show the ring. |
+| Retained events (§1.2) | `EVT_PROVISIONED`, `EVT_NODE_CONFIGURED`, `EVT_NODE_REMOVED`, `EVT_ASSIGN_RESULT`, `EVT_RESULT` get `seq` from 1 per boot and are kept encoded in a ring of `SERIAL_EVENT_RETAIN` (16) slots of 104 bytes (`EVT_RESULT` is at most 100) until `EVENT_ACK {seq}` (cumulative). Overflow drops the oldest (`events_dropped`). Counters `retained` and `event_seq` show the ring. |
 | Best-effort events | `EVT_STAGE`, `EVT_UNPROV_BEACON`, `EVT_TAG_SEEN`, `EVT_BRIDGE_INFO` are encoded straight into a FIFO arena (`CONFIG_CTAG_GW_EVQ_BYTES`); discarded (`events_discarded`) without a session, without a host credit at emit time, or when the FIFO is full. |
 | Idempotency (§1.4, §10) | The last `SERIAL_IDEMPOTENCY_SLOTS` (32) `op_id`s of `PROVISION`, `CONFIGURE_NODE`, `REMOVE_NODE`, `ASSIGN_TAG`, `UNASSIGN_TAG`, `DELIVER_LAYOUT`, `CANCEL_DELIVERY`, `TAG_COMMAND`, `REBOOT`, `IDENTIFY_NODE` with their `status` and `text`. A repeat answers them with `detail = DUPLICATE` and does nothing (`duplicate_ops`). `BUSY`, `NO_RESOURCES`, `PROVISIONING_ACTIVE` are not remembered. The oldest entry is forgotten first. |
 | REBOOT (§10) | Answered, then reset once the answer's last byte is in the driver (the firmware flushes the ring, waits 50 ms, `sys_reboot`). If the answer cannot go out (dropped by a HELLO, no credit), the gateway resets anyway 2 s later, as the simulator does. |
@@ -271,8 +271,12 @@ Every `DELIVERY_RESULT` is answered with `RESULT_ACK {result_seq}`, also a
 copy. The first copy of each `(bridge, result_seq)` (the last 64 pairs, 32 on
 the nRF52832) becomes a retained `EVT_RESULT {seq, update_id, bridge, tag_id,
 epoch, revision, status, digest(8), battery_mv, timing {wake_ms, mesh_ms,
-transfer_ms, refresh_ms, suspend_ms}}`; `mesh_ms` is the gateway's transfer
-time (start to `LAYOUT_STATUS`), the rest come from the bridge.
+transfer_ms, refresh_ms, suspend_ms}, flags, stored_epoch}`; `mesh_ms` is the
+gateway's transfer time (start to `LAYOUT_STATUS`), the rest come from the
+bridge — `flags` (bit0 the tag's stored ACK, bit1 an escalated
+unauthenticated status) and `stored_epoch` (the tag's stored epoch, 0 =
+unknown) exactly as `DELIVERY_RESULT` carried them. The gateway's own results
+(`TIMEOUT`, `CANCELLED`, rejections) carry `flags` 0 and `stored_epoch` 0.
 **Exactly one `EVT_RESULT` per `update_id`**: the last 64 (32) reported
 `update_id`s — the gateway's own results (`TIMEOUT`, `CANCELLED`, rejections,
 failed tag commands) and the bridges' — are remembered, and a later result for
@@ -338,7 +342,7 @@ every bridge must then be reset and provisioned again.
 |---|---:|---:|---|
 | `CTAG_GW_SERIAL_CREDITS` | 4 | 4 | answer slots = `caps.credits` |
 | `CTAG_GW_TX_FRAME` | 2560 | 2048 | largest frame the gateway sends (a full inventory needs ~1.9 KiB) |
-| `CTAG_GW_EVENT_MAX` | 96 | 96 | retained event slot (`EVT_RESULT` ≤ 88 bytes) |
+| `CTAG_GW_EVENT_MAX` | 104 | 104 | retained event slot (`EVT_RESULT` ≤ 100 bytes: every field at its largest, `flags` and `stored_epoch` included; tested) |
 | `CTAG_GW_EVQ_BYTES` | 2048 | 768 | best-effort event FIFO |
 | `CTAG_GW_DELIVERY_QUEUE` | 4 | 3 | layouts queued behind the active transfer |
 | `CTAG_GW_LAYOUT_ARENA` | 20480 | 5120 | bytes for queued + active layouts |
@@ -377,21 +381,25 @@ shipping), manufacturer "Cremind", product "Cremind Tag gateway".
 
 | Target | Flash used / code partition | Headroom (min 15 %) | RAM used / RAM | RAM free | Stack check |
 |---|---|---|---|---|---|
-| `gateway-nrf52840dk` | 229,816 / 1,015,808 B (22.6 %) | 77.4 % | 100,244 / 262,144 B | 161,900 B | pass 16/16 |
-| `gateway-nrf52dk` | 198,668 / 499,712 B (39.8 %) | 60.2 % | 60,720 / 65,536 B | **4,816 B** | pass 16/16 |
-| debug (`debug/rtt.conf`) nRF52840 / nRF52832 | 299,052 / 255,764 B | | 103,252 / 63,408 B | 158,892 / 2,128 B | |
+| `gateway-nrf52840dk` | 229,912 / 1,015,808 B (22.6 %) | 77.4 % | 100,372 / 262,144 B | 161,772 B | pass 16/16 |
+| `gateway-nrf52dk` | 198,764 / 499,712 B (39.8 %) | 60.2 % | 60,848 / 65,536 B | **4,688 B** | pass 16/16 |
+| debug (`debug/rtt.conf`) nRF52840 / nRF52832, before the 104-byte event slots (+128 B RAM since) | 299,052 / 255,764 B | | 103,252 / 63,408 B | 158,892 / 2,128 B | |
 
-Largest RAM users of the nRF52832 build: the core 20,904 B (receive frame
+The protocol v1 finalisation (`EVT_RESULT` with `flags` and `stored_epoch`)
+cost 48–64 B of flash and 128 B of RAM on each: the 16 retained event slots grew
+from 96 to 104 bytes (the largest `EVT_RESULT` is now 100 bytes).
+
+Largest RAM users of the nRF52832 build: the core 21,032 B (receive frame
 4,096, layout arena 5,120, transmit frame 2,048, encoder scratch ~2.9 KiB,
-retained ring 1,664, event FIFO 768, idempotency 512, node table, operation
+retained ring 1,792, event FIFO 768, idempotency 512, node table, operation
 and de-duplication tables), `main` stack 3,136, system work queue 2,624,
 Bluetooth RX thread 2,624, ISR stack 2,112, mesh advertiser 2,112, controller
 RX PDUs 1,732, mesh settings work queue 1,472, HCI RX buffers 1,032, mbedTLS
 heap 1,024, `gw_evq` 1,024, controller threads 1,472, mesh segmentation 1,504
 (segment buffers, `seg_rx`, `seg_tx`), UART rings 1,024. On the nRF52840 the
-core is 39,040 B (a 20 KiB arena) and USB adds ~5 KiB.
+core is 39,168 B (a 20 KiB arena) and USB adds ~5 KiB.
 
-**nRF52832 verdict.** The application fits with 4.8 KiB spare only after
+**nRF52832 verdict.** The application fits with 4.6 KiB spare only after
 reducing the delivery queue (a 5 KiB layout arena), the event and HCI buffers
 and the thread stacks. The trimmed stacks are not measured; they are the risk,
 not the static RAM. Until the resource qualification in
@@ -455,7 +463,7 @@ or `nrfjprog -f NRF52 --program build/gateway-nrf52840dk/zephyr.hex --sectoreras
 
 **Core ztests** (`apps/gateway/tests/core`, native_sim and
 native_sim/native/64; the same `src/core` sources, a mocked backend, a fake
-clock). 59 tests in four suites, all passing on both platforms (118 test cases,
+clock). 61 tests in four suites, all passing on both platforms (122 test cases,
 twister, 2026-09-28):
 
 - `gw_serial` (19): HELLO caps, version mismatch, nothing before HELLO,
@@ -465,7 +473,7 @@ twister, 2026-09-28):
   re-sending retained events, cumulative EVENT_ACK, ring overflow, best-effort
   events needing a credit, repeated `op_id`, transient refusals not remembered,
   idempotency eviction, REBOOT after the answer, REBOOT grace, partial writes.
-- `gw_delivery` (20): BEGIN/CHUNK/COMMIT layout with the digest, one
+- `gw_delivery` (22): BEGIN/CHUNK/COMMIT layout with the digest, one
   outstanding segmented send gateway-wide, failed end retried 3× then TIMEOUT,
   status OK → stage → bridge result with timing, `(bridge, result_seq)`
   de-duplication, INCOMPLETE resending exactly the missing chunks for 3
@@ -500,7 +508,7 @@ scenarios pass** —
 | credits under load: 60 PINGs + 20 INFOs at once | pass: 0 credit violations, 0 overruns, no resync, ~540 ms |
 | idempotent retries | pass: repeat answers `ACCEPTED` + `DUPLICATE`, no new work, one result |
 | retained events: ACK only after the handler, re-sent after HELLO | pass |
-| DELIVER_LAYOUT → mesh → EVT_RESULT OK | pass: stages 3, 4, 5, result OK with the layout digest in ~550 ms; INCOMPLETE round; a 4000-byte layout (27 chunks) in ~950 ms; 12 concurrent deliveries with BUSY retried in 2.5 s |
+| DELIVER_LAYOUT → mesh → EVT_RESULT OK | pass: stages 3, 4, 5, result OK with the layout digest in ~550 ms, `flags` 0 and the tag's `stored_epoch`; a tag's stored ACK arrives as `flags` bit0; INCOMPLETE round; a 4000-byte layout (27 chunks) in ~950 ms; 12 concurrent deliveries with BUSY retried in 2.5 s |
 | lost LAYOUT_STATUS OK → DUPLICATE → one EVT_RESULT | pass (re-commit after 10 s) |
 | provisioning, configuration, removal | pass |
 | REBOOT → new `boot_id`, `SessionStarted.boot_changed` | pass |
@@ -513,7 +521,6 @@ scenarios pass** —
 |---|---|---|---|
 | Credits | returns a request's credit when its buffer is freed | returns it with the request's answer (four answer slots) | the answer slot is the scarce resource; the host sees the same one-credit-per-answer flow |
 | `DUPLICATE` `LAYOUT_STATUS` | no stage event | `EVT_STAGE BRIDGE_RECEIVED`, as for `OK` | protocol §10 (added 2026-09-28): DUPLICATE is OK for the transfer |
-| One `EVT_RESULT` per `update_id` | not enforced (a late bridge result after a gateway TIMEOUT gives two) | enforced with a bounded set of reported `update_id`s | protocol §10 |
 | Result while waiting for LAYOUT_STATUS | keeps waiting, may report TIMEOUT too | the result ends the transfer | a bridge that reports a result has the layout; saves 10–40 s and a second result |
 | Layout size | any | > 4000 bytes → `TOO_LARGE` | RAM: layouts are kept until transferred; the companion never sends more than `LAYOUT_SERIAL_MAX` |
 | Queue full | count only | count or arena bytes | RAM (the nRF52832 arena holds one full-size layout) |
@@ -575,7 +582,7 @@ results in the board's qualification report.
   segments, CDB persistence through reboots, secure storage of device keys),
   USB CDC ACM enumeration and the nRF UARTE path are verified only by building.
 - Stack sizes are unmeasured on both boards (§10, §13 step 5).
-- The nRF52832 gateway's RAM margin (4.8 KiB) and its reduced queue need the
+- The nRF52832 gateway's RAM margin (4.6 KiB) and its reduced queue need the
   resource qualification before it is used.
 - USB VID/PID `1209:0002` is a pid.codes test pair; `MESH_COMPANY_ID` 0xFFFF is
   the SIG test value (spec.yaml): both need assigned values before production.

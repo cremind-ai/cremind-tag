@@ -20,6 +20,23 @@ extern "C" {
 /* qrcodegen_BUFFER_LEN_FOR_VERSION(10): 4.4 encodes versions 1..10. */
 #define CTAG_RENDER_QR_BUF_LEN 408u
 
+/*
+ * QR symbols kept across the strips of a frame (CONFIG_CTAG_RENDER_QR_SLOTS,
+ * 1..LAYOUT_MAX_QR; LAYOUT_MAX_QR elsewhere). With a slot per QR command
+ * (4.3 allows LAYOUT_MAX_QR) every symbol is encoded once per
+ * ctag_render_init(). With fewer, the first commands keep theirs and the rest
+ * share the last slot, re-encoded with their remembered mask for each strip
+ * they reach (the same symbol, without the automatic mask search).
+ */
+#if defined(CONFIG_CTAG_RENDER_QR_SLOTS)
+#define CTAG_RENDER_QR_SLOTS CONFIG_CTAG_RENDER_QR_SLOTS
+#elif !defined(CTAG_RENDER_QR_SLOTS)
+#define CTAG_RENDER_QR_SLOTS CTAG_LAYOUT_MAX_QR
+#endif
+#if CTAG_RENDER_QR_SLOTS < 1 || CTAG_RENDER_QR_SLOTS > CTAG_LAYOUT_MAX_QR
+#error "CTAG_RENDER_QR_SLOTS must be 1..LAYOUT_MAX_QR"
+#endif
+
 /* One glyph of a strike (font-pack glyph index entry). */
 struct ctag_glyph {
 	uint32_t bitmap; /* offset for ctag_glyph_source.read, or CTAG_FONTPACK_EMPTY_BITMAP */
@@ -48,12 +65,17 @@ struct ctag_render_panel {
 	uint8_t plane_flags; /* bit0: plane 0 bit 1 = white; bit1: plane 1 bit 1 = red */
 };
 
-/* Caller-provided work memory (the QR symbol is cached across strips). */
+/* Caller-provided work memory (QR symbols cached across strips). */
 struct ctag_render_work {
-	uint8_t qr[CTAG_RENDER_QR_BUF_LEN];
+	uint8_t qr[CTAG_RENDER_QR_SLOTS][CTAG_RENDER_QR_BUF_LEN];
 	uint8_t tmp[CTAG_RENDER_QR_BUF_LEN];
 	char text[CTAG_LAYOUT_QR_MAX_TEXT + 1];
-	int32_t qr_cmd; /* layout offset of the QR command held in qr, -1 = none */
+	uint16_t qr_cmd[CTAG_RENDER_QR_SLOTS]; /* layout offset of the QR command in qr[i] */
+	/* Per QR command of the layout: its offset, symbol size (0 = not yet
+	 * encoded) and mask, for exact strip culling and cheap re-encodes. */
+	uint16_t memo_cmd[CTAG_LAYOUT_MAX_QR];
+	uint8_t memo_size[CTAG_LAYOUT_MAX_QR];
+	uint8_t memo_mask[CTAG_LAYOUT_MAX_QR];
 };
 
 struct ctag_render {
@@ -76,10 +98,11 @@ static inline size_t ctag_render_plane_len(const struct ctag_render_panel *p)
 }
 
 /*
- * Validate and prepare: 4.3 including the strike check, the panel geometry
- * rule and planes in {1, 2}. Returns a ctag_status (OK, INVALID, UNSUPPORTED,
- * TOO_LARGE or FONTPACK_MISMATCH). The layout, source and work memory must
- * stay unchanged while rendering; call again after any change.
+ * Validate and prepare: 4.3 including the strike check and the render-cost
+ * bounds, the panel geometry rule and planes in {1, 2}. Returns a
+ * ctag_status (OK, INVALID, UNSUPPORTED, TOO_LARGE or FONTPACK_MISMATCH). The
+ * layout, source and work memory must stay unchanged while rendering; call
+ * again after any change (the QR cache starts empty).
  */
 uint8_t ctag_render_init(struct ctag_render *r, const uint8_t *layout, size_t len,
 			 const struct ctag_render_panel *panel,

@@ -67,16 +67,18 @@ int ctag_session_k_epoch(const uint8_t secret[CTAG_TAG_SECRET_LEN], uint32_t tag
 	return err;
 }
 
-/* th = SHA-256(HELLO | CHALLENGE), stored over the union holding HELLO. */
-static int transcript(struct ctag_session *s, const uint8_t *hello, const uint8_t *challenge)
+/* th = SHA-256(CAPS | HELLO | CHALLENGE), stored over the union holding HELLO. */
+static int transcript(struct ctag_session *s, const uint8_t *caps, size_t caps_len,
+		      const uint8_t *hello, const uint8_t *challenge)
 {
 	ctag_sha256_ctx ctx;
 	uint8_t th[32];
 
-	if (ctag_crypto_sha256_init(&ctx) != 0) {
+	if (caps == NULL || caps_len == 0u || ctag_crypto_sha256_init(&ctx) != 0) {
 		return -EIO;
 	}
-	if (ctag_crypto_sha256_update(&ctx, hello, CTAG_SESSION_HELLO_LEN) != 0 ||
+	if (ctag_crypto_sha256_update(&ctx, caps, caps_len) != 0 ||
+	    ctag_crypto_sha256_update(&ctx, hello, CTAG_SESSION_HELLO_LEN) != 0 ||
 	    ctag_crypto_sha256_update(&ctx, challenge, CTAG_SESSION_CHALLENGE_LEN) != 0 ||
 	    ctag_crypto_sha256_finish(&ctx, th) != 0) {
 		ctag_crypto_sha256_abort(&ctx);
@@ -129,14 +131,36 @@ static int establish(struct ctag_session *s, bool bridge)
 	return err;
 }
 
-/* A tag ERROR carries a non-OK status; anything else unexpected is INVALID. */
-static uint8_t tag_error(const uint8_t *msg, size_t len)
+size_t ctag_session_error_pack(uint8_t out[CTAG_SESSION_ERROR_LEN], uint8_t status,
+			       uint32_t stored_epoch)
 {
-	if (len == CTAG_SESSION_ERROR_LEN && msg[0] == CTAG_CTRL_ERROR &&
-	    msg[1] != CTAG_STATUS_OK) {
-		return msg[1];
+	out[0] = CTAG_CTRL_ERROR;
+	out[1] = status;
+	ctag_put_le32(&out[2], stored_epoch);
+	return CTAG_SESSION_ERROR_LEN;
+}
+
+bool ctag_session_error_unpack(const uint8_t *msg, size_t len, uint8_t *status,
+			       uint32_t *stored_epoch)
+{
+	if (len != CTAG_SESSION_ERROR_LEN || msg[0] != CTAG_CTRL_ERROR || msg[1] == CTAG_STATUS_OK) {
+		return false;
 	}
-	return CTAG_STATUS_INVALID;
+	if (status != NULL) {
+		*status = msg[1];
+	}
+	if (stored_epoch != NULL) {
+		*stored_epoch = ctag_get_le32(&msg[2]);
+	}
+	return true;
+}
+
+/* A tag ERROR carries a non-OK status; anything else unexpected is INVALID. */
+static uint8_t tag_error(const uint8_t *msg, size_t len, uint32_t *stored_epoch)
+{
+	uint8_t st;
+
+	return ctag_session_error_unpack(msg, len, &st, stored_epoch) ? st : CTAG_STATUS_INVALID;
 }
 
 int ctag_session_bridge_hello(struct ctag_session *s, uint32_t tag_id, uint32_t epoch,
@@ -158,18 +182,19 @@ int ctag_session_bridge_hello(struct ctag_session *s, uint32_t tag_id, uint32_t 
 	return 0;
 }
 
-uint8_t ctag_session_bridge_challenge(struct ctag_session *s, const uint8_t *msg, size_t len,
-				      struct ctag_ctrl_challenge *ch,
+uint8_t ctag_session_bridge_challenge(struct ctag_session *s, const uint8_t *caps, size_t caps_len,
+				      const uint8_t *msg, size_t len, struct ctag_ctrl_challenge *ch,
 				      uint8_t out[CTAG_SESSION_AUTH_LEN])
 {
 	uint8_t hello[CTAG_SESSION_HELLO_LEN];
 	uint8_t st = CTAG_STATUS_INVALID;
 
+	memset(ch, 0, sizeof(*ch));
 	if (s->state != CTAG_SESSION_HELLO_SENT) {
 		goto fail;
 	}
 	if (len != CTAG_SESSION_CHALLENGE_LEN || msg[0] != CTAG_CTRL_CHALLENGE) {
-		st = tag_error(msg, len);
+		st = tag_error(msg, len, &ch->stored_epoch);
 		goto fail;
 	}
 	(void)ctag_ctrl_challenge_unpack(ch, &msg[1], CTAG_CTRL_CHALLENGE_LEN);
@@ -179,7 +204,7 @@ uint8_t ctag_session_bridge_challenge(struct ctag_session *s, const uint8_t *msg
 	}
 	memcpy(hello, s->t.hello, sizeof(hello));
 	st = CTAG_STATUS_INTERNAL;
-	if (transcript(s, hello, msg) != 0 ||
+	if (transcript(s, caps, caps_len, hello, msg) != 0 ||
 	    handshake_mac(s, CTAG_CRYPTO_MAC_LABEL_BRIDGE[0], NULL, s->mac_b) != 0) {
 		goto fail;
 	}
@@ -203,7 +228,7 @@ uint8_t ctag_session_bridge_auth_ok(struct ctag_session *s, const uint8_t *msg, 
 		goto fail;
 	}
 	if (len != CTAG_SESSION_AUTH_OK_LEN || msg[0] != CTAG_CTRL_AUTH_OK) {
-		st = tag_error(msg, len);
+		st = tag_error(msg, len, NULL);
 		goto fail;
 	}
 	st = CTAG_STATUS_INTERNAL;
@@ -226,36 +251,36 @@ fail:
 	return st;
 }
 
-static uint8_t tag_fail(struct ctag_session *s, uint8_t st, uint8_t *out, size_t *out_len)
+static uint8_t tag_fail(struct ctag_session *s, uint8_t st, uint32_t stored_epoch, uint8_t *out,
+			size_t *out_len)
 {
 	wipe(s, sizeof(*s));
 	s->state = CTAG_SESSION_FAILED;
-	out[0] = CTAG_CTRL_ERROR;
-	out[1] = st;
-	*out_len = CTAG_SESSION_ERROR_LEN;
+	*out_len = ctag_session_error_pack(out, st, stored_epoch);
 	return st;
 }
 
 uint8_t ctag_session_tag_hello(struct ctag_session *s, uint32_t tag_id,
-			       const uint8_t secret[CTAG_TAG_SECRET_LEN],
-			       const struct ctag_ctrl_challenge *ch, const uint8_t *msg, size_t len,
-			       uint8_t *out, size_t *out_len)
+			       const uint8_t secret[CTAG_TAG_SECRET_LEN], const uint8_t *caps,
+			       size_t caps_len, const struct ctag_ctrl_challenge *ch,
+			       const uint8_t *msg, size_t len, uint8_t *out, size_t *out_len)
 {
+	uint32_t stored = ch->stored_epoch;
 	struct ctag_ctrl_hello h;
 
 	memset(s, 0, sizeof(*s));
 	if (len != CTAG_SESSION_HELLO_LEN || msg[0] != CTAG_CTRL_HELLO) {
-		return tag_fail(s, CTAG_STATUS_INVALID, out, out_len);
+		return tag_fail(s, CTAG_STATUS_INVALID, stored, out, out_len);
 	}
 	(void)ctag_ctrl_hello_unpack(&h, &msg[1], CTAG_CTRL_HELLO_LEN);
 	if (h.tag_id != tag_id) {
-		return tag_fail(s, CTAG_STATUS_NOT_FOUND, out, out_len);
+		return tag_fail(s, CTAG_STATUS_NOT_FOUND, stored, out, out_len);
 	}
 	if (h.proto != CTAG_PROTO_VERSION) {
-		return tag_fail(s, CTAG_STATUS_VERSION_MISMATCH, out, out_len);
+		return tag_fail(s, CTAG_STATUS_VERSION_MISMATCH, stored, out, out_len);
 	}
-	if (h.epoch < ch->stored_epoch) {
-		return tag_fail(s, CTAG_STATUS_STALE_EPOCH, out, out_len);
+	if (h.epoch < stored) {
+		return tag_fail(s, CTAG_STATUS_STALE_EPOCH, stored, out, out_len);
 	}
 	s->tag_id = tag_id;
 	s->epoch = h.epoch;
@@ -263,34 +288,34 @@ uint8_t ctag_session_tag_hello(struct ctag_session *s, uint32_t tag_id,
 	(void)ctag_ctrl_challenge_pack(ch, &out[1], CTAG_CTRL_CHALLENGE_LEN);
 	out[1] = CTAG_PROTO_VERSION; /* proto is the first CHALLENGE field */
 	if (ctag_session_k_epoch(secret, tag_id, h.epoch, s->k_epoch) != 0 ||
-	    transcript(s, msg, out) != 0) {
-		return tag_fail(s, CTAG_STATUS_INTERNAL, out, out_len);
+	    transcript(s, caps, caps_len, msg, out) != 0) {
+		return tag_fail(s, CTAG_STATUS_INTERNAL, stored, out, out_len);
 	}
 	s->state = CTAG_SESSION_CHALLENGED;
 	*out_len = CTAG_SESSION_CHALLENGE_LEN;
 	return CTAG_STATUS_OK;
 }
 
-uint8_t ctag_session_tag_auth(struct ctag_session *s, const uint8_t *msg, size_t len, uint8_t *out,
-			      size_t *out_len)
+uint8_t ctag_session_tag_auth(struct ctag_session *s, uint32_t stored_epoch, const uint8_t *msg,
+			      size_t len, uint8_t *out, size_t *out_len)
 {
 	uint8_t mac[CTAG_TAG_MAC_LEN];
 
 	/* 5.4: any failure here is AUTH_FAILED (it counts toward wake-window pacing). */
 	if (s->state != CTAG_SESSION_CHALLENGED || len != CTAG_SESSION_AUTH_LEN ||
 	    msg[0] != CTAG_CTRL_AUTH) {
-		return tag_fail(s, CTAG_STATUS_AUTH_FAILED, out, out_len);
+		return tag_fail(s, CTAG_STATUS_AUTH_FAILED, stored_epoch, out, out_len);
 	}
 	if (handshake_mac(s, CTAG_CRYPTO_MAC_LABEL_BRIDGE[0], NULL, mac) != 0) {
-		return tag_fail(s, CTAG_STATUS_INTERNAL, out, out_len);
+		return tag_fail(s, CTAG_STATUS_INTERNAL, stored_epoch, out, out_len);
 	}
 	if (!ctag_session_equal(mac, &msg[1], CTAG_TAG_MAC_LEN)) {
-		return tag_fail(s, CTAG_STATUS_AUTH_FAILED, out, out_len);
+		return tag_fail(s, CTAG_STATUS_AUTH_FAILED, stored_epoch, out, out_len);
 	}
 	out[0] = CTAG_CTRL_AUTH_OK;
 	if (handshake_mac(s, CTAG_CRYPTO_MAC_LABEL_TAG[0], &msg[1], &out[1]) != 0 ||
 	    establish(s, false) != 0) {
-		return tag_fail(s, CTAG_STATUS_INTERNAL, out, out_len);
+		return tag_fail(s, CTAG_STATUS_INTERNAL, stored_epoch, out, out_len);
 	}
 	*out_len = CTAG_SESSION_AUTH_OK_LEN;
 	return CTAG_STATUS_OK;

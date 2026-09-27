@@ -64,7 +64,8 @@ void gw_result_event(struct gw_core *g, uint64_t update_id, uint16_t bridge, uin
 		GW_F_UINT(CTAG_CBOR_KEY_REFRESH_MS, 0u),
 		GW_F_UINT(CTAG_CBOR_KEY_SUSPEND_MS, 0u),
 	};
-	struct ctag_cbor_field f[9] = {
+	/* The gateway's own result: no tag session, so no stored epoch (0) or flags. */
+	struct ctag_cbor_field f[11] = {
 		GW_F_UINT(CTAG_CBOR_KEY_UPDATE_ID, update_id),
 		GW_F_UINT(CTAG_CBOR_KEY_BRIDGE, bridge),
 		GW_F_UINT(CTAG_CBOR_KEY_TAG_ID, tag_id),
@@ -74,12 +75,14 @@ void gw_result_event(struct gw_core *g, uint64_t update_id, uint16_t bridge, uin
 		GW_F_BSTR(CTAG_CBOR_KEY_DIGEST, zero_digest, sizeof(zero_digest)),
 		GW_F_UINT(CTAG_CBOR_KEY_BATTERY_MV, 0u),
 		GW_F_MAP(CTAG_CBOR_KEY_TIMING, timing, 5u),
+		GW_F_UINT(CTAG_CBOR_KEY_FLAGS, 0u),
+		GW_F_UINT(CTAG_CBOR_KEY_STORED_EPOCH, 0u),
 	};
 
 	if (already_reported(g, update_id)) {
 		return;
 	}
-	(void)gw_emit(g, CTAG_SERIAL_MSG_EVT_RESULT, f, 9u, true);
+	(void)gw_emit(g, CTAG_SERIAL_MSG_EVT_RESULT, f, 11u, true);
 	g->c.results++;
 }
 
@@ -506,7 +509,10 @@ void gw_delivery_result(struct gw_core *g, uint16_t src, const struct ctag_mesh_
 			GW_F_UINT(CTAG_CBOR_KEY_REFRESH_MS, r->refresh_ms),
 			GW_F_UINT(CTAG_CBOR_KEY_SUSPEND_MS, r->suspend_ms),
 		};
-		struct ctag_cbor_field f[9] = {
+		/* flags and stored_epoch as the bridge reported them (spec
+		 * DELIVERY_RESULT): the duplicate / escalation bits and the
+		 * tag's stored epoch behind a STALE_EPOCH. */
+		struct ctag_cbor_field f[11] = {
 			GW_F_UINT(CTAG_CBOR_KEY_UPDATE_ID, r->update_id),
 			GW_F_UINT(CTAG_CBOR_KEY_BRIDGE, src),
 			GW_F_UINT(CTAG_CBOR_KEY_TAG_ID, r->tag_id),
@@ -516,9 +522,11 @@ void gw_delivery_result(struct gw_core *g, uint16_t src, const struct ctag_mesh_
 			GW_F_BSTR(CTAG_CBOR_KEY_DIGEST, r->digest, sizeof(r->digest)),
 			GW_F_UINT(CTAG_CBOR_KEY_BATTERY_MV, r->battery_mv),
 			GW_F_MAP(CTAG_CBOR_KEY_TIMING, timing, 5u),
+			GW_F_UINT(CTAG_CBOR_KEY_FLAGS, r->flags),
+			GW_F_UINT(CTAG_CBOR_KEY_STORED_EPOCH, r->stored_epoch),
 		};
 
-		(void)gw_emit(g, CTAG_SERIAL_MSG_EVT_RESULT, f, 9u, true);
+		(void)gw_emit(g, CTAG_SERIAL_MSG_EVT_RESULT, f, 11u, true);
 	}
 	g->c.results++;
 }

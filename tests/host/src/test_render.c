@@ -133,6 +133,77 @@ void test_render_strips(void)
 	}
 }
 
+/*
+ * The QR cache (and, with CTAG_RENDER_QR_SLOTS < 4, the re-encodes with the
+ * remembered mask): LAYOUT_MAX_QR symbols of qr.json side by side, rendered in
+ * one-row strips so every strip reaches all of them, match the vectors'
+ * modules exactly.
+ */
+void test_render_qr_cache(void)
+{
+	static uint8_t layout[CTAG_LAYOUT_HARD_MAX];
+	size_t usable[V_COUNT(v_qr)];
+	size_t n_usable = 0u, i, k;
+
+	for (i = 0u; i < V_COUNT(v_qr); i++) {
+		if (strlen(v_qr[i].text) <= CTAG_LAYOUT_QR_MAX_TEXT) {
+			usable[n_usable++] = i;
+		}
+	}
+	CHECK(n_usable >= CTAG_LAYOUT_MAX_QR);
+	mem.data = V_FONTPACK_DATA;
+	mem.len = V_FONTPACK_LEN;
+	CHECK(ctag_fontpack_open(&fp, t_mem_read, &mem, V_FONTPACK_LEN) == CTAG_STATUS_OK);
+	ctag_fontpack_glyph_source(&fp, &src);
+	for (i = 0u; i < n_usable; i++) {
+		const struct v_qr *q[CTAG_LAYOUT_MAX_QR];
+		struct ctag_layout_header h = {CTAG_LAYOUT_MAGIC, CTAG_PROTO_VERSION, 0u, 0u, 0u, 0u,
+					       CTAG_COLOR_WHITE, CTAG_LAYOUT_MAX_QR};
+		struct ctag_render_panel panel = {0u, 0u, 1u, 0x01u};
+		size_t pos = CTAG_LAYOUT_HEADER_LEN;
+		uint16_t x = 0u, height = 0u, y;
+		size_t rb;
+
+		for (k = 0u; k < CTAG_LAYOUT_MAX_QR; k++) {
+			struct ctag_layout_cmd_qr cmd = {(int16_t)x, 0, 1u, 0u, CTAG_COLOR_BLACK, 0u};
+
+			q[k] = &v_qr[usable[(i + k) % n_usable]];
+			cmd.ecc = q[k]->ecc;
+			cmd.len = (uint8_t)strlen(q[k]->text);
+			layout[pos++] = CTAG_LAYOUT_CMD_QR;
+			pos += (size_t)ctag_layout_cmd_qr_pack(&cmd, &layout[pos], CTAG_LAYOUT_CMD_QR_LEN);
+			memcpy(&layout[pos], q[k]->text, cmd.len);
+			pos += cmd.len;
+			x = (uint16_t)(x + q[k]->size + 1u);
+			height = q[k]->size > height ? q[k]->size : height;
+		}
+		h.width = x;
+		h.height = height;
+		(void)ctag_layout_header_pack(&h, layout, CTAG_LAYOUT_HEADER_LEN);
+		panel.width = h.width;
+		panel.height = h.height;
+		rb = ctag_render_row_bytes(&panel);
+		CHECK_CASE(ctag_render_init(&r, layout, pos, &panel, &src, &work) == CTAG_STATUS_OK,
+			   q[0]->text);
+		for (y = 0u; y < height; y++) {
+			CHECK_CASE(ctag_render_strip(&r, 0u, y, 1u, full, sizeof(full)) == (int)rb,
+				   q[0]->text);
+			for (x = 0u, k = 0u; k < CTAG_LAYOUT_MAX_QR; x = (uint16_t)(x + q[k++]->size + 1u)) {
+				size_t qrb = ((size_t)q[k]->size + 7u) / 8u;
+				uint16_t mx;
+
+				for (mx = 0u; mx < q[k]->size; mx++) {
+					bool dark = y < q[k]->size &&
+						    (q[k]->rows[(size_t)y * qrb + mx / 8u] & (0x80u >> (mx % 8u))) != 0u;
+					bool black = (full[(x + mx) / 8u] & (0x80u >> ((x + mx) % 8u))) == 0u;
+
+					CHECK_CASE(dark == black, q[k]->text);
+				}
+			}
+		}
+	}
+}
+
 void test_render_errors(void)
 {
 	const struct v_render *v = &v_render[0];

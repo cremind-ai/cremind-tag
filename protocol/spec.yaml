@@ -12,6 +12,9 @@
 # message without a trailing variable part has exactly its fixed length:
 # decoders reject shorter and longer input (INVALID). Field layouts exclude the
 # message's type/opcode byte, which is framing (mesh opcode, GATT message type).
+# An integer field may name `default: <int>`: the value a sender with nothing
+# to report puts on the wire (the generated Python constructor uses it; the
+# field is always present on the wire). Only trailing fields may have one.
 # Narrative, flows and rationale live in docs/protocol.md.
 
 spec_version: 1
@@ -36,6 +39,8 @@ constants:
   MESH_DEFAULT_TTL:         {value: 5,     doc: "Default TTL for gateway<->bridge messages"}
   MESH_RESULT_RETRIES:      {value: 5,     doc: "Bridge re-sends of DELIVERY_RESULT until RESULT_ACK"}
   MESH_RESULT_RETRY_MS:     {value: 2000,  doc: "Interval between DELIVERY_RESULT re-sends"}
+  RESULT_FLAG_DUPLICATE:    {value: 0x01,  doc: "DELIVERY_RESULT / EVT_RESULT flags bit0: the tag re-sent its stored ACK (RESULT.flags.bit0)"}
+  RESULT_FLAG_ESCALATED:    {value: 0x02,  doc: "DELIVERY_RESULT / EVT_RESULT flags bit1: an unauthenticated tag status ended the job after 3 consecutive refusals (protocol.md 10)"}
   LAYOUT_TYPICAL_MAX:       {value: 1024,  doc: "Typical logical card upper bound (design target, not enforced)"}
   LAYOUT_HARD_MAX:          {value: 4096,  doc: "Hard maximum logical screen size in bytes"}
   LAYOUT_SERIAL_MAX:        {value: 4000,  doc: "Largest layout the companion sends: DELIVER_LAYOUT's CBOR envelope must fit SERIAL_MAX_PAYLOAD (bridges still accept up to LAYOUT_HARD_MAX)"}
@@ -45,6 +50,8 @@ constants:
   LAYOUT_MAX_CHUNKS:        {value: 28,    doc: "ceil(LAYOUT_HARD_MAX / LAYOUT_CHUNK_DATA_MAX)"}
   LAYOUT_DIGEST_LEN:        {value: 16,    doc: "Layout digest = SHA-256(layout bytes) truncated to 16 bytes"}
   LAYOUT_QR_MAX_TEXT:       {value: 96,    doc: "Maximum QR payload bytes (short token-free https link)"}
+  LAYOUT_MAX_QR:            {value: 4,     doc: "Hard maximum QR commands per screen (render cost, protocol.md 4.3)"}
+  LAYOUT_MAX_LINE_STEPS:    {value: 16384, doc: "Hard maximum of the sum over LINE commands of max(|dx|,|dy|)+1 (render cost, protocol.md 4.3)"}
   LAYOUT_MAX_SIDE:          {value: 2048,  doc: "Maximum layout width/height in pixels (§4.3)"}
   QR_MIN_VERSION:           {value: 1,     doc: "Nayuki encodeText minVersion (§4.4)"}
   QR_MAX_VERSION:           {value: 10,    doc: "Nayuki encodeText maxVersion (§4.4)"}
@@ -223,6 +230,7 @@ serial:
     uuid_filter: 59   # bstr prefix filter for SCAN_UNPROV
     net_idx: 60
     app_idx: 61
+    stored_epoch: 62  # uint32 the tag's stored epoch as last reported by the tag (0 = unknown)
   message_types:
     # --- requests (host -> device); the device answers with RESPONSE + {status, ...}
     HELLO:           {value: 0x01, dir: h2d, doc: "{proto, name} -> {status, proto, fw, build, boot_id, caps:{max_frame, credits, max_bridges, max_tags, role}}"}
@@ -258,7 +266,7 @@ serial:
     EVT_NODE_REMOVED:    {value: 0x84, dir: d2h, doc: "{seq, op_id, addr, status}"}
     EVT_ASSIGN_RESULT:   {value: 0x85, dir: d2h, doc: "{seq, op_id, bridge, tag_id, epoch, status}"}
     EVT_STAGE:           {value: 0x86, dir: d2h, doc: "{update_id, tag_id, revision, stage} best effort, not retained"}
-    EVT_RESULT:          {value: 0x87, dir: d2h, doc: "{seq, update_id, bridge, tag_id, epoch, revision, status, digest(8), battery_mv, timing}"}
+    EVT_RESULT:          {value: 0x87, dir: d2h, doc: "{seq, update_id, bridge, tag_id, epoch, revision, status, digest(8), battery_mv, timing, flags, stored_epoch} (flags and stored_epoch as in mesh DELIVERY_RESULT)"}
     EVT_BRIDGE_INFO:     {value: 0x88, dir: d2h, doc: "{addr, fw, fontpack_id, caps, assigned, counters}"}
     EVT_TAG_SEEN:        {value: 0x89, dir: d2h, doc: "{bridge, tag_id, rssi, battery_mv, flags} rate-limited sighting"}
 
@@ -347,6 +355,8 @@ mesh:
         - {name: suspend_ms,  type: u16, doc: "Mesh suspended duration for the connection attempt"}
         - {name: transfer_ms, type: u16}
         - {name: refresh_ms,  type: u16}
+        - {name: stored_epoch, type: u32, default: 0, doc: "The tag's stored epoch as its ERROR or CHALLENGE reported it (after AUTH_OK at least the session's epoch); 0 = unknown (no session produced this result)"}
+        - {name: flags,       type: u8, default: 0, doc: "bit0 the tag re-sent its stored ACK (RESULT.flags.bit0, duplicate); bit1 an unauthenticated status escalated after 3 consecutive refusals (protocol.md 10)"}
     RESULT_ACK:
       value: 0x08
       model: LAYOUT_SRV
@@ -576,6 +586,8 @@ gatt:
       dir: t2b
       fields:
         - {name: credits, type: u8, doc: "Incremental grant of DATA records the bridge may send"}
+  # The CAPS value is bound into the handshake transcript (crypto below):
+  # the bridge hashes the bytes it read, the tag the bytes it serves.
   tag_caps:
     - {name: proto,       type: u8}
     - {name: tag_id,      type: u32}
@@ -624,7 +636,8 @@ gatt:
       value: 0x05
       dir: t2b
       fields:
-        - {name: status, type: u8}
+        - {name: status,       type: u8}
+        - {name: stored_epoch, type: u32, doc: "The tag's stored epoch, always filled (epochs are not secret); lets a bridge report how far a STALE_EPOCH refusal is behind"}
   # Authenticated record = type(u8) | counter(u32) | ciphertext | mic(8).
   # AAD = type|counter; nonce = direction(u8, record_dir) | counter(u32 LE) | 8 zero bytes.
   # Field layouts below are the plaintext (the type byte is in the record header).
@@ -682,12 +695,15 @@ gatt:
         - {name: stage, type: u8, doc: "delivery_stages.REFRESHING when validated and refresh starts"}
 
 # Key schedule labels (bytes, ASCII). See docs/security.md.
+# th = SHA256(CAPS | HELLO | CHALLENGE): CAPS is the exact tag_caps value the
+# tag serves (the bridge hashes the bytes it read), HELLO and CHALLENGE the
+# reassembled CTRL messages including their type byte.
 crypto:
   hkdf_salt_epoch: "cremind-tag/v1/epoch"
   hkdf_info_epoch_prefix: "K_epoch"          # info = prefix | tag_id(u32 LE) | epoch(u32 LE)
-  mac_label_bridge: "B"                     # mac_b = HMAC(K_epoch, "B" | SHA256(HELLO|CHALLENGE))[:16]
-  mac_label_tag: "T"                        # mac_t = HMAC(K_epoch, "T" | SHA256(HELLO|CHALLENGE) | mac_b)[:16]
-  hkdf_info_session: "cremind-tag/v1/session"  # HKDF(IKM=K_epoch, salt=SHA256(HELLO|CHALLENGE), info) -> 32 bytes = k_b2t | k_t2b
+  mac_label_bridge: "B"                     # mac_b = HMAC(K_epoch, "B" | th)[:16]
+  mac_label_tag: "T"                        # mac_t = HMAC(K_epoch, "T" | th | mac_b)[:16]
+  hkdf_info_session: "cremind-tag/v1/session"  # HKDF(IKM=K_epoch, salt=th, info) -> 32 bytes = k_b2t | k_t2b
 
 # ---------------------------------------------------------------------------
 # Enrollment blob written to UICR.CUSTOMER[0..] by J-Link during enrollment.

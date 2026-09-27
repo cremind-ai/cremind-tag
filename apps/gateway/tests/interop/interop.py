@@ -22,7 +22,6 @@ import sys
 import time
 import traceback
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 from cremind_tag.gateway import (
     AssignResult,
@@ -39,7 +38,7 @@ from cremind_tag.gateway import (
     UnprovBeacon,
     matches,
 )
-from cremind_tag.protocol.ids import DeliveryStage, NodeRole, SerialMsg, Status
+from cremind_tag.protocol.ids import RESULT_FLAG_DUPLICATE, DeliveryStage, NodeRole, SerialMsg, Status
 
 BRIDGE = 0x0002
 PACK = bytes(8)
@@ -239,6 +238,8 @@ async def s_delivery(url: str, notes: list[str]) -> None:
         check(result.timing.mesh_ms > 0 and result.timing.refresh_ms == 300, f"timing {result.timing}")
         check(stages == [DeliveryStage.BRIDGE_RECEIVED, DeliveryStage.TRANSFERRING,
                          DeliveryStage.REFRESHING], f"stages {stages}")
+        # EVT_RESULT carries the bridge's flags and the tag's stored epoch.
+        check(result.flags == 0 and result.stored_epoch == 1 and not result.duplicate, f"raw {result.raw}")
         await asyncio.sleep(1.5)  # the bridge's re-sends (none: RESULT_ACK arrived)
         notes.append(f"1000 B layout: stages {stages} then EVT_RESULT OK in {dt * 1000:.0f} ms "
                      f"(mesh_ms {result.timing.mesh_ms})")
@@ -254,6 +255,10 @@ async def s_delivery(url: str, notes: list[str]) -> None:
         result, _, dt = await deliver_and_wait(c, layout, 0x0A0B0C0E, 3)
         check(result.status == Status.OK and result.digest == hashlib.sha256(layout).digest()[:8],
               "4000 B layout")
+        # The tag answered with its stored ACK: flags bit0 reaches the companion.
+        result, _, _ = await deliver_and_wait(c, os.urandom(300), 0xDEAD0003, 4)
+        check(result.status == Status.OK and result.flags == RESULT_FLAG_DUPLICATE and result.duplicate
+              and result.stored_epoch == 1, f"stored ACK flag {result.raw}")
         notes.append(f"INCOMPLETE round resent 1 chunk; 4000 B layout (27 chunks) OK in {dt * 1000:.0f} ms")
         # Throughput: 12 deliveries queued back to back.
         t0 = time.monotonic()

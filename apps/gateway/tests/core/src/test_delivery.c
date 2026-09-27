@@ -172,6 +172,60 @@ ZTEST(gw_delivery, test_status_ok_then_bridge_result)
 	zassert_equal(t[2].v.u, 33u);
 	zassert_equal(t[3].v.u, 44u);
 	zassert_equal(t[4].v.u, 22u);
+	/* The bridge's flags and the tag's stored epoch, as reported. */
+	zassert_equal(field_u(e, CTAG_CBOR_KEY_FLAGS), CTAG_RESULT_FLAG_DUPLICATE);
+	zassert_equal(field_u(e, CTAG_CBOR_KEY_STORED_EPOCH), 3u);
+}
+
+/* EVT_RESULT with every field at its largest encoding still fits one
+ * retained slot (CONFIG_CTAG_GW_EVENT_MAX): flags and stored_epoch included. */
+ZTEST(gw_delivery, test_largest_result_is_retained)
+{
+	struct ctag_mesh_delivery_result r = {
+		.result_seq = UINT16_MAX,
+		.update_id = UINT64_MAX,
+		.tag_id = UINT32_MAX,
+		.epoch = UINT32_MAX,
+		.revision = UINT32_MAX,
+		.status = CTAG_STATUS_SUPERSEDED,
+		.digest = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+		.battery_mv = UINT16_MAX,
+		.wake_ms = UINT16_MAX,
+		.suspend_ms = UINT16_MAX,
+		.transfer_ms = UINT16_MAX,
+		.refresh_ms = UINT16_MAX,
+		.stored_epoch = UINT32_MAX,
+		.flags = CTAG_RESULT_FLAG_DUPLICATE | CTAG_RESULT_FLAG_ESCALATED,
+	};
+	const struct frame *e;
+
+	core.s.seq = UINT32_MAX - 1u; /* the next seq takes 5 bytes */
+	mesh_result_msg(0x7FFFu, &r);
+	host_read();
+	e = result_for(UINT64_MAX);
+	zassert_not_null(e, "the largest EVT_RESULT was dropped");
+	zassert_equal(core.c.internal_errors, 0u);
+	/* 96 bytes: mesh_ms is 0 here (no transfer), 4 below the 100-byte worst case. */
+	zassert_equal(e->len, 96u, "worst-case EVT_RESULT: %u bytes", (unsigned int)e->len);
+	zassert_true(e->len + 4u <= CONFIG_CTAG_GW_EVENT_MAX);
+	zassert_equal(field_u(e, CTAG_CBOR_KEY_STORED_EPOCH), UINT32_MAX);
+	zassert_equal(field_u(e, CTAG_CBOR_KEY_FLAGS), 3u);
+}
+
+/* The gateway's own results (no tag session): flags 0 and stored epoch 0. */
+ZTEST(gw_delivery, test_gateway_result_has_no_tag_report)
+{
+	uint16_t xfer;
+
+	zassert_equal(deliver_status(2u, BRIDGE_A, 506u, 200u), CTAG_STATUS_ACCEPTED);
+	xfer = drive_to_commit();
+	mesh_status(BRIDGE_A, xfer, CTAG_STATUS_FONTPACK_MISMATCH, 0u);
+	host_read();
+	zassert_not_null(result_for(506u));
+	zassert_equal(field_u(result_for(506u), CTAG_CBOR_KEY_STATUS), CTAG_STATUS_FONTPACK_MISMATCH);
+	zassert_true(field_has(result_for(506u), CTAG_CBOR_KEY_FLAGS));
+	zassert_equal(field_u(result_for(506u), CTAG_CBOR_KEY_FLAGS), 0u);
+	zassert_equal(field_u(result_for(506u), CTAG_CBOR_KEY_STORED_EPOCH), 0u);
 }
 
 ZTEST(gw_delivery, test_results_are_deduplicated_by_bridge_and_seq)

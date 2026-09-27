@@ -18,23 +18,23 @@ Every board moves through these states; qualification reports in
 | Board | Board id | Zephyr board | MCU | Flash / RAM | Host link | Status | Notes |
 |---|---|---|---|---|---|---|---|
 | [nrf52840_gateway](../qualification/nrf52840_gateway.md) | 1 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | usb_cdc_acm | buildable |  |
-| [nrf52832_gateway](../qualification/nrf52832_gateway.md) | 2 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | uart_ch340 | buildable | Links with 4.8 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending. |
+| [nrf52832_gateway](../qualification/nrf52832_gateway.md) | 2 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | uart_ch340 | buildable | Links with 4.6 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending. |
 
 ## Bridges
 
 | Board | Board id | Zephyr board | MCU | Flash / RAM | External flash | Maintenance link | Status | Notes |
 |---|---|---|---|---|---|---|---|---|
-| [nrf52840_bridge](../qualification/nrf52840_bridge.md) | 3 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only) | usb_cdc_acm | documented |  |
-| [nrf52832_bridge](../qualification/nrf52832_bridge.md) | 4 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | soldered SPI NOR | uart_ch340 | documented | Remaining RAM target 8 KiB; pending-layout storage must stay in external flash. |
+| [nrf52840_bridge](../qualification/nrf52840_bridge.md) | 3 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only) | usb_cdc_acm | buildable | apps/bridge links in the exact geometry and passes verify_stack.py (flash 70 % free, 154 KiB RAM free); not flashed yet. |
+| [nrf52832_bridge](../qualification/nrf52832_bridge.md) | 4 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | soldered SPI NOR | uart_ch340 | buildable | apps/bridge links in the exact geometry, passes verify_stack.py and meets the targets (measured 2026-09-28, NCS v3.4.1): 8,473 B RAM free (target 8,192), flash 44.8 % free. Layouts are assembled in external flash with one shared layout buffer, the maintenance port runs on the main thread with 512-byte frames, and the assignment table holds 10 tags (CAPS max_tags 10; the nRF52840 keeps 20), with one cached QR symbol (the nRF52840 keeps four). Stack sizes are estimates until measured; SPI NOR pins on the nRF52 DK are placeholders; not flashed yet. docs/bridge-firmware.md "Memory". |
 
 ## Tags
 
 | Board | Board id | Name | Zephyr board | MCU | Flash / RAM | Panel | Status | Notes |
 |---|---|---|---|---|---|---|---|---|
-| [laowu_bw](../qualification/laowu_bw.md) | 16 | Laowu 4.2-inch black/white | `laowu_bw/nrf51822` | nRF51822 QFAB | 128 / 16 KiB | UC8176 4.2 in 400×300 black/white (id 1, not verified) | documented |  |
-| [laowu_bwr](../qualification/laowu_bwr.md) | 17 | Laowu 4.2-inch black/white/red | `laowu_bwr/nrf51822` | nRF51802 QFAA-compatible (256 KiB / 16 KiB) | 256 / 16 KiB | UC8176 4.2 in 400×300 black/white/red (id 2, not verified) | documented |  |
-| [sifei_52810](../qualification/sifei_52810.md) | 18 | Sifei 52810 | `sifei_52810/nrf52810` | nRF52810 QFAA | 192 / 24 KiB | unverified (panel id 255) | documented | Display mapping, panel model and wake sources require physical verification. |
-| [hema_52811](../qualification/hema_52811.md) | 19 | Hema/Alibaba 52811 | `hema_52811/nrf52811` | nRF52811 QFAA | 192 / 24 KiB | unverified (panel id 255) | documented | Display mapping, panel model and wake sources require physical verification. |
+| [laowu_bw](../qualification/laowu_bw.md) | 16 | Laowu 4.2-inch black/white | `laowu_bw/nrf51822` | nRF51822 QFAB | 128 / 16 KiB | UC8176 4.2 in 400×300 black/white (id 1, not verified) | buildable | Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 75.2 % used, 2,068 B RAM free); nothing verified on a sample yet. |
+| [laowu_bwr](../qualification/laowu_bwr.md) | 17 | Laowu 4.2-inch black/white/red | `laowu_bwr/nrf51822` | nRF51802 QFAA-compatible (256 KiB / 16 KiB) | 256 / 16 KiB | UC8176 4.2 in 400×300 black/white/red (id 2, not verified) | buildable | Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 37.1 % used, 2,060 B RAM free); nothing verified on a sample yet. |
+| [sifei_52810](../qualification/sifei_52810.md) | 18 | Sifei 52810 | `sifei_52810/nrf52810` | nRF52810 QFAA | 192 / 24 KiB | unverified (panel id 255) | buildable | Tag firmware (apps/tag) links with the panel driver and meets the targets (flash 53.3 % used, 9,056 B RAM free); the placeholder panel (id 255) is never driven and frames are refused until display mapping, panel model and wake sources are verified. |
+| [hema_52811](../qualification/hema_52811.md) | 19 | Hema/Alibaba 52811 | `hema_52811/nrf52811` | nRF52811 QFAA | 192 / 24 KiB | unverified (panel id 255) | buildable | Tag firmware (apps/tag) links with the panel driver and meets the targets (flash 53.3 % used, 9,056 B RAM free); the placeholder panel (id 255) is never driven and frames are refused until display mapping, panel model and wake sources are verified. |
 
 ### Tag pins (port 0, decimal)
 
@@ -67,19 +67,19 @@ From [`tools/targets.yaml`](../../tools/targets.yaml); build with `python tools/
 
 ## Latest build facts
 
-From `build/memory-report.json` generated 2026-09-27T16:09:54+00:00 (NCS v3.4.1).
+From `build/memory-report.json` generated 2026-09-27T21:09:57+00:00 (NCS v3.4.1).
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| gateway-nrf52840dk | `apps/gateway` | 229,816 / 1,015,808 | 77.4 % (15 %) | 100,244 / 262,144 | 161,900 (none) | pass (edtlib) | ok | 2026-09-27 |
-| gateway-nrf52dk | `apps/gateway` | 198,668 / 499,712 | 60.2 % (15 %) | 60,720 / 65,536 | 4,816 (none) | pass (edtlib) | ok | 2026-09-27 |
-| bridge-nrf52840dk | not built yet | - | - | - | - | - | - | - |
-| bridge-nrf52dk | not built yet | - | - | - | - | - | - | - |
-| tag-laowu-bw | `build/boardcheck` (board-check app, not the product firmware) | 104,316 / 126,976 | 17.9 % (15 %) | 14,316 / 16,384 | 2,068 (2,048) | pass (edtlib) | ok | 2026-09-27 |
-| tag-laowu-bwr | `build/boardcheck` (board-check app, not the product firmware) | 104,316 / 258,048 | 59.6 % (15 %) | 14,316 / 16,384 | 2,068 (2,048) | pass (edtlib) | ok | 2026-09-27 |
-| tag-sifei-52810 | `build/boardcheck` (board-check app, not the product firmware) | 104,884 / 188,416 | 44.3 % (15 %) | 16,240 / 24,576 | 8,336 (3,072) | pass (edtlib) | ok | 2026-09-27 |
-| tag-hema-52811 | `build/boardcheck` (board-check app, not the product firmware) | 104,756 / 188,416 | 44.4 % (15 %) | 16,240 / 24,576 | 8,336 (3,072) | pass (edtlib) | ok | 2026-09-27 |
-| tag-nrf52dk | not built yet | - | - | - | - | - | - | - |
+| gateway-nrf52840dk | `apps/gateway` | 229,912 / 1,015,808 | 77.4 % (15 %) | 100,372 / 262,144 | 161,772 (none) | pass (edtlib) | ok | 2026-09-27 |
+| gateway-nrf52dk | `apps/gateway` | 198,764 / 499,712 | 60.2 % (15 %) | 60,848 / 65,536 | 4,688 (none) | pass (edtlib) | ok | 2026-09-27 |
+| bridge-nrf52840dk | `apps/bridge` | 304,648 / 1,015,808 | 70.0 % (15 %) | 104,770 / 262,144 | 157,374 (none) | pass (edtlib) | ok | 2026-09-27 |
+| bridge-nrf52dk | `apps/bridge` | 276,080 / 499,712 | 44.8 % (15 %) | 57,063 / 65,536 | 8,473 (8,192) | pass (edtlib) | ok | 2026-09-27 |
+| tag-laowu-bw | `apps/tag` | 95,508 / 126,976 | 24.8 % (15 %) | 14,316 / 16,384 | 2,068 (2,048) | pass (edtlib) | ok | 2026-09-27 |
+| tag-laowu-bwr | `apps/tag` | 95,628 / 258,048 | 62.9 % (15 %) | 14,324 / 16,384 | 2,060 (2,048) | pass (edtlib) | ok | 2026-09-27 |
+| tag-sifei-52810 | `apps/tag` | 100,492 / 188,416 | 46.7 % (15 %) | 15,520 / 24,576 | 9,056 (3,072) | pass (edtlib) | ok | 2026-09-27 |
+| tag-hema-52811 | `apps/tag` | 100,396 / 188,416 | 46.7 % (15 %) | 15,520 / 24,576 | 9,056 (3,072) | pass (edtlib) | ok | 2026-09-27 |
+| tag-nrf52dk | `apps/tag` | 100,904 / 499,712 | 79.8 % (15 %) | 15,640 / 65,536 | 49,896 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 ## Verification checklist
 

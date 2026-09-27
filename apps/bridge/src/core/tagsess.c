@@ -134,10 +134,22 @@ static void tag_error(struct tsess *s, uint8_t status)
 				s->job = NULL;
 			}
 			close_view(s);
-			dlv_fail_epoch(s->dlv, s->tag_id, s->epoch, status, now(s));
+			/* The results carry the tag's stored epoch (a STALE_EPOCH tells the
+			 * companion the epoch to reassign above) and the escalation flag. */
+			dlv_fail_epoch(s->dlv, s->tag_id, s->epoch, status, s->tag_epoch, now(s));
 		}
 	}
 	end(s, status);
+}
+
+/* A tag ERROR (its status is handled by the caller): note its stored epoch. */
+static void note_error_epoch(struct tsess *s, const uint8_t *msg, size_t len)
+{
+	uint32_t stored;
+
+	if (ctag_session_error_unpack(msg, len, NULL, &stored)) {
+		s->tag_epoch = stored;
+	}
 }
 
 /* ---- CTRL (write requests, one fragment at a time) ---- */
@@ -267,14 +279,16 @@ static bool send_record(struct tsess *s, uint8_t type, const uint8_t *pt, size_t
 /* ---- Jobs ---- */
 
 static void finish_job(struct tsess *s, uint8_t status, const uint8_t *digest8,
-		       uint16_t battery_mv, uint16_t refresh_ms)
+		       uint16_t battery_mv, uint16_t refresh_ms, uint8_t flags)
 {
 	struct dlv_job *job = s->job;
-	struct dlv_timing t = {
+	struct dlv_report t = {
 		.wake_ms = sat16((uint32_t)MAX((int32_t)(s->connected_ms - job->validated_ms), 0)),
 		.suspend_ms = sat16(s->suspend_ms),
 		.transfer_ms = sat16(now(s) - s->job_started),
 		.refresh_ms = refresh_ms,
+		.stored_epoch = s->tag_epoch,
+		.flags = flags,
 	};
 
 	s->job = NULL;
@@ -351,7 +365,9 @@ static void next_job(struct tsess *s)
 		}
 		s->last_order = job->order;
 		if (job->epoch != s->epoch) {
-			dlv_finish(s->dlv, job, CTAG_STATUS_NOT_ASSIGNED, NULL, 0u, NULL, now(s));
+			const struct dlv_report r = {.stored_epoch = s->tag_epoch};
+
+			dlv_finish(s->dlv, job, CTAG_STATUS_NOT_ASSIGNED, NULL, 0u, &r, now(s));
 			continue;
 		}
 		job->flags |= DLV_JOB_IN_SESSION;
@@ -364,12 +380,12 @@ static void next_job(struct tsess *s)
 			if ((job->flags & DLV_JOB_FRAME_END_SENT) && (s->ch.flags & 1u) &&
 			    s->ch.stored_epoch == job->epoch && s->ch.displayed_rev == job->revision) {
 				finish_job(s, CTAG_STATUS_DISPLAY_STATE_UNKNOWN, NULL, s->ch.battery_mv,
-					   0u);
+					   0u, 0u);
 				continue;
 			}
 			st = prepare_frame(s, job);
 			if (st != CTAG_STATUS_OK) {
-				finish_job(s, st, NULL, 0u, 0u);
+				finish_job(s, st, NULL, 0u, 0u, 0u);
 				continue;
 			}
 			s->job_started = now(s); /* time the transfer, not the pre-pass */
@@ -448,7 +464,7 @@ static void stream(struct tsess *s)
 		s->pt[0] = s->plane;
 		ctag_put_le16(&s->pt[1], (uint16_t)s->offset);
 		if (fill_plane(s, &s->pt[CTAG_REC_PLANE_DATA_LEN], n) != 0) {
-			finish_job(s, CTAG_STATUS_STORAGE_ERROR, NULL, 0u, 0u);
+			finish_job(s, CTAG_STATUS_STORAGE_ERROR, NULL, 0u, 0u, 0u);
 			end(s, CTAG_STATUS_STORAGE_ERROR);
 			return;
 		}
@@ -609,6 +625,7 @@ void tsess_caps(struct tsess *s, int err, const uint8_t *data, uint16_t len)
 void tsess_ctrl_value(struct tsess *s, const uint8_t *val, uint16_t len)
 {
 	uint8_t auth[CTAG_SESSION_AUTH_LEN];
+	uint8_t caps[CTAG_TAG_CAPS_LEN];
 	uint8_t st;
 	int n;
 
@@ -625,7 +642,16 @@ void tsess_ctrl_value(struct tsess *s, const uint8_t *val, uint16_t len)
 	}
 	switch (s->state) {
 	case TS_HELLO:
-		st = ctag_session_bridge_challenge(&s->sess, s->ctrl_in, (size_t)n, &s->ch, auth);
+		/*
+		 * 5.4: the transcript covers the CAPS value read. CAPS was accepted
+		 * only at exactly CTAG_TAG_CAPS_LEN bytes, each of them a field, so
+		 * packing s->caps again gives exactly the bytes read, and the frame
+		 * is rendered from those same fields.
+		 */
+		(void)ctag_tag_caps_pack(&s->caps, caps, sizeof(caps));
+		st = ctag_session_bridge_challenge(&s->sess, caps, sizeof(caps), s->ctrl_in, (size_t)n,
+						   &s->ch, auth);
+		s->tag_epoch = s->ch.stored_epoch; /* from the CHALLENGE, or the tag's ERROR */
 		if (st != CTAG_STATUS_OK) {
 			tag_error(s, st);
 			return;
@@ -638,9 +664,12 @@ void tsess_ctrl_value(struct tsess *s, const uint8_t *val, uint16_t len)
 	case TS_AUTH:
 		st = ctag_session_bridge_auth_ok(&s->sess, s->ctrl_in, (size_t)n);
 		if (st != CTAG_STATUS_OK) {
+			note_error_epoch(s, s->ctrl_in, (size_t)n);
 			tag_error(s, st);
 			return;
 		}
+		/* The tag persisted a newer epoch before it sent AUTH_OK (5.4). */
+		s->tag_epoch = MAX(s->tag_epoch, s->epoch);
 		dlv_tag_authenticated(s->dlv, s->tag_id, s->epoch);
 		s->state = TS_GRANT;
 		progress(s);
@@ -651,9 +680,9 @@ void tsess_ctrl_value(struct tsess *s, const uint8_t *val, uint16_t len)
 		break;
 	default:
 		/* Established: only a plaintext ERROR is expected on CTRL. */
-		if (n == (int)CTAG_SESSION_ERROR_LEN && s->ctrl_in[0] == CTAG_CTRL_ERROR &&
-		    s->ctrl_in[1] != CTAG_STATUS_OK) {
-			tag_error(s, s->ctrl_in[1]);
+		if (ctag_session_error_unpack(s->ctrl_in, (size_t)n, &st, NULL)) {
+			note_error_epoch(s, s->ctrl_in, (size_t)n);
+			tag_error(s, st);
 		}
 		break;
 	}
@@ -665,7 +694,9 @@ static void on_result(struct tsess *s, const struct ctag_rec_result *res)
 	if (s->job == NULL) {
 		return;
 	}
-	finish_job(s, res->status, res->digest, res->battery_mv, res->refresh_ms);
+	/* flags bit0: the tag answered with its stored ACK (a duplicate). */
+	finish_job(s, res->status, res->digest, res->battery_mv, res->refresh_ms,
+		   res->flags & CTAG_RESULT_FLAG_DUPLICATE);
 	next_job(s);
 }
 

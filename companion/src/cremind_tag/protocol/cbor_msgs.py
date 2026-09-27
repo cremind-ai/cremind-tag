@@ -75,6 +75,7 @@ KEYS: dict[str, KeySpec] = {
     "wake_ms": _U, "mesh_ms": _U, "transfer_ms": _U, "refresh_ms": _U, "suspend_ms": _U,
     "queue_depth": _U, "max_bridges": _U, "max_tags": _U,
     "uuid_filter": KeySpec(Kind.BSTR, max_size=16), "net_idx": _U16, "app_idx": _U16,
+    "stored_epoch": _U,
 }
 
 # Message fields from the docs of spec serial.message_types; "?" marks an
@@ -129,7 +130,7 @@ EVENTS: dict[SerialMsg, tuple[str, ...]] = {
     SerialMsg.EVT_ASSIGN_RESULT: ("seq", "op_id", "bridge", "tag_id", "epoch", "status"),
     SerialMsg.EVT_STAGE: ("update_id", "tag_id", "revision", "stage"),
     SerialMsg.EVT_RESULT: ("seq", "update_id", "bridge", "tag_id", "epoch", "revision", "status",
-                           "digest", "battery_mv", "timing"),
+                           "digest", "battery_mv", "timing", "flags", "stored_epoch"),
     SerialMsg.EVT_BRIDGE_INFO: ("addr", "fw", "fontpack_id", "caps", "assigned", "counters"),
     SerialMsg.EVT_TAG_SEEN: ("bridge", "tag_id", "rssi", "battery_mv", "flags"),
 }

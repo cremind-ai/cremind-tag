@@ -9,8 +9,12 @@ checks (401 ``invalid_credential``/``credential_revoked``, 403
 not full), ``sync``'s ``outstanding``, ``accepted`` (queued ->
 companion_accepted), receipts that never move a stage backwards and whose
 terminal outcome is final (and whose ``epoch`` must match), previews, hardware
-commands with claim/result, and ``replace_key``/``resolves`` retiring older
-deliveries the way ``write_deliveries`` does. Timestamps are ISO strings with
+commands with claim/result (a failed ``assign_tag`` marks the tag
+``assign_failed``; ``bridge_full`` drops it from the bridge and records
+``max_tags``), an inventory epoch above the stored one re-queuing the owner's
+``assign_tag`` / a pending ``clear_tag`` at ``reported + 1`` (``_raise_epoch``),
+and ``replace_key``/``resolves`` retiring older deliveries the way
+``write_deliveries`` does. Timestamps are ISO strings with
 millisecond resolution (``whole_seconds=True`` for the older server format).
 ``POST receipts`` answers ``{"applied", "rejected": [{"delivery_id", "reason"}]}``
 with ``epoch_mismatch``, ``unknown``, ``terminal`` or ``not_owned``.
@@ -111,6 +115,7 @@ class FakeCremind:
         self.heartbeats: list[dict[str, Any]] = []
         self.inventories: list[dict[str, Any]] = []
         self.command_results: list[dict[str, Any]] = []
+        self.epoch_raises: list[tuple[str, int, int]] = []  # (tag, reported, new epoch) of _raise_epoch
         self.fail_next: dict[str, list[int]] = {}
         self.expire_cursor_once = False
         self.tls_fail_next = 0  # requests that fail as an untrusted certificate
@@ -369,11 +374,54 @@ class FakeCremind:
                                       height=item.get("height") or 300, planes=item.get("planes") or 1)
             reported = item.get("epoch")
             if isinstance(reported, int) and reported > device["epoch"]:
-                device["epoch"] = reported
+                device["epoch"] = self._raise_epoch(device, reported)
         assignments = [{"tag_id": d["hw_id"], "owner_profile": d["owner_profile"], "bridge_hw_id": d["bridge_hw_id"],
                         "epoch": d["epoch"], "rotation": d["rotation"]}
                        for (kind, _), d in self.devices.items() if kind == "tag"]
         return self._json(200, {"devices": list(self.devices.values()), "assignments": assignments})
+
+    def _raise_epoch(self, device: dict[str, Any], reported: int) -> int:
+        """Cremind ``_raise_epoch``: work still owed under the old epoch (the owner's assignment, a pending
+        clear) is re-queued at ``reported + 1`` and the tag's active deliveries move with it; otherwise the
+        stored epoch simply becomes the reported one."""
+        needs_assign = bool(device["owner_profile"]) and device["bridge_hw_id"] is not None
+        needs_clear = bool(device["clear_required"])
+        if not (needs_assign or needs_clear) or reported >= 0xFFFFFFFF:
+            return reported
+        epoch = reported + 1
+        hw_id = device["hw_id"]
+        for c in self.commands.values():  # cancel_tag_commands: queued per-tag commands only
+            if c["status"] == "queued" and c["kind"] in ("assign_tag", "clear_tag", "refresh_tag") \
+                    and c["args"].get("tag_id") == hw_id:
+                c.update(status="cancelled", error="superseded by a newer assignment")
+        if needs_assign:
+            self.add_command("assign_tag", {"tag_id": hw_id, "bridge_hw_id": device["bridge_hw_id"],
+                                            "epoch": epoch}, ttl_s=7 * 86400)
+        if needs_clear:
+            self.add_command("clear_tag", {"tag_id": hw_id, "epoch": epoch}, ttl_s=7 * 86400)
+        for d in self.deliveries.values():
+            if d["tag"] == hw_id and d["stage"] in ACTIVE:
+                d["epoch"] = epoch
+        self.epoch_raises.append((hw_id, reported, epoch))
+        return epoch
+
+    def _settle_assign(self, c: dict[str, Any], status: str, error: str | None, result: Any) -> None:
+        """Cremind ``_settle_assign``: a failed ``assign_tag`` at the tag's current epoch marks the tag
+        ``assign_failed``; ``bridge_full`` also drops the tag from that bridge and records ``max_tags``."""
+        device = self.devices.get(("tag", c["args"].get("tag_id")))
+        if device is None or int(device["epoch"]) != int(c["args"].get("epoch") or 0):
+            return
+        if status == "succeeded":
+            if device.get("status") == "assign_failed":
+                device["status"] = "assigning" if device["owner_profile"] else "unclaimed"
+            return
+        device["status"] = "assign_failed"
+        if error == "bridge_full":
+            device["bridge_hw_id"] = None
+            max_tags = (result or {}).get("max_tags") if isinstance(result, dict) else None
+            bridge = self.devices.get(("bridge", c["args"].get("bridge_hw_id")))
+            if isinstance(max_tags, int) and 1 <= max_tags <= 255 and bridge is not None:
+                bridge["info"]["max_tags"] = max_tags
 
     async def _commands(self, request: httpx.Request) -> httpx.Response:
         _, err = self._auth(request, "hardware")
@@ -432,7 +480,13 @@ class FakeCremind:
             if c["status"] == status:
                 return self._json(200, {"ok": True, "command": self._command_json(c)})
             return self._error(409, "already_completed", "done", command=self._command_json(c))
-        c.update(status=status, result=body.get("result"), error=body.get("error"))
+        error = body.get("error")
+        result = body.get("result")
+        if not error and status == "failed" and isinstance(result, dict) and isinstance(result.get("error"), str):
+            error = result["error"]  # a failed command's error defaults to result.error
+        c.update(status=status, result=result, error=error)
+        if c["kind"] == "assign_tag":
+            self._settle_assign(c, status, error, result)
         if status == "succeeded" and c["kind"] == "clear_tag":
             device = self.devices.get(("tag", c["args"]["tag_id"]))
             if device is not None and device["epoch"] == int(c["args"]["epoch"]):

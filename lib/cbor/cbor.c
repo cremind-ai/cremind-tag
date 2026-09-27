@@ -97,6 +97,7 @@ static const uint8_t key_spec[] = {
 	[CTAG_CBOR_KEY_UUID_FILTER] = K(CTAG_CBOR_BSTR, L_MAX16),
 	[CTAG_CBOR_KEY_NET_IDX] = K(CTAG_CBOR_UINT, L_U16),
 	[CTAG_CBOR_KEY_APP_IDX] = K(CTAG_CBOR_UINT, L_U16),
+	[CTAG_CBOR_KEY_STORED_EPOCH] = U32,
 };
 
 static uint8_t spec_of(uint64_t key)

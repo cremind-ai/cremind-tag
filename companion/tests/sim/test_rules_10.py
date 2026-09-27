@@ -51,7 +51,9 @@ def test_one_result_per_update_id(tiny_pack: bytes, card: Card) -> None:
             tag = h.sim.tag(tag_id)
             tag.out_of_range = True  # the bridge holds the (accepted) layout until the gateway gave up
             ack = await h.deliver(tag_id, card(1), revision=1)
-            assert (await h.wait_result(ack.update_id)).status == Status.TIMEOUT
+            timeout = await h.wait_result(ack.update_id)
+            assert timeout.status == Status.TIMEOUT
+            assert (timeout.flags, timeout.stored_epoch) == (0, 0)  # the gateway's own result: no tag report
             tag.out_of_range = False
             await h.wait_until(lambda: h.sim.gateway.counters["duplicate_update_results"] == 1, 60)
             await h.client.drain_events()
@@ -76,7 +78,8 @@ def test_a_rebooted_gateway_forgets_which_results_it_reported(tiny_pack: bytes) 
         async with SimHarness(fontpack=tiny_pack, seed=33) as h:
             gateway = h.sim.gateway
             tag_id = h.tag_ids[0]
-            result = MeshDeliveryResult(7, 900, tag_id, 1, 1, Status.OK, bytes(8), 3000, 0, 0, 0, 0)
+            result = MeshDeliveryResult(7, 900, tag_id, 1, 1, Status.OK, bytes(8), 3000, 0, 0, 0, 0,
+                                        stored_epoch=1, flags=0)
             gateway._on_result(h.tag_bridge(tag_id), result)
             gateway._on_result(h.tag_bridge(tag_id), result)  # re-sent in the same boot: de-duplicated
             assert (gateway.counters["results"], gateway.counters["duplicate_results"]) == (1, 1)

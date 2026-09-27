@@ -33,8 +33,9 @@ static uint8_t frag_len;
 static uint8_t frag_chr;
 static bool ind_busy;
 
-static ssize_t read_caps(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
-			 uint16_t len, uint16_t offset)
+/* The CAPS value: served on the characteristic and bound into the handshake
+ * transcript by the core (docs/protocol.md 5.4), so both use these bytes. */
+void tag_hal_caps(uint8_t out[CTAG_TAG_CAPS_LEN])
 {
 	const struct ctag_tag_caps caps = {
 		.proto = CTAG_PROTO_VERSION,
@@ -51,9 +52,16 @@ static ssize_t read_caps(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
 		.max_record = CTAG_TAG_RECORD_PAYLOAD_MAX,
 		.credits = TAG_CREDITS,
 	};
+
+	(void)ctag_tag_caps_pack(&caps, out, CTAG_TAG_CAPS_LEN);
+}
+
+static ssize_t read_caps(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
+			 uint16_t len, uint16_t offset)
+{
 	uint8_t value[CTAG_TAG_CAPS_LEN];
 
-	(void)ctag_tag_caps_pack(&caps, value, sizeof(value));
+	tag_hal_caps(value);
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(value));
 }
 

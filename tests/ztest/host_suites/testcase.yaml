@@ -14,3 +14,6 @@ tests:
   ctag.host_suites.crc_zephyr:
     extra_configs:
       - CONFIG_CTAG_CRC32_ZEPHYR=y
+  ctag.host_suites.qr_one_slot:
+    extra_configs:
+      - CONFIG_CTAG_RENDER_QR_SLOTS=1

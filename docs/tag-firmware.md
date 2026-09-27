@@ -78,6 +78,15 @@ physical sample.
                         (queue drained or 2 s linger; 20 s without progress: silent)
 ```
 
+Every `ERROR` carries the tag's stored epoch: `ERROR{status, stored_epoch}`
+(§5.4; epochs are not secret, the CHALLENGE reports the same value), so a
+bridge refused with `STALE_EPOCH` can tell the companion which epoch to
+assign above.
+
+The handshake transcript covers the CAPS value the tag serves (§5.4):
+`gatt.c`'s `tag_hal_caps()` builds it for the CAPS read and for the core,
+which hashes it at HELLO (18 bytes on the handshake's stack, no RAM kept).
+
 | Event | Tag answer | Then |
 |---|---|---|
 | HELLO malformed / other tag_id / proto / epoch < stored | `ERROR{INVALID / NOT_FOUND / VERSION_MISMATCH / STALE_EPOCH}` (library order, §5.4) | close |
@@ -116,9 +125,14 @@ physical sample.
   waits in the other buffer.
 - The tag stays connected through transfer, refresh, persist and RESULT (the
   session timeout re-arms while refreshing). A disconnect during the refresh
-  does not stop it: DISPLAYED is persisted, no RESULT is sent,
-  `result_pending` (advertising flag bit 0) stays set and the re-delivery is
-  answered from the stored ACK.
+  does not stop it: DISPLAYED is persisted, no RESULT is sent, and
+  `result_pending` (advertising flag bit 0) stays set until a RESULT is
+  queued. The re-delivery is answered from the stored ACK (`RESULT OK` with
+  `flags.bit0`), and that RESULT clears `result_pending` like any other
+  (as the simulator's `send_result()`): the pending flag means "an outcome
+  has not been handed to a bridge yet", and the stored ACK hands it over.
+  The flag is RAM only: after a reset the stored ACK still answers the next
+  re-delivery.
 - `CMD{CLEAR}`: begin_frame, both planes staged with white from the
   plane_flags (plane 0 white, plane 1 not red), digest computed on the way,
   then the same transaction with revision 0. `CMD{IDENTIFY}`, `CMD{REFRESH}`
@@ -283,11 +297,19 @@ own usage.
 
 | Target | Flash used / region (B) | Free | RAM used / region (B) | RAM free (target) | verify_stack |
 |---|---|---|---|---|---|
-| tag-laowu-bw | 95,412 / 126,976 | 24.9 % | 14,316 / 16,384 | **2,068** (2,048) | pass |
-| tag-laowu-bwr | 95,516 / 258,048 | 63.0 % | 14,324 / 16,384 | **2,060** (2,048) | pass |
-| tag-sifei-52810 | 100,364 / 188,416 | 46.7 % | 15,520 / 24,576 | 9,056 (3,072) | pass |
-| tag-hema-52811 | 100,268 / 188,416 | 46.8 % | 15,520 / 24,576 | 9,056 (3,072) | pass |
-| tag-nrf52dk | 100,776 / 499,712 | 79.8 % | 15,640 / 65,536 | 49,896 (none) | pass |
+| tag-laowu-bw | 95,508 / 126,976 | 24.8 % | 14,316 / 16,384 | **2,068** (2,048) | pass |
+| tag-laowu-bwr | 95,628 / 258,048 | 62.9 % | 14,324 / 16,384 | **2,060** (2,048) | pass |
+| tag-sifei-52810 | 100,492 / 188,416 | 46.7 % | 15,520 / 24,576 | 9,056 (3,072) | pass |
+| tag-hema-52811 | 100,396 / 188,416 | 46.7 % | 15,520 / 24,576 | 9,056 (3,072) | pass |
+| tag-nrf52dk | 100,904 / 499,712 | 79.8 % | 15,640 / 65,536 | 49,896 (none) | pass |
+
+Measured 2026-09-28 after the protocol v1 finalisation (CAPS bound into the
+handshake transcript, `ERROR{status, stored_epoch}`): +96 B flash on the
+Laowu BW (+96 to +128 B on the others) and **no RAM**: the CAPS value is
+built on the handshake's stack (`tag_hal_caps()`), the ERROR is packed into
+the transmit queue, and `ctag_session` keeps its 124 bytes. The Laowu BW
+keeps its 20 B above the 2 KiB RAM target and 12,421 B of flash below the
+15 % headroom limit (107,929 B).
 
 How the Laowu BW got there: first complete build 109,568 B flash (86.3 %, 1,639 B
 over the 15 % headroom) and 1,828 B RAM free. LTO brought flash to ~92.7 KB;
@@ -328,17 +350,17 @@ every thread stack also takes on interrupt entry):
 
 | Chain (system work queue: + work_queue_main 40 + core_fn 32/16) | nRF51 | nRF52 |
 |---|---:|---:|
-| HELLO: tag_hello → K_epoch → HKDF → psa_mac_compute → Oberon HMAC | 952 | 900 |
-| AUTH with a new epoch: → NVS write (incl. garbage collection) | 928 | 860 |
-| record: FRAME_BEGIN → RESULT sealed (AES-CCM) | 1040 | 1000 |
+| HELLO: tag_hello (CAPS on the stack) → K_epoch → HKDF → psa_mac_compute → Oberon HMAC | 1000 | 964 |
+| AUTH with a new epoch: → NVS write (incl. garbage collection) | 928 | 868 |
+| record: FRAME_BEGIN → RESULT sealed (AES-CCM) | 1032 | **1016** |
 | refresh: REFRESH_INTENT → NVS write with GC → flash sync → kernel | **1072** | 988 |
-| refresh done: DISPLAYED → NVS | 1008 | 908 |
+| refresh done: DISPLAYED → NVS | 1008 | 920 |
 | host RX (rx_work_handler: ATT write, HCI events) | 656 | 600 |
 | boot (init_work → bt_ready → boot rule → NVS) | 1064 | 972 |
 
 | Stack | nRF51 size | worst estimate + 32 | margin | nRF52 size | worst + 32 | margin |
 |---|---:|---:|---:|---:|---:|---:|
-| System work queue | 1280 | 1104 | 176 | 1536 | 1032 | 504 |
+| System work queue | 1280 | 1104 | 176 | 1536 | 1048 | 488 |
 | Main (SYS_INIT device init, then main) | 512 | 432 | 80 | 512 | 328 | 184 |
 | Controller RX (`BT_CTLR_RX_STACK_SIZE`) | 640 | ~370 | ~270 | 896 | ~385 | ~510 |
 | Controller prio RX (`BT_CTLR_RX_PRIO_STACK_SIZE`) | 384 | ~370 | **~15** | 448 | ~385 | ~60 |
@@ -419,11 +441,11 @@ west twister -T /work/tests/ztest/tag_core -p native_sim -p native_sim/native/64
 
 | Suite | What |
 |---|---|
-| `tag_core_conv` (14) | Conversations scripted by [`gen_conversation.py`](../tests/ztest/tag_core/gen_conversation.py) with the companion's reference (`protocol/session.py`, `fragments.py`, `msgs.py`) and replayed byte for byte, every ATT value the tag sends compared: happy path (two records in flight), two planes, duplicate (stored ACK), stale revision, revision conflict, digest mismatch (no refresh), AUTH failure, disconnect mid-transfer then restart from offset 0, power loss between REFRESH_INTENT and DISPLAYED → boot rule → CHALLENGE flag and DISPLAY_STATE_UNKNOWN → re-delivery → OK, epoch stored only after AUTH, IDENTIFY/REFRESH/SLEEP → UNSUPPORTED, CLEAR (white planes, revision 0), unverified panel refuses frames, refresh timeout keeps REFRESH_INTENT. Frames are `render.json` scenarios with plane bytes. |
-| `tag_core_fixtures` (6) | `session.json`: exact CHALLENGE and AUTH_OK from the fixture HELLO/AUTH and state, the fixture records decrypted and staged, every B2T tampered record → ERROR{AUTH_FAILED}, bad mac_b; `tag_txn.json`: every FRAME_BEGIN row through a live C bridge (the "older epoch" row is refused earlier, at HELLO, with STALE_EPOCH), every boot-rule row incl. the CHALLENGE flag; `render.json`: every scenario with plane bytes transferred and verified against its frame digest. |
-| `tag_core_rules` (14) | 3 AUTH failures skip one window; session timeout (never during a refresh); fragment violation closes silently; record without credit; CTRL after AUTH_OK; DATA before AUTH; malformed plaintext; corrupt record → STORAGE_ERROR and no-record behaviour; REFRESH_INTENT write failure (no refresh); epoch write failure; panel begin/commit failures; FRAME_ABORT, out-of-order PLANE_DATA, early FRAME_END; disconnect during a refresh completes and persists; advertising flags. |
+| `tag_core_conv` (15) | Conversations scripted by [`gen_conversation.py`](../tests/ztest/tag_core/gen_conversation.py) with the companion's reference (`protocol/session.py`, `fragments.py`, `msgs.py`) and replayed byte for byte, every ATT value the tag sends compared (the tag serves the CAPS of the frame's panel; every ERROR carries the stored epoch): happy path (two records in flight), two planes, duplicate (stored ACK), stale revision, revision conflict, digest mismatch (no refresh), AUTH failure, a relayed CAPS (plane_flags rewritten on the bridge's read: AUTH fails, the panel is never touched), disconnect mid-transfer then restart from offset 0, power loss between REFRESH_INTENT and DISPLAYED → boot rule → CHALLENGE flag and DISPLAY_STATE_UNKNOWN → re-delivery → OK, epoch stored only after AUTH, IDENTIFY/REFRESH/SLEEP → UNSUPPORTED, CLEAR (white planes, revision 0), unverified panel refuses frames, refresh timeout keeps REFRESH_INTENT. Frames are `render.json` scenarios with plane bytes. |
+| `tag_core_fixtures` (8) | `session.json`: exact CHALLENGE and AUTH_OK from the fixture CAPS/HELLO/AUTH and state, the fixture records decrypted and staged, every B2T tampered record → ERROR{AUTH_FAILED}, bad mac_b, the fixture's relayed-CAPS AUTH → ERROR{AUTH_FAILED, 2}, the fixture's ERROR{STALE_EPOCH, 4} byte for byte; `tag_txn.json`: every FRAME_BEGIN row through a live C bridge (the "older epoch" row is refused earlier, at HELLO, with STALE_EPOCH), every boot-rule row incl. the CHALLENGE flag; `render.json`: every scenario with plane bytes transferred and verified against its frame digest. |
+| `tag_core_rules` (16) | 3 AUTH failures skip one window; session timeout (never during a refresh); fragment violation closes silently; record without credit; CTRL after AUTH_OK; DATA before AUTH; malformed plaintext (each ERROR with the stored epoch); corrupt record → STORAGE_ERROR and no-record behaviour; REFRESH_INTENT write failure (no refresh); epoch write failure (ERROR{STORAGE_ERROR} with the epoch kept); panel begin/commit failures; FRAME_ABORT, out-of-order PLANE_DATA, early FRAME_END; disconnect during a refresh completes and persists; the stored ACK of the re-delivery clears `result_pending`, as does any RESULT; advertising flags. |
 
-Result: 34/34 cases on `native_sim` and on `native_sim/native/64`.
+Result (2026-09-28): 39/39 cases on `native_sim` and on `native_sim/native/64`.
 
 Regenerate the conversations after a protocol change with the companion
 environment, and check them in CI:
@@ -473,5 +495,3 @@ uv run --project companion python tests/ztest/tag_core/gen_conversation.py [--ch
   links the full UC8176 driver (so the fit is honest) but never drives it.
 - `CMD{SLEEP}` (System OFF) is implemented for boards with `wake-verified` only;
   none has it.
-- The duplicate flag (`RESULT.flags.bit0`) does not reach the companion (§10
-  known limitation).

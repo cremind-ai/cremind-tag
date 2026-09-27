@@ -9,7 +9,7 @@ Status: **buildable** — subject to resource qualification ([status definitions
 > (`apps/gateway/socs/nrf52832.conf`): a 5 KiB layout arena (one 4000-byte
 > layout plus a small one, or about four typical 1 KiB layouts, at most three
 > queued behind the active transfer; `BUSY` beyond), trimmed thread stacks,
-> fewer HCI and mesh buffers. **4,816 B of RAM remain after every static
+> fewer HCI and mesh buffers. **4,688 B of RAM remain after every static
 > allocation**, and the stack sizes are estimates that have not been measured:
 > qualification must run the debug build (`debug/rtt.conf`, thread analyzer)
 > through provisioning, configuration and sustained delivery and confirm every
@@ -20,7 +20,7 @@ Status: **buildable** — subject to resource qualification ([status definitions
 
 | Item | Build value | To measure on hardware | Result |
 |---|---|---|---|
-| RAM free after static allocation | 4,816 B | - | measured at build |
+| RAM free after static allocation | 4,688 B | - | measured at build |
 | `main` (start-up, then the gateway loop) | 3,072 B | high-water during first boot (self-configuration) and GET_INVENTORY | _pending_ |
 | System work queue | 2,560 B | high-water during provisioning (PSA ECDH, trusted storage) | _pending_ |
 | Bluetooth RX thread | 2,560 B | high-water during provisioning and results from 5 bridges | _pending_ |
@@ -65,7 +65,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| gateway-nrf52dk | `apps/gateway` | 198,668 / 499,712 | 60.2 % (15 %) | 60,720 / 65,536 | 4,816 (none) | pass (edtlib) | ok | 2026-09-27 |
+| gateway-nrf52dk | `apps/gateway` | 198,764 / 499,712 | 60.2 % (15 %) | 60,848 / 65,536 | 4,688 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -108,3 +108,4 @@ Measure with development equipment disconnected, after a power-on reset.
 |---|---|---|
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
 | 2026-09-28 | buildable | `gateway-nrf52dk` builds (flash 198,668 B = 39.8 % of the 488 KiB code partition, RAM 60,720 B of 64 KiB: 4,816 B free), `verify_stack.py` 16/16; stack sizes unmeasured (resource qualification above). |
+| 2026-09-28 | buildable | Protocol v1 finalisation: `EVT_RESULT` carries `flags` and `stored_epoch` (retained slots of 104 B, 16 of them: +128 B). `gateway-nrf52dk`: flash 198,764 B (60.2 % free), RAM 60,848 B of 64 KiB (**4,688 B free**); `verify_stack.py` 16/16; host tests, 894 twister cases on native_sim, the gateway interop (8/8) and the bridge maintenance interop pass; stack sizes still unmeasured (resource qualification above). |

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from ..protocol import cbor_msgs
-from ..protocol.ids import DeliveryStage, SerialMsg, Status
+from ..protocol.ids import RESULT_FLAG_DUPLICATE, RESULT_FLAG_ESCALATED, DeliveryStage, SerialMsg, Status
 from .results import Assignment, BridgeInfo, Caps, HelloInfo, Timing, to_status
 
 RETAINED_EVENTS = frozenset({SerialMsg.EVT_PROVISIONED, SerialMsg.EVT_NODE_CONFIGURED, SerialMsg.EVT_NODE_REMOVED,
@@ -127,6 +127,11 @@ class ResultEvent(RetainedEvent):
 
     For ``TAG_COMMAND`` the ``update_id`` is the command's ``op_id``. ``digest`` is
     the first 8 bytes of the frame digest (zeros when nothing was displayed).
+    ``flags`` and ``stored_epoch`` are the bridge's ``DELIVERY_RESULT`` report
+    (§3.4): bit0 ``RESULT_FLAG_DUPLICATE`` (the tag answered with its stored
+    ACK), bit1 ``RESULT_FLAG_ESCALATED`` (an unauthenticated status repeated in 3
+    sessions); ``stored_epoch`` is the tag's stored epoch, 0 when no tag session
+    produced the result (every result the gateway makes itself).
     """
 
     TYPE: ClassVar[SerialMsg] = SerialMsg.EVT_RESULT
@@ -139,10 +144,22 @@ class ResultEvent(RetainedEvent):
     digest: bytes
     battery_mv: int
     timing: Timing
+    flags: int = 0
+    stored_epoch: int = 0
 
     @property
     def displayed(self) -> bool:
         return self.status == Status.OK
+
+    @property
+    def duplicate(self) -> bool:
+        """The tag answered from its stored ACK: the revision was already displayed, nothing was redrawn."""
+        return bool(self.flags & RESULT_FLAG_DUPLICATE)
+
+    @property
+    def escalated(self) -> bool:
+        """An unauthenticated tag status that ended the job after 3 consecutive sessions (§10)."""
+        return bool(self.flags & RESULT_FLAG_ESCALATED)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -220,7 +237,8 @@ def parse_event(type_code: int, payload: bytes, boot_id: int | None) -> GatewayE
             return ResultEvent(**common, event_seq=f["seq"], update_id=f["update_id"], bridge=f["bridge"],
                                tag_id=f["tag_id"], epoch=f["epoch"], revision=f["revision"],
                                status=to_status(f["status"]), digest=f["digest"], battery_mv=f["battery_mv"],
-                               timing=Timing.from_map(f["timing"]))
+                               timing=Timing.from_map(f["timing"]), flags=f["flags"],
+                               stored_epoch=f["stored_epoch"])
         case SerialMsg.EVT_BRIDGE_INFO:
             info = BridgeInfo(f["addr"], f["fw"], f["fontpack_id"], Caps.from_map(f["caps"]),
                               tuple(Assignment(a.get("tag_id", 0), a.get("epoch", 0)) for a in f["assigned"]),

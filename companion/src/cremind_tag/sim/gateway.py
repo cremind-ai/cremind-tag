@@ -516,7 +516,8 @@ class SimGateway:
             "update_id": msg.update_id, "bridge": src, "tag_id": msg.tag_id, "epoch": msg.epoch,
             "revision": msg.revision, "status": msg.status, "digest": msg.digest, "battery_mv": msg.battery_mv,
             "timing": {"wake_ms": msg.wake_ms, "mesh_ms": delivery.mesh_ms if delivery else 0,
-                       "transfer_ms": msg.transfer_ms, "refresh_ms": msg.refresh_ms, "suspend_ms": msg.suspend_ms}})
+                       "transfer_ms": msg.transfer_ms, "refresh_ms": msg.refresh_ms, "suspend_ms": msg.suspend_ms},
+            "flags": msg.flags, "stored_epoch": msg.stored_epoch})  # the bridge's report, as is (§1.5)
 
     def _emit_result(self, fields: dict[str, Any]) -> None:
         """§10: exactly one ``EVT_RESULT`` per ``update_id``; a later result for it is dropped (the bridge
@@ -601,9 +602,11 @@ class SimGateway:
 
     def _result_fields(self, update_id: int, bridge: int, tag_id: int, epoch: int, revision: int, status: Status,
                        mesh_ms: int = 0) -> dict[str, Any]:
+        # The gateway's own results: no tag report (flags 0, stored_epoch 0, §1.5).
         return {"update_id": update_id, "bridge": bridge, "tag_id": tag_id, "epoch": epoch, "revision": revision,
                 "status": status, "digest": bytes(8), "battery_mv": 0,
-                "timing": {"wake_ms": 0, "mesh_ms": mesh_ms, "transfer_ms": 0, "refresh_ms": 0, "suspend_ms": 0}}
+                "timing": {"wake_ms": 0, "mesh_ms": mesh_ms, "transfer_ms": 0, "refresh_ms": 0, "suspend_ms": 0},
+                "flags": 0, "stored_epoch": 0}
 
     def _gateway_result(self, d: Delivery, status: Status) -> None:
         d.state = "done"

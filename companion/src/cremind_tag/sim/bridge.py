@@ -29,6 +29,17 @@ dropped during the refresh) is resolved on the next session: if the tag's
 ``CHALLENGE`` reports ``DISPLAY_STATE_UNKNOWN`` for that very ``(epoch,
 revision)``, the job ends ``DISPLAY_STATE_UNKNOWN`` (outcome ``UNCERTAIN``);
 otherwise ``FRAME_BEGIN`` is sent again and the tag's decision table answers.
+
+The handshake transcript binds the CAPS bytes the bridge read (§5.4). Statuses
+the tag sends before ``AUTH_OK`` (a CAPS mismatch, a plaintext ``ERROR``, a
+``CHALLENGE`` with another ``proto``, a wrong ``mac_t``) are unauthenticated:
+they back off like a link failure until the same status repeats in
+``UNAUTH_REPEATS`` consecutive sessions for the tag and epoch, and only then end
+the tag's jobs of that epoch, flagged ``RESULT_FLAG_ESCALATED`` (§10). Every
+result a session produces carries the tag's stored epoch (from its
+``CHALLENGE`` or ``ERROR``; after ``AUTH_OK`` at least the session's epoch), and
+a ``RESULT`` answered from the tag's stored ACK is flagged
+``RESULT_FLAG_DUPLICATE`` (§3.4).
 """
 
 from __future__ import annotations
@@ -55,6 +66,8 @@ from ..protocol.ids import (
     MESH_RESULT_RETRIES,
     MESH_RESULT_RETRY_MS,
     PROTO_VERSION,
+    RESULT_FLAG_DUPLICATE,
+    RESULT_FLAG_ESCALATED,
     SERIAL_MAX_FRAME,
     TAG_CTRL_MSG_MAX,
     TAG_PLANE_DATA_MAX,
@@ -124,6 +137,9 @@ TAG_SEEN_INTERVAL_MS = 60000.0
 RESUME_RETRY_MS = 500.0
 RESUME_RECOVERY_MS = 5000.0  # §5.2 step 7: reboot when resume still fails after 5 s
 FINAL_TAG_ERRORS = frozenset({Status.AUTH_FAILED, Status.STALE_EPOCH, Status.VERSION_MISMATCH, Status.NOT_FOUND})
+UNAUTH_REPEATS = 3
+"""Consecutive sessions ending with the same unauthenticated status before it ends the jobs (§10)."""
+NRF52832_MAX_TAGS = 10  # CONFIG_CTAG_BRIDGE_MAX_TAGS on the nRF52832 bridge (apps/bridge/socs/nrf52832.conf)
 U16 = 0xFFFF
 
 
@@ -140,6 +156,9 @@ class Assignment:
     epoch: int
     key: bytes  # K_epoch
     flags: int = 0
+    # RAM only (§10): the unauthenticated status of the last sessions and how many in a row ended with it.
+    unauth_status: Status | None = None
+    unauth_count: int = 0
 
 
 @dataclass
@@ -148,6 +167,8 @@ class StoredResult:
     digest8: bytes
     battery_mv: int
     timing: dict[str, int]
+    stored_epoch: int = 0
+    flags: int = 0
 
 
 @dataclass
@@ -190,7 +211,7 @@ class SimBridge:
 
     def __init__(self, name: str, *, uuid: bytes, clock: SimClock, mesh: MeshNetwork, air: Air, rng: random.Random,
                  flash_size: int = 64 * MIB, board: int = Board.NRF52840_BRIDGE, faults: BridgeFaults | None = None,
-                 bad_sectors: tuple[int, ...] = ()) -> None:
+                 bad_sectors: tuple[int, ...] = (), max_tags: int | None = None) -> None:
         self.name = name
         self.uuid = uuid
         self.clock = clock
@@ -198,6 +219,9 @@ class SimBridge:
         self.air = air
         self.rng = rng
         self.board = board
+        if max_tags is None:
+            max_tags = NRF52832_MAX_TAGS if board == Board.NRF52832_BRIDGE else MAX_TAGS_PER_BRIDGE
+        self.max_tags = max_tags  # CAPS_STATUS max_tags; a full table answers ASSIGN_SET NO_RESOURCES
         self.faults = faults or BridgeFaults()
         self.flash = SimFlash(flash_size, bad_sectors)
         self.fonts = FontStore(self.flash)
@@ -370,7 +394,7 @@ class SimBridge:
         pack_id = self.fontpack_id
         flags = (1 if pack_id is not None else 0) | (2 if self._session_task is not None else 0)
         return MeshCapsStatus(PROTO_VERSION, *FW, self.board, pack_id or bytes(8), min(self.flash.size // MIB, U16),
-                              MAX_TAGS_PER_BRIDGE, len(self.assignments), flags)
+                              self.max_tags, len(self.assignments), flags)
 
     def health_status(self) -> MeshHealthStatus:
         c = self.counters
@@ -450,7 +474,7 @@ class SimBridge:
         if stored is not None and stored.status == Status.OK:
             self.counters["duplicates"] += 1
             self._send_result(b.update_id, b.tag_id, b.epoch, b.revision, stored.status, stored.digest8,
-                              stored.battery_mv, stored.timing)
+                              stored.battery_mv, stored.timing, stored.stored_epoch, stored.flags)
             return Status.DUPLICATE
         pending = next((j for j in self.jobs.get(b.tag_id, []) if j.kind == "layout" and j.revision == b.revision
                         and j.epoch == b.epoch), None)
@@ -482,12 +506,33 @@ class SimBridge:
         current = self.assignments.get(m.tag_id)
         if current is not None and current.epoch > m.epoch:
             return Status.STALE_EPOCH
-        if current is None and len(self.assignments) >= MAX_TAGS_PER_BRIDGE:
+        if current is None and len(self.assignments) >= self.max_tags:
+            self.counters["assign_full"] += 1
             return Status.NO_RESOURCES
         if current is not None and current.epoch < m.epoch:
             self._cancel_tag(m.tag_id, older_than=m.epoch)
-        self.assignments[m.tag_id] = Assignment(m.tag_id, m.epoch, m.key, m.flags)
+        self.assignments[m.tag_id] = Assignment(m.tag_id, m.epoch, m.key, m.flags)  # unauth count restarts
         return Status.OK
+
+    def _unauth_status(self, tag_id: int, epoch: int, status: Status) -> bool:
+        """Count an unauthenticated status; True when it is the ``UNAUTH_REPEATS``-th in a row (§10)."""
+        a = self.assignments.get(tag_id)
+        if a is None or a.epoch != epoch:
+            return False  # the assignment changed meanwhile: nothing to end
+        if a.unauth_count > 0 and a.unauth_status == status:
+            a.unauth_count += 1
+        else:
+            a.unauth_status, a.unauth_count = status, 1
+        if a.unauth_count < UNAUTH_REPEATS:
+            return False
+        a.unauth_count = 0
+        self.counters["unauth_final"] += 1
+        return True
+
+    def _tag_authenticated(self, tag_id: int, epoch: int) -> None:
+        a = self.assignments.get(tag_id)
+        if a is not None and a.epoch == epoch:
+            a.unauth_count = 0
 
     def _assign_del(self, m: MeshAssignDel) -> Status:
         current = self.assignments.get(m.tag_id)
@@ -516,7 +561,7 @@ class SimBridge:
     # -- results -----------------------------------------------------------------------------
 
     def _finish(self, job: Job, status: Status, *, digest8: bytes = bytes(8), battery_mv: int = 0,
-                timing: dict[str, int] | None = None) -> None:
+                timing: dict[str, int] | None = None, stored_epoch: int = 0, flags: int = 0) -> None:
         jobs = self.jobs.get(job.tag_id, [])
         if job in jobs:
             jobs.remove(job)
@@ -526,21 +571,26 @@ class SimBridge:
         if job.kind == "layout":
             history = self.history.get((job.tag_id, job.epoch))
             if history is not None and history.revision == job.revision and history.digest == job.layout_digest:
-                history.result = StoredResult(status, digest8, battery_mv, timing)
+                history.result = StoredResult(status, digest8, battery_mv, timing, stored_epoch, flags)
         elif job.cmd == TagCommand.CLEAR and status == Status.OK:
             # The tag now stores revision 0 for this epoch (§5.6); mirror it so no stale DUPLICATE
             # short-circuits a re-delivery of the revision that was shown before the clear.
             self.history[(job.tag_id, job.epoch)] = History(0, bytes(LAYOUT_DIGEST_LEN))
         self.counters[f"result_{status.name}"] += 1
-        self._send_result(job.update_id, job.tag_id, job.epoch, job.revision, status, digest8, battery_mv, timing)
+        if flags & RESULT_FLAG_ESCALATED:
+            self.counters["results_escalated"] += 1
+        self._send_result(job.update_id, job.tag_id, job.epoch, job.revision, status, digest8, battery_mv, timing,
+                          stored_epoch, flags)
 
     def _send_result(self, update_id: int, tag_id: int, epoch: int, revision: int, status: Status,
-                     digest8: bytes = bytes(8), battery_mv: int = 0, timing: dict[str, int] | None = None) -> None:
+                     digest8: bytes = bytes(8), battery_mv: int = 0, timing: dict[str, int] | None = None,
+                     stored_epoch: int = 0, flags: int = 0) -> None:
         timing = timing or {}
         self._result_seq = (self._result_seq + 1) & U16
         msg = MeshDeliveryResult(self._result_seq, update_id, tag_id, epoch, revision, status, digest8[:8],
                                  min(battery_mv, U16), *(min(int(timing.get(k, 0)), U16) for k in (
-                                     "wake_ms", "suspend_ms", "transfer_ms", "refresh_ms")))
+                                     "wake_ms", "suspend_ms", "transfer_ms", "refresh_ms")),
+                                 stored_epoch=stored_epoch, flags=flags)
         self._result_acks[msg.result_seq] = asyncio.Event()
         self._tasks.spawn(self._deliver_result(msg), f"result {msg.result_seq}")
 
@@ -749,7 +799,8 @@ class SimBridge:
                 "history": [{"tag_id": t, "epoch": e, "revision": h.revision, "digest": h.digest.hex(),
                              "result": None if h.result is None else {
                                  "status": int(h.result.status), "digest8": h.result.digest8.hex(),
-                                 "battery_mv": h.result.battery_mv, "timing": h.result.timing}}
+                                 "battery_mv": h.result.battery_mv, "timing": h.result.timing,
+                                 "stored_epoch": h.result.stored_epoch, "flags": h.result.flags}}
                             for (t, e), h in self.history.items()]}
 
     def load_state(self, data: dict[str, Any]) -> None:
@@ -762,7 +813,8 @@ class SimBridge:
         for h in data.get("history", []):
             r = h.get("result")
             result = None if r is None else StoredResult(Status(r["status"]), bytes.fromhex(r["digest8"]),
-                                                         r["battery_mv"], dict(r["timing"]))
+                                                         r["battery_mv"], dict(r["timing"]),
+                                                         int(r.get("stored_epoch", 0)), int(r.get("flags", 0)))
             self.history[(h["tag_id"], h["epoch"])] = History(h["revision"], bytes.fromhex(h["digest"]), result)
 
 
@@ -789,6 +841,7 @@ class _BridgeSession:
         self.refreshing_reported = False
         self.job: Job | None = None
         self.epoch = 0
+        self.tag_epoch = 0  # the tag's stored epoch (CHALLENGE / ERROR; after AUTH_OK at least `epoch`)
         self.pacer = Pacer(bridge.clock)
 
     @property
@@ -819,7 +872,7 @@ class _BridgeSession:
             message = self.ctrl_rx.feed(value)
             if message is not None:
                 if message[0] == CtrlMsg.ERROR and self.receiver is not None:
-                    self.tag_error(Status(CtrlError.unpack(message[1:]).status))
+                    self.ctrl_error(message)  # established: a plaintext ERROR is still unauthenticated
                 self.ctrl_inbox.append(message)
             return None
         if chr_ != GattChr.STATUS:
@@ -862,14 +915,30 @@ class _BridgeSession:
             if result is not None:
                 return result
 
+    def ctrl_error(self, message: bytes) -> None:
+        """A tag ``ERROR{status, stored_epoch}``: note the stored epoch, then :meth:`tag_error`."""
+        error = CtrlError.unpack(message[1:])
+        self.tag_epoch = error.stored_epoch
+        self.tag_error(_status(error.status))
+
     def tag_error(self, status: Status) -> None:
-        """An ERROR from the tag: security/config errors end the tag's jobs, others are retried."""
+        """A status from outside an authenticated record (§10): unauthenticated, so a security or
+        configuration status backs off like a link failure until it repeats in ``UNAUTH_REPEATS``
+        consecutive sessions for this tag and epoch; only then does it end the tag's jobs of that
+        epoch, carrying the tag's stored epoch and ``RESULT_FLAG_ESCALATED``."""
+        bridge = self.bridge
         self.status = status
         if status in FINAL_TAG_ERRORS:
-            for job in list(self.bridge.jobs.get(self.tag_id, [])):
-                if job.epoch == self.epoch:
-                    self.bridge._finish(job, status)
+            bridge.counters["unauth_statuses"] += 1
+            if bridge._unauth_status(self.tag_id, self.epoch, status):
+                for job in list(bridge.jobs.get(self.tag_id, [])):
+                    if job.epoch == self.epoch:
+                        bridge._finish(job, status, stored_epoch=self.tag_epoch, flags=RESULT_FLAG_ESCALATED)
         raise _SessionEnd
+
+    def finish(self, job: Job, status: Status, **kwargs: Any) -> None:
+        """End a job from this session: its result carries the tag's stored epoch (§3.4)."""
+        self.bridge._finish(job, status, stored_epoch=self.tag_epoch, **kwargs)
 
     # -- session ------------------------------------------------------------------------------
 
@@ -879,32 +948,39 @@ class _BridgeSession:
         if assignment is None:
             raise _SessionEnd
         self.epoch = assignment.epoch
-        caps = TagCaps.unpack(await self.link.read(GattChr.CAPS))
-        if caps.tag_id != self.tag_id or caps.proto != PROTO_VERSION:
-            self.status = Status.VERSION_MISMATCH if caps.proto != PROTO_VERSION else Status.NOT_FOUND
-            raise _SessionEnd
+        caps_bytes = await self.link.read(GattChr.CAPS)  # the transcript binds exactly these bytes (§5.4)
+        caps = TagCaps.unpack(caps_bytes)
+        if caps.proto != PROTO_VERSION:  # CAPS is read before the handshake: unauthenticated statuses
+            self.tag_error(Status.VERSION_MISMATCH)
+        if caps.tag_id != self.tag_id:
+            self.tag_error(Status.NOT_FOUND)
         hello = bytes([CtrlMsg.HELLO]) + CtrlHello(PROTO_VERSION, self.tag_id, self.epoch,
                                                    bridge.rng.randbytes(16)).pack()
         await self.send_ctrl(hello)
         challenge_msg = await self.recv_ctrl()
         if challenge_msg[0] == CtrlMsg.ERROR:
-            self.tag_error(Status(CtrlError.unpack(challenge_msg[1:]).status))
+            self.ctrl_error(challenge_msg)
         if challenge_msg[0] != CtrlMsg.CHALLENGE:
             raise FragmentError("expected CHALLENGE")
         challenge = CtrlChallenge.unpack(challenge_msg[1:])
+        self.tag_epoch = challenge.stored_epoch
+        if challenge.proto != PROTO_VERSION:
+            self.tag_error(Status.VERSION_MISMATCH)
         bridge.tag_battery[self.tag_id] = challenge.battery_mv
-        th = crypto.transcript_hash(hello, challenge_msg)
+        th = crypto.transcript_hash(caps_bytes, hello, challenge_msg)
         mac = crypto.mac_b(assignment.key, th)
         await self.send_ctrl(bytes([CtrlMsg.AUTH]) + CtrlAuth(mac).pack())
         reply = await self.recv_ctrl()
         if reply[0] == CtrlMsg.ERROR:
-            self.tag_error(Status(CtrlError.unpack(reply[1:]).status))
+            self.ctrl_error(reply)
         if reply[0] != CtrlMsg.AUTH_OK:
             raise FragmentError("expected AUTH_OK")
         try:
             crypto.verify_mac_t(assignment.key, th, mac, CtrlAuthOk.unpack(reply[1:]).mac_t)
         except crypto.AuthError:
             self.tag_error(Status.AUTH_FAILED)
+        self.tag_epoch = max(self.tag_epoch, self.epoch)  # the tag persisted the epoch before AUTH_OK (§5.4)
+        bridge._tag_authenticated(self.tag_id, self.epoch)
         k_b2t, k_t2b = crypto.session_keys(assignment.key, th)
         self.sender = crypto.RecordSender(k_b2t, RecordDir.B2T)
         self.receiver = crypto.RecordReceiver(k_t2b, RecordDir.T2B)
@@ -914,7 +990,7 @@ class _BridgeSession:
             if job not in bridge.jobs.get(self.tag_id, []):
                 continue  # finished meanwhile (cancelled, superseded)
             if job.epoch != self.epoch:
-                bridge._finish(job, Status.NOT_ASSIGNED)
+                self.finish(job, Status.NOT_ASSIGNED)
                 continue
             self.job = job
             self.refreshing_reported = False
@@ -930,8 +1006,9 @@ class _BridgeSession:
                 "transfer_ms": int(self.clock.now_ms() - started), "refresh_ms": refresh_ms}
 
     def finish_from(self, job: Job, result: RecResult, started: float) -> None:
-        self.bridge._finish(job, Status(result.status), digest8=result.digest, battery_mv=result.battery_mv,
-                            timing=self.timing(job, started, result.refresh_ms))
+        # RESULT.flags bit0: the tag answered with its stored ACK -> RESULT_FLAG_DUPLICATE (§3.4).
+        self.finish(job, _status(result.status), digest8=result.digest, battery_mv=result.battery_mv,
+                    timing=self.timing(job, started, result.refresh_ms), flags=result.flags & RESULT_FLAG_DUPLICATE)
 
     async def run_job(self, job: Job, caps: TagCaps, challenge: CtrlChallenge) -> None:
         bridge = self.bridge
@@ -947,18 +1024,18 @@ class _BridgeSession:
             return
         if (job.frame_end_sent and challenge.flags & 1
                 and (challenge.stored_epoch, challenge.displayed_rev) == (job.epoch, job.revision)):
-            bridge._finish(job, Status.DISPLAY_STATE_UNKNOWN, battery_mv=challenge.battery_mv,
-                           timing=self.timing(job, started, 0))
+            self.finish(job, Status.DISPLAY_STATE_UNKNOWN, battery_mv=challenge.battery_mv,
+                        timing=self.timing(job, started, 0))
             return
         pack = bridge.fontpack
         if pack is None or pack.pack_id != job.fontpack_id:
-            bridge._finish(job, Status.FONTPACK_MISMATCH)
+            self.finish(job, Status.FONTPACK_MISMATCH)
             return
         panel = Panel(caps.width, caps.height, caps.planes, caps.plane_flags)
         try:
             frame = await asyncio.to_thread(render_frame, job.layout, panel, pack)
         except LayoutError as exc:  # e.g. the logical size does not fit this panel (§4.4 Rotation)
-            bridge._finish(job, exc.status)
+            self.finish(job, exc.status)
             return
         bridge._stage(job, DeliveryStage.TRANSFERRING)
         started = self.clock.now_ms()  # rendering runs at host speed; time the transfer only
@@ -990,3 +1067,11 @@ class _BridgeSession:
         await self.send_record(RecordType.FRAME_END, b"")
         job.frame_end_sent = True
         self.finish_from(job, await self.wait_result(RESULT_TIMEOUT_MS), started)
+
+
+def _status(value: int) -> Status:
+    """A tag's status byte; an unknown value is a protocol violation (``INVALID``)."""
+    try:
+        return Status(value)
+    except ValueError:
+        return Status.INVALID

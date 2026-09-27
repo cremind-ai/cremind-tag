@@ -4,14 +4,15 @@ Status: **buildable** ([status definitions](../hardware/matrix.md))
 
 > The complete bridge (`apps/bridge`, [bridge-firmware.md](../bridge-firmware.md))
 > links in this board's exact geometry, passes `tools/verify_stack.py` and
-> meets both targets: **8,537 B** of RAM free (target 8,192 B) and 44.9 % of
+> meets both targets: **8,473 B** of RAM free (target 8,192 B) and 44.8 % of
 > the flash free. It got there by a design change shared with the nRF52840 —
 > layouts assembled in their external-flash record and one shared layout
 > buffer, the maintenance thread on the main thread — plus this SoC's
 > 512-byte maintenance frames and a **10-tag assignment table**
-> (`CAPS_STATUS.max_tags` = 10; the nRF52840 keeps 20): see
+> (`CAPS_STATUS.max_tags` = 10; the nRF52840 keeps 20) and one cached QR
+> symbol (the nRF52840 keeps four): see
 > [bridge-firmware.md §9](../bridge-firmware.md#9-memory). The margin is
-> 345 B. Its 3.5 KiB work-queue and 2 KiB main (maintenance) stacks are
+> 281 B. Its 3.5 KiB work-queue and 2 KiB main (maintenance) stacks are
 > estimates until measured on hardware (§11 H12). The external SPI NOR pins in
 > `apps/bridge/boards/nrf52dk_nrf52832.overlay` are placeholders until an
 > nRF52832 bridge board is chosen. Nothing has run on a physical sample yet.
@@ -52,7 +53,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| bridge-nrf52dk | `apps/bridge` | 275,148 / 499,712 | 44.9 % (15 %) | 56,999 / 65,536 | 8,537 (8,192) | pass (edtlib) | ok | 2026-09-27 |
+| bridge-nrf52dk | `apps/bridge` | 276,080 / 499,712 | 44.8 % (15 %) | 57,063 / 65,536 | 8,473 (8,192) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -98,3 +99,4 @@ Measure with development equipment disconnected, after a power-on reset.
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
 | 2026-09-28 | blocked | `bridge-nrf52dk` (`apps/bridge`): 272,928 B flash of 488 KiB (45.4 % free); RAM 65,321 of 65,536 B, 215 B free vs the 8,192 B target (bridge application 31.3 KiB incl. two 4 KiB layout buffers, maintenance port 7.6 KiB, work-queue stack 3.5 KiB; controller 9.4 KiB, host 9.2 KiB, mesh 5.3 KiB, kernel stacks 6.3 KiB, PSA 1.9 KiB). `verify_stack.py` 16/16 pass. |
 | 2026-09-28 | buildable | Design change of bridge-firmware.md §9: layouts assembled in external flash with one shared 4 KiB layout buffer (−4 KiB), the maintenance thread on the main thread (−1.1 KiB), 512-byte maintenance frames and a 1,280-byte response buffer, a 10-tag assignment table (`max_tags` 10). `bridge-nrf52dk`: 275,148 B flash (44.9 % free); RAM 56,999 of 65,536 B, **8,537 B free** (bridge core state 10,984 B incl. the shared layout buffer; maintenance port 3,484 B; work-queue stack 3.5 KiB; kernel stacks incl. the 2 KiB main/maintenance stack 7,370 B; controller 9,439 B, host 9,195 B, mesh 5,336 B, PSA 1,856 B). `verify_stack.py` 16/16 pass; 312 native_sim test cases (the nRF52832 sizes are a twister configuration of their own) and the companion interop at 512-byte frames pass. |
+| 2026-09-28 | buildable | Protocol v1 finalisation: CAPS in the transcript (re-packed from the parsed CAPS, no RAM), `DELIVERY_RESULT` with `stored_epoch` and `flags` (history record 72 B), unauthenticated statuses escalated with `RESULT_FLAG_ESCALATED`, §4.3 render-cost bounds with a QR cache of **one** symbol here (`CONFIG_CTAG_RENDER_QR_SLOTS=1`: four would leave 7,193 B, below the target), firmware version from `app_version.h`. `bridge-nrf52dk`: 276,080 B flash (44.8 % free, +932 B); RAM 57,063 of 65,536 B, **8,473 B free** (−64 B; margin 281 B); `verify_stack.py` 16/16 pass; the build is bit-for-bit reproducible (`tools/repro_check.py`); host tests, 894 twister cases on native_sim, the gateway interop (8/8) and the bridge maintenance interop pass (`ctag.bridge.core.nrf52832` runs with one QR slot). |

@@ -57,9 +57,9 @@ int main(void)
 	ctag_frag_rx_init(&rx, ctrl_buf, sizeof(ctrl_buf));
 	ctag_frag_tx_init(&tx);
 	n = ctag_frag_rx_put(&rx, value, sizeof(value));
-	(void)ctag_session_tag_hello(&session, enroll.tag_id, enroll.secret, &ch, ctrl_buf,
-				     (size_t)n, rec_buf[0], &len);
-	(void)ctag_session_tag_auth(&session, ctrl_buf, (size_t)n, rec_buf[0], &len);
+	(void)ctag_session_tag_hello(&session, enroll.tag_id, enroll.secret, value, sizeof(value), &ch,
+				     ctrl_buf, (size_t)n, rec_buf[0], &len);
+	(void)ctag_session_tag_auth(&session, ch.stored_epoch, ctrl_buf, (size_t)n, rec_buf[0], &len);
 	(void)ctag_frag_next(&tx, rec_buf[0], len, &off, CTAG_FRAG_PAYLOAD_MAX, value);
 	n = ctag_record_open(&session.rx, rec_buf[1], sizeof(rec_buf[1]), &type, pt, sizeof(pt));
 	/* The incremental digest of the plane bytes (5.6). */

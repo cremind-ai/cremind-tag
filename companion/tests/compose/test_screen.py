@@ -17,17 +17,21 @@ from cremind_tag.protocol.ids import (
     LAYOUT_HARD_MAX,
     LAYOUT_MAX_COMMANDS,
     LAYOUT_MAX_GLYPHS,
+    LAYOUT_MAX_LINE_STEPS,
+    LAYOUT_MAX_QR,
     LAYOUT_SERIAL_MAX,
     Color,
 )
 from cremind_tag.protocol.layout import (
     Glyphs,
     Icon,
+    Line,
     Progress,
     Qr,
     check_panel,
     check_strikes,
     decode_layout,
+    line_steps,
 )
 
 pytestmark = pytest.mark.fonts
@@ -55,9 +59,20 @@ def check(screen: ComposedScreen, panel: TagPanel, fonts: Any) -> Any:
         if isinstance(cmd, Glyphs):
             for _gid, x, y in command_glyphs(cmd):
                 assert -64 <= x < layout.width + 64 and -64 <= y < layout.height + 64
+        if isinstance(cmd, Line):  # inside the canvas, well within the §4.3 endpoint box
+            assert 0 <= min(cmd.x0, cmd.x1) and max(cmd.x0, cmd.x1) < layout.width
+            assert 0 <= min(cmd.y0, cmd.y1) and max(cmd.y0, cmd.y1) < layout.height
+    qrs, steps = render_cost(layout)
+    assert qrs <= 1 <= LAYOUT_MAX_QR and steps <= 3 * layout.width <= LAYOUT_MAX_LINE_STEPS
     assert screen.pending_count == len(screen.pending_delivery_ids)
     assert not set(screen.delivery_ids) & set(screen.pending_delivery_ids)
     return layout
+
+
+def render_cost(layout: Any) -> tuple[int, int]:
+    """QR commands and LINE steps of a layout (§4.3 render-cost bounds)."""
+    return (sum(isinstance(c, Qr) for c in layout.commands),
+            sum(line_steps(c) for c in layout.commands if isinstance(c, Line)))
 
 
 def card(did: int, kind: str, title: str, prio: int, minutes: int, now: datetime, **extra: Any) -> ActiveCard:
@@ -211,6 +226,40 @@ def test_worst_case_screens_stay_within_limits(fonts: Any, now: datetime, script
     check(screen, panel, fonts)
     assert len(screen.delivery_ids) >= 1 and len(screen.delivery_ids) + screen.pending_count == 20
     assert screen.unsupported_chars == ()
+
+
+MAX_CANVAS = [LARGE, TagPanel(0x1A2B3C4D, 2048, 2048, 2, 3, 0, "Largest"),
+              TagPanel(0x1A2B3C4D, 2048, 480, 2, 3, 1, "Widest portrait")]
+
+
+@pytest.mark.parametrize("panel", MAX_CANVAS, ids=["800x480", "2048x2048", "480x2048"])
+def test_render_cost_bounds_on_the_largest_canvases(fonts: Any, now: datetime, panel: TagPanel) -> None:
+    """§4.3 render cost: the worst screens the composer makes, on canvases up to LAYOUT_MAX_SIDE, stay far
+    inside LAYOUT_MAX_QR and LAYOUT_MAX_LINE_STEPS (one QR code, at most three separators of the canvas width)."""
+    link = "https://cremind.example.com/#/alice/c/0f8c2b1e-5a3d-4b8e-9c21-7d9f0e1a2b3c"
+    text = (LONG["alternating"] * 40)[:400]
+    cards = [card(i, "needs_input", text, 50 + i % 5, i, now, body=text * 3, link=link, progress={"done": i, "total": 20})
+             for i in range(1, 21)]
+    for settings in (ScreenSettings(True, True), ScreenSettings(True, True, "Asia/Riyadh", "ar")):
+        layout = check(compose_screen(panel, cards, fonts, settings, now), panel, fonts)
+        qrs, steps = render_cost(layout)
+        assert qrs == 1 and 0 < steps <= 3 * layout.width
+        layout = check(compose_identify(panel, fonts), panel, fonts)
+        assert render_cost(layout) == (0, 0)
+
+
+def test_composer_budget_counts_render_cost(fonts: Any, now: datetime, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The budget refuses a QR code beyond LAYOUT_MAX_QR: the ladder then drops it rather than emit an invalid
+    layout (the other bound cannot be reached: three separators of at most 2048 steps)."""
+    from cremind_tag.compose import screen as screen_module
+
+    link = "https://cremind.example.com/#/alice/c/0f8c2b1e-5a3d-4b8e-9c21-7d9f0e1a2b3c"
+    cards = [card(1, "needs_input", "Approve?", 90, 1, now, link=link)]
+    assert render_cost(decode_layout(compose_screen(LANDSCAPE_BW, cards, fonts, ScreenSettings(qr_links=True),
+                                                    now).layout))[0] == 1
+    monkeypatch.setattr(screen_module, "LAYOUT_MAX_QR", 0)
+    screen = compose_screen(LANDSCAPE_BW, cards, fonts, ScreenSettings(qr_links=True), now)
+    assert render_cost(decode_layout(screen.layout))[0] == 0 and screen.delivery_ids == (1,)
 
 
 @pytest.mark.parametrize(("limit", "value"), [("LAYOUT_MAX_GLYPHS", 150), ("MAX_BYTES", 700),

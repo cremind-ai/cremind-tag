@@ -408,9 +408,11 @@ little: in-flight revisions are re-sent on the new `boot_id`.
   cost of Cremind never seeing the uncertainty.
 - **Stale rows** in docs/bridge-firmware.md §12 (the simulator no longer answers
   a repeated commit `NOT_FOUND`) and docs/gateway-firmware.md §12 (the simulator
-  now enforces one `EVT_RESULT` per `update_id`). The simulator still ends a
+  now enforces one `EVT_RESULT` per `update_id`). The simulator still ended a
   tag's jobs on an unauthenticated pre-AUTH `ERROR` at once, where protocol §10 now asks
-  for three consecutive sessions (not exercised here).
+  for three consecutive sessions (not exercised here). *Since fixed by the
+  protocol v1 finalisation (2026-09-28): the simulator counts 3 consecutive
+  sessions (`tests/sim/test_tag_report.py`) and both §12 tables were updated.*
 
 ## 7. Bugs found and fixed
 

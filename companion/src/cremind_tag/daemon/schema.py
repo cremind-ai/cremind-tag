@@ -17,7 +17,9 @@ the scheduler's comparisons):
   resolved). ``last_stage`` is the highest stage receipted.
 - ``tag_views`` — per tag: Cremind's view from ``sync`` (owner credential,
   epoch, rotation, ``clear_required``, desired/displayed revisions) plus the
-  scheduler's flags (dirty, force, blank, identify override, block reason).
+  scheduler's flags (dirty, force, blank, identify override, block reason);
+  v4: ``epoch_floor``, the epoch a tag's ``STALE_EPOCH`` reported as stored
+  (bounded, docs/companion.md "Epoch floor"), reported as the inventory epoch.
 - ``revisions`` — every composed screen: layout, digests, the deliveries it
   shows, the ``op_id`` persisted BEFORE the ``DELIVER_LAYOUT`` that uses it,
   attempts and the retry time (v3: ``not_found_count``, consecutive
@@ -207,9 +209,15 @@ _V3_NOT_FOUND = """
 ALTER TABLE revisions ADD COLUMN not_found_count INTEGER NOT NULL DEFAULT 0;
 """
 
+_V4_EPOCH_FLOOR = """
+ALTER TABLE tag_views ADD COLUMN epoch_floor INTEGER NOT NULL DEFAULT 0
+    CHECK (epoch_floor BETWEEN 0 AND 4294967295);
+"""
+
 QUEUE_MIGRATIONS: tuple[Migration, ...] = (
     Migration(2, "delivery_queue", _V2_QUEUE),
     Migration(3, "revision_not_found_count", _V3_NOT_FOUND),
+    Migration(4, "tag_view_epoch_floor", _V4_EPOCH_FLOOR),
 )
 """The queue's schema versions (append new ones; never edit an applied migration)."""
 

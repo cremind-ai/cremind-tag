@@ -247,7 +247,16 @@ card either by showing it or by counting it.
 A screen must stay within **`min(LAYOUT_HARD_MAX, LAYOUT_SERIAL_MAX)` =
 4000 bytes** (DELIVER_LAYOUT's CBOR envelope has to fit one 4 KiB serial
 frame; bridges accept up to 4096), `LAYOUT_MAX_GLYPHS` (512) glyphs and
-`LAYOUT_MAX_COMMANDS` (256) commands. The composer tracks the three budgets
+`LAYOUT_MAX_COMMANDS` (256) commands, and within the render-cost bounds of
+protocol.md §4.3 (`LAYOUT_MAX_QR` = 4 QR codes, `LAYOUT_MAX_LINE_STEPS` =
+16384 line steps, line endpoints in `[−W, 2W) × [−H, 2H)`). The composer
+cannot come near the last three: it draws at most one QR code and three
+separator lines, all inside the canvas (at most 3 × 2048 steps on the
+largest canvas); its budget still counts QR codes and line steps, so a
+future part that drew more would degrade like any other overflow
+(`test_render_cost_bounds_on_the_largest_canvases` composes the worst cards
+on 800×480, 2048×2048 and 480×2048; `test_composer_budget_counts_render_cost`
+drops the QR code when the QR budget is 0). The composer tracks the budgets
 while adding commands:
 
 1. the body is laid out last with as many lines as fit the height **and** the

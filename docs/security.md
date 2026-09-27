@@ -25,6 +25,27 @@ revision replay with a different frame is refused (`REVISION_CONFLICT`); older
 revisions are refused (`STALE_REVISION`). Results sent to the bridge are
 authenticated records, so a spoofed tag cannot forge an ACK.
 
+The handshake transcript is `th = SHA-256(CAPS ‖ HELLO ‖ CHALLENGE)`: the
+CAPS value the bridge read in plaintext (native geometry, `planes`,
+`plane_flags`) is bound into both MACs and the session keys. An active relay
+(central to the real tag, fake tag to the bridge) can forward everything
+untouched but can no longer alter the geometry or the plane flags the bridge
+renders with: any changed CAPS byte fails the tag's check of `mac_b`
+(`AUTH_FAILED`) before a record exists, so the tag never refreshes a frame
+rendered for another panel encoding.
+
+What stays unauthenticated, by design: everything a tag sends before
+`AUTH_OK` (CAPS, `CHALLENGE`, plaintext `ERROR{status, stored_epoch}`).
+Anyone advertising a tag's public id can send those, so a bridge treats such
+a status as a link failure until it repeats in 3 consecutive sessions
+(protocol.md §10) and flags the result it then reports
+(`RESULT_FLAG_ESCALATED`). The stored epoch an `ERROR` carries is not secret;
+the companion uses it only to raise the epoch of the next assignment, by a
+bounded step (at most 256 above the highest epoch it knows per report,
+companion.md §5 "Epoch floor"), never to lower one or to grant anything: a
+forger can make Cremind skip epoch numbers, while the new assignment still
+needs `K_epoch`, which only the companion can derive.
+
 Implementations: the firmware uses the platform's PSA Crypto API (audited
 implementations shipped with the SDK); the companion uses `cryptography`
 (OpenSSL). Neither side implements a primitive itself. The security

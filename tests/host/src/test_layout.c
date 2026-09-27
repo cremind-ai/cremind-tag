@@ -116,17 +116,19 @@ void test_layout_iter(void)
 	CHECK(ctag_layout_iter_init(&it, data, CTAG_LAYOUT_HEADER_LEN - 1u, &h) != 0);
 }
 
-/* A structurally valid layout of count LINE commands; returns its length. */
+/* A structurally valid layout of count one-step LINE commands (points, within
+ * the LAYOUT_MAX_LINE_STEPS render-cost bound); returns its length. */
 static size_t make_lines(uint8_t *out, uint16_t count)
 {
 	struct ctag_layout_header h = {
 		CTAG_LAYOUT_MAGIC, CTAG_PROTO_VERSION, 0u, 400u, 300u, 0u, 0u, count};
-	struct ctag_layout_cmd_line l = {0, 0, 0, 299, 1u, CTAG_COLOR_BLACK};
+	struct ctag_layout_cmd_line l = {0, 0, 0, 0, 1u, CTAG_COLOR_BLACK};
 	size_t pos = (size_t)ctag_layout_header_pack(&h, out, CTAG_LAYOUT_HEADER_LEN);
 	uint16_t i;
 
 	for (i = 0u; i < count; i++) {
 		out[pos++] = CTAG_LAYOUT_CMD_LINE;
+		l.x0 = (int16_t)i;
 		l.x1 = (int16_t)i;
 		pos += (size_t)ctag_layout_cmd_line_pack(&l, &out[pos], CTAG_LAYOUT_CMD_LINE_LEN);
 	}

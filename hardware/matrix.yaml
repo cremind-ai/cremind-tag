@@ -28,7 +28,7 @@ gateways:
     ram_kib: 64
     host_link: uart_ch340
     status: buildable
-    notes: Links with 4.8 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending.
+    notes: Links with 4.6 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending.
 
 bridges:
   - id: nrf52840_bridge
@@ -40,7 +40,7 @@ bridges:
     external_flash: soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only)
     maintenance_link: usb_cdc_acm
     status: buildable
-    notes: apps/bridge links in the exact geometry and passes verify_stack.py (flash 70 % free, 155 KiB RAM free); not flashed yet.
+    notes: apps/bridge links in the exact geometry and passes verify_stack.py (flash 70 % free, 154 KiB RAM free); not flashed yet.
   - id: nrf52832_bridge
     board_id: 4
     zephyr_board: nrf52dk/nrf52832
@@ -52,9 +52,10 @@ bridges:
     status: buildable
     notes: >-
       apps/bridge links in the exact geometry, passes verify_stack.py and meets the targets (measured 2026-09-28,
-      NCS v3.4.1): 8,537 B RAM free (target 8,192), flash 44.9 % free. Layouts are assembled in external flash
+      NCS v3.4.1): 8,473 B RAM free (target 8,192), flash 44.8 % free. Layouts are assembled in external flash
       with one shared layout buffer, the maintenance port runs on the main thread with 512-byte frames, and the
-      assignment table holds 10 tags (CAPS max_tags 10; the nRF52840 keeps 20). Stack sizes are estimates until
+      assignment table holds 10 tags (CAPS max_tags 10; the nRF52840 keeps 20), with one cached QR symbol
+      (the nRF52840 keeps four). Stack sizes are estimates until
       measured; SPI NOR pins on the nRF52 DK are placeholders; not flashed yet. docs/bridge-firmware.md "Memory".
 
 tags:
@@ -77,7 +78,7 @@ tags:
     leds: unconfirmed
     oscillator_32k: unverified (RC assumed until a crystal is confirmed)
     status: buildable
-    notes: Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 75.1 % used, 2,068 B RAM free); nothing verified on a sample yet.
+    notes: Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 75.2 % used, 2,068 B RAM free); nothing verified on a sample yet.
   - id: laowu_bwr
     board_id: 17
     zephyr_board: laowu_bwr/nrf51822
@@ -97,7 +98,7 @@ tags:
     leds: [3, 4, 5]
     oscillator_32k: unverified (RC assumed until a crystal is confirmed)
     status: buildable
-    notes: Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 37.0 % used, 2,060 B RAM free); nothing verified on a sample yet.
+    notes: Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 37.1 % used, 2,060 B RAM free); nothing verified on a sample yet.
   - id: sifei_52810
     board_id: 18
     zephyr_board: sifei_52810/nrf52810
@@ -127,7 +128,7 @@ tags:
       verified: false
     pins: unverified
     status: buildable
-    notes: Tag firmware (apps/tag) links with the panel driver and meets the targets (flash 53.2 % used, 9,056 B RAM free); the placeholder panel (id 255) is never driven and frames are refused until display mapping, panel model and wake sources are verified.
+    notes: Tag firmware (apps/tag) links with the panel driver and meets the targets (flash 53.3 % used, 9,056 B RAM free); the placeholder panel (id 255) is never driven and frames are refused until display mapping, panel model and wake sources are verified.
 
 # Per-board verification checklist (docs/hardware/verification.md explains each item).
 verification_items:

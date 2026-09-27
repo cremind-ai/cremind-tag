@@ -149,6 +149,8 @@ class DaemonService:
         self.store: QueueStore = None  # type: ignore[assignment]
         self.gateway: GatewayClient | None = None
         self.gateway_hw_id: str | None = None
+        # bridge hw_id -> {"max_tags", "assigned"} from the gateway's inventory (hardware.bridge_capacity)
+        self.bridge_capacity: dict[str, dict[str, int | None]] = {}
         self.boot_generation = 0
         self.ops = OpWaiters()
         self.started_at = iso_now()
@@ -420,8 +422,10 @@ class DaemonService:
         self.db.upsert_gateway(GatewayRecord(self.gateway_hw_id, port=self.gateway_url, boot_id=hello.boot_id,
                                              fw=hello.fw, build=hello.build, board=board))
 
-    def note_bridge_info(self, addr: int, fontpack_id: str | None, fw: str | None) -> bool:
-        """``EVT_BRIDGE_INFO``: remember the bridge's pack/firmware; True when something changed."""
+    def note_bridge_info(self, addr: int, fontpack_id: str | None, fw: str | None,
+                         capacity: dict[str, int | None] | None = None) -> bool:
+        """``EVT_BRIDGE_INFO``: remember the bridge's pack/firmware and table capacity (``max_tags`` /
+        ``assigned``); True when something the inventory reports changed."""
         bridge = self.db.find_bridge(addr=addr)
         if bridge is None:
             return False
@@ -432,7 +436,19 @@ class DaemonService:
             changes["fw"] = fw
         if changes:
             self.db.update_bridge(bridge.uuid, **changes)
-        return bool(changes)
+        capacity_changed = capacity is not None and self.note_capacity(bridge.hw_id, capacity)
+        return bool(changes) or capacity_changed
+
+    def note_capacity(self, hw_id: str, capacity: dict[str, int | None]) -> bool:
+        """Merge a bridge's known ``max_tags`` / ``assigned`` (an unknown value never replaces a known one:
+        a rebooted gateway reports none until the bridge's CAPS arrive); True when a known value changed."""
+        known = self.bridge_capacity.setdefault(hw_id, {})
+        changed = False
+        for key, value in capacity.items():
+            if value is not None and known.get(key) != value:
+                known[key] = value
+                changed = True
+        return changed
 
     # -- status ----------------------------------------------------------------------------
 

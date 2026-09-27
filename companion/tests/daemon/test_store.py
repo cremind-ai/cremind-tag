@@ -48,9 +48,9 @@ def outbox(s: QueueStore, kind: str) -> list[dict[str, Any]]:
 
 def test_schema_version(tmp_path: Path) -> None:
     with open_database(tmp_path / "c.sqlite3") as db:
-        assert db.schema_version == QUEUE_MIGRATIONS[-1].version == 3
+        assert db.schema_version == QUEUE_MIGRATIONS[-1].version == 4
     with open_database(tmp_path / "c.sqlite3") as db:  # re-open: nothing to do
-        assert [v for v, _, _ in db.applied_migrations()] == [1, 2, 3]
+        assert [v for v, _, _ in db.applied_migrations()] == [1, 2, 3, 4]
 
 
 def test_a_v2_database_upgrades(tmp_path: Path) -> None:
@@ -63,10 +63,15 @@ def test_a_v2_database_upgrades(tmp_path: Path) -> None:
             conn.execute("INSERT INTO revisions (tag_id, revision, epoch, layout, layout_digest, content_key, op_id,"
                          " state, created_at, created_ts) VALUES (?, 1, 1, x'00', 'd', 'k', 7, 'sent', 'now', 0)",
                          (TAG,))
+            conn.execute("INSERT INTO tag_views (tag_id, epoch, blocked_reason, updated_at)"
+                         " VALUES (?, 1, 'stale_epoch', 'now')", (TAG,))
     with open_database(path) as db:
-        assert db.schema_version == 3
-        rev = QueueStore(db).get_revision(TAG, 1)
+        assert db.schema_version == 4
+        s = QueueStore(db)
+        rev = s.get_revision(TAG, 1)
         assert rev is not None and rev.not_found_count == 0 and rev.state == "sent"
+        view = s.get_view(TAG)  # v4: an existing view gets no floor
+        assert view is not None and view.epoch_floor == 0 and view.blocked_reason == "stale_epoch"
 
 
 def test_events_page_commits_jobs_cursor_and_accepted_together(tmp_path: Path) -> None:
@@ -197,6 +202,71 @@ def test_a_security_result_of_an_old_epoch_attempt_is_ignored(tmp_path: Path) ->
     assert s.get_job(501).outcome is None
     result(s, newer, Status.STALE_EPOCH, epoch=2)  # the current attempt at the current epoch: a real stop
     assert s.get_view(TAG).blocked_reason == "stale_epoch"
+
+
+def test_stale_epoch_above_every_known_epoch_raises_a_bounded_floor(tmp_path: Path) -> None:
+    """§10: the tag's stored_epoch in a STALE_EPOCH becomes the tag's epoch floor (reported in the inventory)
+    and holds its work, which moves to the epoch Cremind assigns above it; the value is unauthenticated, so
+    one report moves the floor at most EPOCH_FLOOR_STEP above the highest known epoch."""
+    from cremind_tag.daemon.store import EPOCH_FLOOR_STEP
+    from cremind_tag.protocol.ids import RESULT_FLAG_ESCALATED, Status
+
+    s = store(tmp_path)
+    s.apply_sync("cred", sync_result([job(501, 1)], 1))
+    rev = sent_revision(s, [501])
+    effects = s.apply_result(update_id=rev.op_id, tag_id=TAG, epoch=1, revision=rev.revision,
+                             status=Status.STALE_EPOCH, digest=bytes(8), battery_mv=0, timing={},
+                             flags=RESULT_FLAG_ESCALATED, stored_epoch=5)
+    assert effects.inventory
+    view = s.get_view(TAG)
+    assert view is not None and view.epoch_floor == 5 and view.blocked_reason == "stale_epoch"
+    assert (s.get_job(501).state, s.get_job(501).outcome) == ("active", None)  # held, not failed
+    assert s.get_revision(TAG, rev.revision).state == "pending"
+    assert not outbox(s, "receipts") or all(r["outcome"] is None for p in outbox(s, "receipts")
+                                            for r in p["receipts"])
+    assert s.epoch_floors() == {TAG: 5}
+    assert s.raise_epoch_floor(TAG, 4) is None and s.raise_epoch_floor(TAG, 5) is None  # nothing new
+    assert s.raise_epoch_floor(TAG, 0xFFFFFFFF) == 5 + EPOCH_FLOOR_STEP  # a forged value: one bounded step
+    assert s.raise_epoch_floor(TAG, 0xFFFFFFFF) == 5 + 2 * EPOCH_FLOOR_STEP
+    assert s.raise_epoch_floor(0x0BADF00D, 9) is None  # not enrolled here
+    new = 5 + 2 * EPOCH_FLOOR_STEP + 1
+    s.on_assigned(TAG, epoch=new, bridge_addr=2, bridge_hw_id=None)  # Cremind assigned above the floor
+    view = s.get_view(TAG)
+    assert view is not None and view.blocked_reason is None
+    moved = s.get_revision(TAG, rev.revision)
+    assert (moved.state, moved.epoch) == ("pending", new) and s.get_job(501).epoch == new
+    assert s.raise_epoch_floor(TAG, new) is None  # the assignment is known now
+
+
+def test_a_stale_epoch_without_a_newer_stored_epoch_still_stops_the_tag(tmp_path: Path) -> None:
+    from cremind_tag.protocol.ids import RESULT_FLAG_ESCALATED, Status
+
+    s = store(tmp_path)
+    s.apply_sync("cred", sync_result([job(501, 1)], 1))
+    rev = sent_revision(s, [501])
+    s.apply_result(update_id=rev.op_id, tag_id=TAG, epoch=1, revision=rev.revision, status=Status.STALE_EPOCH,
+                   digest=bytes(8), battery_mv=0, timing={}, flags=RESULT_FLAG_ESCALATED, stored_epoch=1)
+    view = s.get_view(TAG)
+    assert view is not None and view.blocked_reason == "stale_epoch" and view.epoch_floor == 0
+    assert s.get_job(501).outcome == "failed"
+
+
+def test_a_stored_acknowledgement_is_receipted_as_a_duplicate(tmp_path: Path) -> None:
+    from cremind_tag.daemon.store import DUPLICATE_DETAIL
+    from cremind_tag.protocol.ids import RESULT_FLAG_DUPLICATE, Status
+
+    s = store(tmp_path)
+    s.apply_sync("cred", sync_result([job(501, 1)], 1))
+    rev = sent_revision(s, [501])
+    s.apply_result(update_id=rev.op_id, tag_id=TAG, epoch=1, revision=rev.revision, status=Status.OK,
+                   digest=bytes(range(8)), battery_mv=0, timing={}, flags=RESULT_FLAG_DUPLICATE, stored_epoch=1)
+    final = [r for p in outbox(s, "receipts") for r in p["receipts"]][-1]
+    assert (final["outcome"], final["detail"]) == ("displayed", DUPLICATE_DETAIL)
+    assert s.get_revision(TAG, rev.revision).detail == DUPLICATE_DETAIL
+    rev2 = sent_revision(s, [501])  # an ordinary display: no detail
+    s.apply_result(update_id=rev2.op_id, tag_id=TAG, epoch=1, revision=rev2.revision, status=Status.OK,
+                   digest=bytes(8), battery_mv=0, timing={})
+    assert s.get_revision(TAG, rev2.revision).detail is None
 
 
 def test_block_fails_only_revisions_of_that_epoch(tmp_path: Path) -> None:

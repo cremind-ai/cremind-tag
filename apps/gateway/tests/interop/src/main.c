@@ -20,6 +20,8 @@
  * - tag_id 0xDEAD0002: the LAYOUT_STATUS OK of its first transfer is lost
  *   and its result held for 11 s (the gateway re-commits after 10 s and the
  *   bridge answers DUPLICATE, protocol 10);
+ * - every DELIVERY_RESULT reports the tag's stored epoch = the delivery's
+ *   epoch; tag_id 0xDEAD0003's result is the tag's stored ACK (flags bit0);
  * - ASSIGN_SET/DEL, CAPS_GET, HEALTH_GET, TAG_CMD and the configuration
  *   client steps are answered; PB-ADV provisioning of the unprovisioned
  *   device assigns 0x0004;
@@ -45,6 +47,7 @@
 #define CFG_OP      0x80u /* radio items for configuration-client steps */
 #define DROP_TAG_ID 0xDEAD0001u
 #define LOST_OK_TAG_ID 0xDEAD0002u
+#define STORED_ACK_TAG_ID 0xDEAD0003u
 
 static struct gw_core core;
 
@@ -235,6 +238,8 @@ static void result_later(struct node *n, uint64_t update_id, uint32_t tag_id, ui
 		.suspend_ms = 40u,
 		.transfer_ms = 900u,
 		.refresh_ms = 300u,
+		.stored_epoch = epoch,
+		.flags = tag_id == STORED_ACK_TAG_ID ? CTAG_RESULT_FLAG_DUPLICATE : 0u,
 	};
 	if (digest != NULL) {
 		memcpy(pd->res.digest, digest, sizeof(pd->res.digest));

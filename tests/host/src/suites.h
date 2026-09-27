@@ -29,6 +29,7 @@
 	X(test_qr_vectors)                                                                         \
 	X(test_render_scenarios)                                                                   \
 	X(test_render_strips)                                                                      \
+	X(test_render_qr_cache)                                                                    \
 	X(test_render_errors)                                                                      \
 	X(test_frag_vectors)                                                                       \
 	X(test_frag_errors)                                                                        \

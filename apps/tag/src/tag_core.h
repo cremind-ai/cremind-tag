@@ -50,7 +50,7 @@ enum tag_chr {
  * most two credits and a record's CREDIT is queued after its RESULT, so at
  * most two records' answers are pending: 2 x (RESULT 43 + CREDIT 2 + 4) = 98
  * bytes, or PROGRESS (14 + 2) with one of them. The handshake needs 32
- * (CHALLENGE). A full queue ends the session (the bridge retries).
+ * (CHALLENGE), an ERROR 8. A full queue ends the session (the bridge retries).
  */
 #define TAG_TXQ_SIZE 112u
 
@@ -209,6 +209,9 @@ bool tag_core_take_skip(struct tag_core *c);
 
 /* ---- Platform hooks (the application glue or the test fakes) ---- */
 
+/* The CAPS characteristic value the tag serves (5.4: bound into the handshake
+ * transcript, so it must be exactly the bytes a bridge reads). */
+void tag_hal_caps(uint8_t caps[CTAG_TAG_CAPS_LEN]);
 /* VDD in mV, 0 = unknown. */
 uint16_t tag_hal_battery_mv(void);
 uint32_t tag_hal_uptime_ms(void);

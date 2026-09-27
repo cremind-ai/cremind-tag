@@ -2,10 +2,13 @@
 
 - **Inventory** (``POST inventory``) at start-up and whenever the hardware
   changes (a gateway session, provisioning, an assignment, a bridge reporting
-  another font pack): gateways, bridges (refreshed from ``LIST_NODES`` and
-  ``GET_INVENTORY`` when the gateway is connected) and enrolled tags with
-  their panel and the highest ``epoch`` this companion used — Cremind keeps
-  ``max(stored, reported)`` so it never assigns an epoch a tag refuses.
+  another font pack, a tag's epoch floor): gateways, bridges (refreshed from
+  ``LIST_NODES`` and ``GET_INVENTORY`` when the gateway is connected, with
+  ``max_tags`` from the bridge's CAPS and ``assigned``, the gateway's
+  assignments for it) and enrolled tags with their panel and the highest
+  ``epoch`` this companion used or the tag's epoch floor (a ``STALE_EPOCH``'s
+  ``stored_epoch``) — Cremind keeps ``max(stored, reported)`` so it never
+  assigns an epoch a tag refuses.
 - **Heartbeat** every ``heartbeat_s``: companion version/host/start, queue
   depth and the oldest job's age, and per device battery, RSSI, last contact,
   displayed revision/digest and a status (``ok|pending|offline|error``).
@@ -41,7 +44,7 @@ from ..connector.client import (
 from ..connector.models import Command, tag_hw_id
 from ..gateway.errors import GatewayError
 from ..store.db import BridgeRecord
-from .commands import CommandExecutor
+from .commands import CommandExecutor, bridge_capacity
 from .store import CommandRow
 
 if TYPE_CHECKING:
@@ -173,6 +176,8 @@ class HardwareWorker:
                                   fontpack_id=pack, flash_size=info.flash_size if info else None,
                                   configured=node.configured, gateway_hw_id=svc.gateway_hw_id)
             await svc.db.run(svc.db.upsert_bridge, record)
+            if info is not None:
+                svc.note_capacity(record.hw_id, bridge_capacity(info))
 
     async def build_inventory(self) -> dict[str, Any]:
         svc = self.svc
@@ -180,14 +185,25 @@ class HardwareWorker:
         gateways = await svc.db.run(svc.db.list_gateways)
         bridges = await svc.db.run(svc.db.list_bridges)
         tags = await svc.db.run(svc.db.list_tags)
+        floors = await svc.db.run(svc.store.epoch_floors)
+        bridge_items = []
+        for b in bridges:
+            if b.addr is None:
+                continue
+            item: dict[str, Any] = {"hw_id": b.hw_id, "addr": b.addr, "fw": b.fw, "board": b.board,
+                                    "fontpack_id": b.fontpack_id, "flash_size": b.flash_size}
+            # Assignment-table capacity (CAPS_STATUS max_tags) and use, when the gateway has reported them
+            # (Cremind keeps the last good values when they are left out).
+            item.update({k: v for k, v in svc.bridge_capacity.get(b.hw_id, {}).items() if v is not None})
+            bridge_items.append(item)
         return {
             "gateways": [{"hw_id": g.hw_id, "fw": g.fw, "board": g.board, "boot_id": g.boot_id, "port": g.port}
                          for g in gateways],
-            "bridges": [{"hw_id": b.hw_id, "addr": b.addr, "fw": b.fw, "board": b.board,
-                         "fontpack_id": b.fontpack_id, "flash_size": b.flash_size}
-                        for b in bridges if b.addr is not None],
+            "bridges": bridge_items,
+            # epoch: the highest epoch used here, or the tag's epoch floor (a STALE_EPOCH's stored_epoch, §10)
+            # when that is higher; Cremind keeps max(stored, reported) and assigns above it.
             "tags": [{"tag_id": t.hw_id, "board": t.board, "panel": t.panel, "width": t.width, "height": t.height,
-                      "planes": t.planes, "fw": t.fw, "epoch": t.epoch} for t in tags],
+                      "planes": t.planes, "fw": t.fw, "epoch": max(t.epoch, floors.get(t.tag_id, 0))} for t in tags],
         }
 
     # -- heartbeat -------------------------------------------------------------------------

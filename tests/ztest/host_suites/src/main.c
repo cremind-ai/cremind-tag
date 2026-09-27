@@ -137,6 +137,11 @@ ZTEST(ctag_host_suites, test_render_strips)
 	test_render_strips();
 }
 
+ZTEST(ctag_host_suites, test_render_qr_cache)
+{
+	test_render_qr_cache();
+}
+
 ZTEST(ctag_host_suites, test_render_errors)
 {
 	test_render_errors();
@@ -211,7 +216,7 @@ ZTEST(ctag_host_suites, test_fuzz_streams)
 
 ZTEST(ctag_host_suites, test_suites_listed)
 {
-	zassert_equal(0 CTAG_HOST_TESTS(CTAG_COUNT_TEST), 40);
+	zassert_equal(0 CTAG_HOST_TESTS(CTAG_COUNT_TEST), 41);
 }
 
 ZTEST_SUITE(ctag_host_suites, NULL, NULL, NULL, NULL, NULL);

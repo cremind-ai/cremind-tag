@@ -160,7 +160,8 @@ ZTEST(bridge_delivery, test_duplicate_rules)
 {
 	struct xfer t = x(1, 7, 300);
 	struct ctag_mesh_delivery_result r;
-	struct dlv_timing tm = {.wake_ms = 1, .suspend_ms = 2, .transfer_ms = 3, .refresh_ms = 4};
+	struct dlv_report tm = {.wake_ms = 1, .suspend_ms = 2, .transfer_ms = 3, .refresh_ms = 4,
+				.stored_epoch = 0x01020304u, .flags = CTAG_RESULT_FLAG_DUPLICATE};
 	uint8_t d8[8] = {9, 8, 7, 6, 5, 4, 3, 2};
 	struct dlv_job *job;
 
@@ -188,6 +189,10 @@ ZTEST(bridge_delivery, test_duplicate_rules)
 	dlv_finish(&benv.dlv, job, CTAG_STATUS_OK, d8, 2900, &tm, 6000u);
 	zassert_true(last_result(301, &r));
 	zassert_equal(r.status, CTAG_STATUS_OK);
+	zassert_equal(r.stored_epoch, 0x01020304u);
+	zassert_equal(r.flags, CTAG_RESULT_FLAG_DUPLICATE);
+	/* The stored result, report included, survives a reset (history record). */
+	env_boot(6500u);
 	t.xfer_id = 3;
 	t.update_id = 302;
 	zassert_equal(deliver(&benv.dlv, &t, small_layout, small_layout_len, 0, 7000, NULL),
@@ -198,6 +203,8 @@ ZTEST(bridge_delivery, test_duplicate_rules)
 	zassert_mem_equal(r.digest, d8, 8);
 	zassert_equal(r.battery_mv, 2900);
 	zassert_equal(r.refresh_ms, 4);
+	zassert_equal(r.stored_epoch, 0x01020304u);
+	zassert_equal(r.flags, CTAG_RESULT_FLAG_DUPLICATE);
 	zassert_equal(dlv_queue_depth(&benv.dlv), 0, "no new work for a displayed revision");
 	/* Ended without being displayed: accepted again as a re-delivery. */
 	t.revision = 8;

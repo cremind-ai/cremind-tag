@@ -36,7 +36,7 @@ from typing import Any
 
 from ..connector.models import EventsPage, Job, ProfileSettings, SyncResult, iso, tag_hw_id
 from ..gateway.opid import OpIdGenerator
-from ..protocol.ids import Status
+from ..protocol.ids import RESULT_FLAG_DUPLICATE, Status
 from ..store.db import Database, TagRecord
 from .validator import REFUSED_DETAIL, card_problem
 
@@ -69,6 +69,13 @@ SECURITY_STATUSES = frozenset({
 ``NOT_FOUND`` counts only after ``NOT_FOUND_ESCALATE`` consecutive answers for one revision (§10)."""
 NOT_FOUND_ESCALATE = 3
 """``EVT_RESULT NOT_FOUND`` answers for one revision before it is treated as a security stop (§10)."""
+EPOCH_FLOOR_STEP = 256
+"""The most one ``STALE_EPOCH`` report raises a tag's epoch above every epoch known here (§10: the tag's
+``stored_epoch`` is unauthenticated, so a forged one may cost epoch numbers, never access)."""
+MAX_EPOCH_FLOOR = 0xFFFFFFFE
+"""A floor always leaves room for the next assignment (``floor + 1``, uint32)."""
+DUPLICATE_DETAIL = "duplicate (stored acknowledgement)"
+"""Receipt ``detail`` of a delivery the tag answered from its stored ACK (``RESULT_FLAG_DUPLICATE``)."""
 LAYOUT_STATUSES = frozenset({Status.INVALID, Status.TOO_LARGE, Status.UNSUPPORTED})
 """Results that fail the revision (and the deliveries it shows) but not the tag."""
 RECEIPTS_IN_ORDER = ("NOT (outbox.kind = 'receipts' AND EXISTS (SELECT 1 FROM outbox older"
@@ -231,6 +238,7 @@ class TagView:
     displayed_digest: str | None
     displayed_at: str | None
     stale_jumps: int
+    epoch_floor: int = 0  # v4: the stored epoch a tag's STALE_EPOCH reported (bounded; see raise_epoch_floor)
 
     @classmethod
     def from_row(cls, r: sqlite3.Row) -> TagView:
@@ -238,7 +246,8 @@ class TagView:
                    r["rotation"], bool(r["clear_required"]), r["cremind_desired"], r["cremind_displayed"],
                    bool(r["blank"]), r["override"], r["override_until"], r["blocked_reason"], r["blocked_epoch"],
                    bool(r["dirty"]), r["dirty_gen"], bool(r["force"]), bool(r["progress_pending"]),
-                   r["displayed_revision"], r["displayed_digest"], r["displayed_at"], r["stale_jumps"])
+                   r["displayed_revision"], r["displayed_digest"], r["displayed_at"], r["stale_jumps"],
+                   r["epoch_floor"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -935,12 +944,20 @@ class QueueStore:
             return self._stage(conn, rev.delivery_ids, stage, now_iso, revision=revision) > 0
 
     def apply_result(self, *, update_id: int, tag_id: int, epoch: int, revision: int, status: int, digest: bytes,
-                     battery_mv: int, timing: dict[str, int]) -> Effects:
-        """``EVT_RESULT`` of a delivery, in the transaction that must commit before the event is ACKed."""
+                     battery_mv: int, timing: dict[str, int], flags: int = 0, stored_epoch: int = 0) -> Effects:
+        """``EVT_RESULT`` of a delivery, in the transaction that must commit before the event is ACKed.
+
+        ``flags`` and ``stored_epoch`` are the bridge's report of what the tag said (§3.4): a result
+        answered from the tag's stored ACK is receipted with ``DUPLICATE_DETAIL``; a ``STALE_EPOCH``
+        whose ``stored_epoch`` is above the epoch of the attempt raises the tag's epoch floor
+        (:meth:`raise_epoch_floor`) and holds the tag's work until Cremind assigns above it."""
         now_ts, now_iso = self._now()
         effects = Effects(tags={tag_id})
         st = _status(status)
         with self.db.transaction() as conn:
+            if st == Status.STALE_EPOCH and stored_epoch and \
+                    self._raise_epoch_floor(conn, tag_id, stored_epoch, now_iso) is not None:
+                effects.inventory = True  # reports the floor: Cremind re-queues assign_tag above it
             row = conn.execute("SELECT * FROM revisions WHERE tag_id = ? AND revision = ?",
                                (tag_id, revision)).fetchone()
             if battery_mv:
@@ -956,7 +973,8 @@ class QueueStore:
             if st == Status.OK:
                 # The tag shows it, whatever this database concluded meanwhile (a revision failed on an
                 # ambiguous result, or superseded, is recorded displayed; outcomes already reported stay).
-                self._displayed(conn, rev, digest[:8].hex(), timing, now_iso, view)
+                self._displayed(conn, rev, digest[:8].hex(), timing, now_iso, view,
+                                detail=DUPLICATE_DETAIL if flags & RESULT_FLAG_DUPLICATE else None)
                 if view is not None and view.blocked_reason == "not_found":
                     conn.execute("UPDATE tag_views SET blocked_reason = NULL, blocked_epoch = NULL WHERE tag_id = ?",
                                  (tag_id,))
@@ -1019,6 +1037,20 @@ class QueueStore:
                 if newer is None:
                     self._mark_dirty(conn, tag_id, now_iso, force=True)
                 return effects
+            if st == Status.STALE_EPOCH and stored_epoch > epoch:
+                # §10: the tag authenticated a newer epoch than this attempt's (an assignment this companion
+                # lost, a restore). Not a dead end: the inventory reports the epoch floor, Cremind re-queues
+                # assign_tag above it, and on_assigned moves this work to the new epoch.
+                detail = (f"the tag stores epoch {stored_epoch} (above {epoch}); waiting for assign_tag above "
+                          "the epoch the inventory reports")
+                conn.execute("UPDATE revisions SET state = 'pending', op_id = ?, next_attempt_ts = ?, detail = ?"
+                             " WHERE tag_id = ? AND revision = ? AND state IN ('pending', 'sent')",
+                             (self.op_ids.next(), now_ts + self.retry_delay(rev.attempts), detail, tag_id, revision))
+                self._block(conn, tag_id, "stale_epoch", epoch, int(st), detail, now_iso, fail_jobs=False)
+                effects.inventory = True
+                if view is not None and view.credential_id:
+                    effects.sync.add(view.credential_id)
+                return effects
             if st in SECURITY_STATUSES:
                 repeated = f" {NOT_FOUND_ESCALATE} times" if st == Status.NOT_FOUND else ""
                 detail = (f"stopped: the bridge or tag answered {status_name(st)}{repeated} for epoch {epoch}; "
@@ -1048,17 +1080,17 @@ class QueueStore:
         return effects
 
     def _displayed(self, conn: sqlite3.Connection, rev: RevisionRow, digest_hex: str, timing: dict[str, int],
-                   now_iso: str, view: TagView | None) -> None:
+                   now_iso: str, view: TagView | None, *, detail: str | None = None) -> None:
         import base64
 
         conn.execute("UPDATE revisions SET state = 'displayed', frame_digest = ?, finished_at = ?, last_stage = ?,"
-                     " timing = ?, last_status = 'OK' WHERE tag_id = ? AND revision = ?",
-                     (digest_hex, now_iso, "displayed", _dumps(timing), rev.tag_id, rev.revision))
+                     " timing = ?, last_status = 'OK', detail = ? WHERE tag_id = ? AND revision = ?",
+                     (digest_hex, now_iso, "displayed", _dumps(timing), detail, rev.tag_id, rev.revision))
         ids = list(rev.delivery_ids)
         if ids:
             jobs = self._jobs(conn, f"delivery_id IN ({_placeholders(len(ids))})", ids)
             self._finish(conn, jobs, "displayed", now_iso, revision=rev.revision, digest=digest_hex,
-                         status_code=int(Status.OK), timing=timing)
+                         status_code=int(Status.OK), timing=timing, detail=detail)
         # Older undelivered revisions are moot once a newer screen is up.
         conn.execute("UPDATE revisions SET state = 'superseded', finished_at = ? WHERE tag_id = ?"
                      " AND revision < ? AND state IN ('pending', 'sent')", (now_iso, rev.tag_id, rev.revision))
@@ -1092,6 +1124,38 @@ class QueueStore:
         self._ensure_view(conn, rev.tag_id, now_iso)
         conn.execute("UPDATE tag_views SET stale_jumps = stale_jumps + 1 WHERE tag_id = ?", (rev.tag_id,))
         self._mark_dirty(conn, rev.tag_id, now_iso, force=True)
+
+    def _raise_epoch_floor(self, conn: sqlite3.Connection, tag_id: int, stored_epoch: int,
+                           now_iso: str) -> int | None:
+        """A ``STALE_EPOCH`` carrying the tag's ``stored_epoch`` (§3.4, §10). Above every epoch known here
+        (the assignment, Cremind's epoch, an earlier floor) it means the tag authenticated an assignment this
+        companion lost, or a restore rewound this database. The value is unauthenticated, so it raises the
+        tag's epoch floor by at most ``EPOCH_FLOOR_STEP`` above the highest known epoch (a larger gap takes a
+        few rounds; a forged value costs epoch numbers, never access). The inventory reports
+        ``max(epoch, floor)`` and Cremind assigns above it. Returns the new floor, or None."""
+        row = conn.execute("SELECT t.epoch AS assigned, v.epoch AS cremind, v.epoch_floor AS floor FROM tags t"
+                           " LEFT JOIN tag_views v ON v.tag_id = t.tag_id WHERE t.tag_id = ?", (tag_id,)).fetchone()
+        if row is None:
+            return None  # not enrolled here
+        known = max(int(row["assigned"] or 0), int(row["cremind"] or 0), int(row["floor"] or 0))
+        floor = min(int(stored_epoch), known + EPOCH_FLOOR_STEP, MAX_EPOCH_FLOOR)
+        if floor <= known:
+            return None
+        self._ensure_view(conn, tag_id, now_iso)
+        conn.execute("UPDATE tag_views SET epoch_floor = ?, updated_at = ? WHERE tag_id = ?", (floor, now_iso, tag_id))
+        return floor
+
+    def raise_epoch_floor(self, tag_id: int, stored_epoch: int) -> int | None:
+        """:meth:`_raise_epoch_floor` in its own transaction (a tag command's ``STALE_EPOCH``)."""
+        _, now_iso = self._now()
+        with self.db.transaction() as conn:
+            return self._raise_epoch_floor(conn, tag_id, stored_epoch, now_iso)
+
+    def epoch_floors(self) -> dict[int, int]:
+        """Tags with an epoch floor (for the inventory)."""
+        with self.db.reading() as conn:
+            return {int(r["tag_id"]): int(r["epoch_floor"]) for r in conn.execute(
+                "SELECT tag_id, epoch_floor FROM tag_views WHERE epoch_floor > 0")}
 
     def _block(self, conn: sqlite3.Connection, tag_id: int, reason: str, epoch: int, status_code: int, detail: str,
                now_iso: str, *, fail_jobs: bool = True) -> None:

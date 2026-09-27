@@ -24,6 +24,27 @@ static void challenge_fields(struct ctag_ctrl_challenge *ch)
 	zassert_mem_equal(ch->nonce_t, V_SESSION_NONCE_T, CTAG_TAG_NONCE_LEN);
 }
 
+/* The tag role with the fixture tag id, secret and CAPS. */
+static uint8_t tag_hello(const struct ctag_ctrl_challenge *ch, const uint8_t *hello, size_t hello_len,
+			 uint8_t *out, size_t *len)
+{
+	return ctag_session_tag_hello(&tag, V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, V_SESSION_CAPS,
+				      V_SESSION_CAPS_LEN, ch, hello, hello_len, out, len);
+}
+
+/* ERROR{status, stored_epoch} as the tag must send it. */
+static void assert_error(const uint8_t *out, size_t len, uint8_t status, uint32_t stored_epoch)
+{
+	uint8_t st = 0;
+	uint32_t epoch = 0;
+
+	zassert_equal(len, CTAG_SESSION_ERROR_LEN);
+	zassert_equal(out[0], CTAG_CTRL_ERROR);
+	zassert_true(ctag_session_error_unpack(out, len, &st, &epoch));
+	zassert_equal(st, status, "ERROR{%u}, expected %u", st, status);
+	zassert_equal(epoch, stored_epoch, "stored epoch %u, expected %u", epoch, stored_epoch);
+}
+
 /* Run the fixture handshake; leaves bridge and tag established. */
 static void handshake(void)
 {
@@ -39,22 +60,22 @@ static void handshake(void)
 	zassert_mem_equal(out, V_SESSION_HELLO, V_SESSION_HELLO_LEN);
 
 	challenge_fields(&ch);
-	zassert_equal(ctag_session_tag_hello(&tag, V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, &ch,
-					     V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len),
-		      CTAG_STATUS_OK);
+	zassert_equal(tag_hello(&ch, V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len), CTAG_STATUS_OK);
 	zassert_equal(len, V_SESSION_CHALLENGE_LEN);
 	zassert_mem_equal(out, V_SESSION_CHALLENGE, len);
 	zassert_mem_equal(tag.t.th, V_SESSION_TH, V_SESSION_TH_LEN);
 	zassert_equal(tag.state, CTAG_SESSION_CHALLENGED);
 
-	zassert_equal(ctag_session_bridge_challenge(&bridge, V_SESSION_CHALLENGE,
-						    V_SESSION_CHALLENGE_LEN, &seen, out),
+	zassert_equal(ctag_session_bridge_challenge(&bridge, V_SESSION_CAPS, V_SESSION_CAPS_LEN,
+						    V_SESSION_CHALLENGE, V_SESSION_CHALLENGE_LEN,
+						    &seen, out),
 		      CTAG_STATUS_OK);
 	zassert_equal(seen.stored_epoch, ch.stored_epoch);
 	zassert_mem_equal(out, V_SESSION_AUTH, V_SESSION_AUTH_LEN);
 	zassert_mem_equal(bridge.t.th, V_SESSION_TH, V_SESSION_TH_LEN);
 
-	zassert_equal(ctag_session_tag_auth(&tag, V_SESSION_AUTH, V_SESSION_AUTH_LEN, out, &len),
+	zassert_equal(ctag_session_tag_auth(&tag, ch.stored_epoch, V_SESSION_AUTH, V_SESSION_AUTH_LEN,
+					    out, &len),
 		      CTAG_STATUS_OK);
 	zassert_equal(len, V_SESSION_AUTH_OK_LEN);
 	zassert_mem_equal(out, V_SESSION_AUTH_OK, len);
@@ -181,19 +202,76 @@ ZTEST(ctag_session, test_bad_mac_b)
 	size_t len;
 
 	challenge_fields(&ch);
-	zassert_equal(ctag_session_tag_hello(&tag, V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, &ch,
-					     V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len),
-		      CTAG_STATUS_OK);
+	zassert_equal(tag_hello(&ch, V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len), CTAG_STATUS_OK);
 	memcpy(&auth[1], V_SESSION_BAD_MAC_B, CTAG_TAG_MAC_LEN);
-	zassert_equal(ctag_session_tag_auth(&tag, auth, sizeof(auth), out, &len),
+	zassert_equal(ctag_session_tag_auth(&tag, ch.stored_epoch, auth, sizeof(auth), out, &len),
 		      CTAG_STATUS_AUTH_FAILED);
-	zassert_equal(len, CTAG_SESSION_ERROR_LEN);
-	zassert_equal(out[0], CTAG_CTRL_ERROR);
-	zassert_equal(out[1], CTAG_STATUS_AUTH_FAILED);
+	assert_error(out, len, CTAG_STATUS_AUTH_FAILED, ch.stored_epoch);
 	zassert_equal(tag.state, CTAG_SESSION_FAILED);
 	/* Nothing works on a failed session, not even the right MAC. */
-	zassert_equal(ctag_session_tag_auth(&tag, V_SESSION_AUTH, V_SESSION_AUTH_LEN, out, &len),
+	zassert_equal(ctag_session_tag_auth(&tag, ch.stored_epoch, V_SESSION_AUTH,
+					    V_SESSION_AUTH_LEN, out, &len),
 		      CTAG_STATUS_AUTH_FAILED);
+}
+
+/*
+ * 5.4: th covers CAPS. A relay that rewrites the CAPS the bridge reads (here
+ * plane_flags bit0) gives the bridge another transcript: its AUTH is the
+ * fixture relayed one and the tag, hashing the CAPS it serves, refuses it.
+ */
+ZTEST(ctag_session, test_caps_bound_into_transcript)
+{
+	struct ctag_ctrl_challenge ch, seen;
+	uint8_t out[CTAG_SESSION_CHALLENGE_LEN];
+	size_t len;
+
+	zassert_ok(ctag_session_bridge_hello(&bridge, V_SESSION_TAG_ID, V_SESSION_EPOCH,
+					     V_SESSION_K_EPOCH, V_SESSION_NONCE_B, out));
+	zassert_equal(ctag_session_bridge_challenge(&bridge, V_SESSION_RELAYED_CAPS,
+						    V_SESSION_RELAYED_CAPS_LEN, V_SESSION_CHALLENGE,
+						    V_SESSION_CHALLENGE_LEN, &seen, out),
+		      CTAG_STATUS_OK);
+	zassert_mem_equal(bridge.t.th, V_SESSION_RELAYED_TH, V_SESSION_RELAYED_TH_LEN);
+	zassert_mem_equal(out, V_SESSION_RELAYED_AUTH, V_SESSION_RELAYED_AUTH_LEN);
+
+	challenge_fields(&ch);
+	zassert_equal(tag_hello(&ch, V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len), CTAG_STATUS_OK);
+	zassert_equal(ctag_session_tag_auth(&tag, ch.stored_epoch, V_SESSION_RELAYED_AUTH,
+					    V_SESSION_RELAYED_AUTH_LEN, out, &len),
+		      CTAG_STATUS_AUTH_FAILED);
+	assert_error(out, len, CTAG_STATUS_AUTH_FAILED, ch.stored_epoch);
+
+	/* Without CAPS there is no transcript: refused, never a weaker one. */
+	zassert_equal(ctag_session_tag_hello(&tag, V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, NULL, 0u,
+					     &ch, V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len),
+		      CTAG_STATUS_INTERNAL);
+	zassert_ok(ctag_session_bridge_hello(&bridge, V_SESSION_TAG_ID, V_SESSION_EPOCH,
+					     V_SESSION_K_EPOCH, V_SESSION_NONCE_B, out));
+	zassert_equal(ctag_session_bridge_challenge(&bridge, V_SESSION_CAPS, 0u, V_SESSION_CHALLENGE,
+						    V_SESSION_CHALLENGE_LEN, &seen, out),
+		      CTAG_STATUS_INTERNAL);
+}
+
+ZTEST(ctag_session, test_error_message)
+{
+	uint8_t msg[CTAG_SESSION_ERROR_LEN + 1u];
+	uint8_t st;
+	uint32_t epoch;
+
+	zassert_equal(ctag_session_error_pack(msg, V_SESSION_STALE_STATUS, V_SESSION_STALE_STORED_EPOCH),
+		      CTAG_SESSION_ERROR_LEN);
+	zassert_mem_equal(msg, V_SESSION_STALE_ERROR, V_SESSION_STALE_ERROR_LEN);
+	zassert_true(ctag_session_error_unpack(msg, CTAG_SESSION_ERROR_LEN, &st, &epoch));
+	zassert_equal(st, V_SESSION_STALE_STATUS);
+	zassert_equal(epoch, V_SESSION_STALE_STORED_EPOCH);
+	zassert_true(ctag_session_error_unpack(msg, CTAG_SESSION_ERROR_LEN, NULL, NULL));
+	zassert_false(ctag_session_error_unpack(msg, CTAG_SESSION_ERROR_LEN - 1u, &st, &epoch));
+	zassert_false(ctag_session_error_unpack(msg, CTAG_SESSION_ERROR_LEN + 1u, &st, &epoch));
+	msg[1] = CTAG_STATUS_OK; /* an ERROR never carries OK */
+	zassert_false(ctag_session_error_unpack(msg, CTAG_SESSION_ERROR_LEN, &st, &epoch));
+	msg[1] = CTAG_STATUS_STALE_EPOCH;
+	msg[0] = CTAG_CTRL_AUTH_OK;
+	zassert_false(ctag_session_error_unpack(msg, CTAG_SESSION_ERROR_LEN, &st, &epoch));
 }
 
 ZTEST(ctag_session, test_tag_hello_checks)
@@ -204,55 +282,68 @@ ZTEST(ctag_session, test_tag_hello_checks)
 	size_t len;
 
 	challenge_fields(&ch);
-	zassert_equal(ctag_session_tag_hello(&tag, V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, &ch,
-					     V_SESSION_HELLO, V_SESSION_HELLO_LEN - 1u, out, &len),
+	zassert_equal(tag_hello(&ch, V_SESSION_HELLO, V_SESSION_HELLO_LEN - 1u, out, &len),
 		      CTAG_STATUS_INVALID);
-	zassert_equal(ctag_session_tag_hello(&tag, V_SESSION_TAG_ID + 1u, V_SESSION_TAG_SECRET, &ch,
-					     V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len),
+	assert_error(out, len, CTAG_STATUS_INVALID, ch.stored_epoch);
+	zassert_equal(ctag_session_tag_hello(&tag, V_SESSION_TAG_ID + 1u, V_SESSION_TAG_SECRET,
+					     V_SESSION_CAPS, V_SESSION_CAPS_LEN, &ch, V_SESSION_HELLO,
+					     V_SESSION_HELLO_LEN, out, &len),
 		      CTAG_STATUS_NOT_FOUND);
+	assert_error(out, len, CTAG_STATUS_NOT_FOUND, ch.stored_epoch);
 	memcpy(hello, V_SESSION_HELLO, sizeof(hello));
 	hello[1] = 2; /* proto */
-	zassert_equal(ctag_session_tag_hello(&tag, V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, &ch,
-					     hello, sizeof(hello), out, &len),
-		      CTAG_STATUS_VERSION_MISMATCH);
-	ch.stored_epoch = V_SESSION_EPOCH + 1u;
-	zassert_equal(ctag_session_tag_hello(&tag, V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, &ch,
-					     V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len),
-		      CTAG_STATUS_STALE_EPOCH);
-	zassert_equal(len, CTAG_SESSION_ERROR_LEN);
-	zassert_equal(out[1], CTAG_STATUS_STALE_EPOCH);
+	zassert_equal(tag_hello(&ch, hello, sizeof(hello), out, &len), CTAG_STATUS_VERSION_MISMATCH);
+	assert_error(out, len, CTAG_STATUS_VERSION_MISMATCH, ch.stored_epoch);
+	/* The fixture refusal: HELLO epoch 3 to a tag that stores 4. */
+	ch.stored_epoch = V_SESSION_STALE_STORED_EPOCH;
+	zassert_equal(tag_hello(&ch, V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len),
+		      V_SESSION_STALE_STATUS);
+	zassert_equal(len, V_SESSION_STALE_ERROR_LEN);
+	zassert_mem_equal(out, V_SESSION_STALE_ERROR, len);
 	/* A newer epoch than stored is accepted (and persisted by the app after AUTH). */
 	ch.stored_epoch = V_SESSION_EPOCH - 1u;
-	zassert_equal(ctag_session_tag_hello(&tag, V_SESSION_TAG_ID, V_SESSION_TAG_SECRET, &ch,
-					     V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len),
-		      CTAG_STATUS_OK);
+	zassert_equal(tag_hello(&ch, V_SESSION_HELLO, V_SESSION_HELLO_LEN, out, &len), CTAG_STATUS_OK);
 }
 
 ZTEST(ctag_session, test_bridge_failures)
 {
-	static const uint8_t error[] = {CTAG_CTRL_ERROR, CTAG_STATUS_STALE_EPOCH};
+	static const uint8_t short_error[] = {CTAG_CTRL_ERROR, CTAG_STATUS_STALE_EPOCH};
 	struct ctag_ctrl_challenge ch;
 	uint8_t out[CTAG_SESSION_HELLO_LEN];
 	uint8_t msg[CTAG_SESSION_CHALLENGE_LEN];
 
+	/* The tag ERROR: its status, and its stored epoch in ch (the rest zero). */
 	zassert_ok(ctag_session_bridge_hello(&bridge, V_SESSION_TAG_ID, V_SESSION_EPOCH,
 					     V_SESSION_K_EPOCH, V_SESSION_NONCE_B, out));
-	zassert_equal(ctag_session_bridge_challenge(&bridge, error, sizeof(error), &ch, out),
+	zassert_equal(ctag_session_bridge_challenge(&bridge, V_SESSION_CAPS, V_SESSION_CAPS_LEN,
+						    V_SESSION_STALE_ERROR, V_SESSION_STALE_ERROR_LEN,
+						    &ch, out),
 		      CTAG_STATUS_STALE_EPOCH);
+	zassert_equal(ch.stored_epoch, V_SESSION_STALE_STORED_EPOCH);
+	zassert_equal(ch.displayed_rev, 0u);
 	zassert_equal(bridge.state, CTAG_SESSION_FAILED);
+	/* An ERROR of the draft length (no stored epoch) is malformed. */
+	zassert_ok(ctag_session_bridge_hello(&bridge, V_SESSION_TAG_ID, V_SESSION_EPOCH,
+					     V_SESSION_K_EPOCH, V_SESSION_NONCE_B, out));
+	zassert_equal(ctag_session_bridge_challenge(&bridge, V_SESSION_CAPS, V_SESSION_CAPS_LEN,
+						    short_error, sizeof(short_error), &ch, out),
+		      CTAG_STATUS_INVALID);
+	zassert_equal(ch.stored_epoch, 0u);
 
 	zassert_ok(ctag_session_bridge_hello(&bridge, V_SESSION_TAG_ID, V_SESSION_EPOCH,
 					     V_SESSION_K_EPOCH, V_SESSION_NONCE_B, out));
 	memcpy(msg, V_SESSION_CHALLENGE, sizeof(msg));
 	msg[1] = 2; /* proto */
-	zassert_equal(ctag_session_bridge_challenge(&bridge, msg, sizeof(msg), &ch, out),
+	zassert_equal(ctag_session_bridge_challenge(&bridge, V_SESSION_CAPS, V_SESSION_CAPS_LEN, msg,
+						    sizeof(msg), &ch, out),
 		      CTAG_STATUS_VERSION_MISMATCH);
 
 	/* AUTH_OK with a wrong mac_t. */
 	zassert_ok(ctag_session_bridge_hello(&bridge, V_SESSION_TAG_ID, V_SESSION_EPOCH,
 					     V_SESSION_K_EPOCH, V_SESSION_NONCE_B, out));
-	zassert_equal(ctag_session_bridge_challenge(&bridge, V_SESSION_CHALLENGE,
-						    V_SESSION_CHALLENGE_LEN, &ch, out),
+	zassert_equal(ctag_session_bridge_challenge(&bridge, V_SESSION_CAPS, V_SESSION_CAPS_LEN,
+						    V_SESSION_CHALLENGE, V_SESSION_CHALLENGE_LEN, &ch,
+						    out),
 		      CTAG_STATUS_OK);
 	memcpy(msg, V_SESSION_AUTH_OK, V_SESSION_AUTH_OK_LEN);
 	msg[V_SESSION_AUTH_OK_LEN - 1u] ^= 0x80;

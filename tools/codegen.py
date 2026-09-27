@@ -104,6 +104,7 @@ class Field:
     type: str
     doc: str
     max: str | None
+    default: int | None = None
 
     @property
     def kind(self) -> str:
@@ -155,12 +156,18 @@ class Message:
 
 
 def _fields(raw: list[dict[str, Any]], where: str) -> tuple[tuple[Field, ...], Field | None]:
-    fields = [Field(f["name"], str(f["type"]), str(f.get("doc", "")), f.get("max")) for f in raw]
+    fields = [Field(f["name"], str(f["type"]), str(f.get("doc", "")), f.get("max"), f.get("default"))
+              for f in raw]
     for i, field in enumerate(fields):
         if field.kind in ("tail", "variable") and i != len(fields) - 1:
             raise SpecError(f"{where}.{field.name}: a variable field must be last")
         if field.kind == "tail" and not field.max:
             raise SpecError(f"{where}.{field.name}: a trailing bytes field needs max: <constant>")
+        if field.default is not None:
+            if field.kind != "int" or not isinstance(field.default, int):
+                raise SpecError(f"{where}.{field.name}: only integer fields take an integer default")
+            if any(f.default is None for f in fields[i + 1 :]):
+                raise SpecError(f"{where}.{field.name}: fields after a default need one too")
     if fields and fields[-1].kind == "variable":
         return tuple(fields[:-1]), fields[-1]
     return tuple(fields), None
@@ -850,8 +857,9 @@ def _py_message(m: Message) -> list[str]:
         L.append("")
     for f in m.fields:
         ptype = "int" if f.kind == "int" else "bytes"
+        default = f" = {fmt_int(f.default)}" if f.default is not None else ""
         comment = f"  # {f.doc}" if f.doc else ""
-        L.append(f"    {f.name}: {ptype}{comment}")
+        L.append(f"    {f.name}: {ptype}{default}{comment}")
     L += ["", "    def pack(self) -> bytes:"]
     for f in m.fixed:
         if f.kind == "bytes_n":

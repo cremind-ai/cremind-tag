@@ -282,8 +282,11 @@ def test_wrong_key_fails_authentication(tiny_pack: bytes, card: Card) -> None:
             ack = await h.client.assign_tag(bridge, tag_id, 2, bytes(16))  # not K_epoch of this tag
             assert (await h.wait_assign(ack.op_id)).status == Status.OK
             result = await h.wait_result((await h.deliver(tag_id, card(0), revision=1, epoch=2)).update_id)
-            assert result.status == Status.AUTH_FAILED
-            assert h.sim.tag(tag_id).stats["auth_failures"] == 1
+            # §10: a plaintext ERROR is unauthenticated; the job ends only after 3 consecutive refusals.
+            assert result.status == Status.AUTH_FAILED and result.escalated and not result.duplicate
+            assert result.stored_epoch == 0  # the tag's stored epoch, from its ERROR
+            assert h.sim.tag(tag_id).stats["auth_failures"] == 3
+            assert h.sim.bridge(0).counters["unauth_statuses"] == 3
             assert h.sim.tag(tag_id).nvs.stored_epoch == 0  # never persisted without a verified AUTH
 
     run_scenario(scenario())

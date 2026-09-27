@@ -442,10 +442,20 @@ void mesh_result(uint16_t src, uint16_t result_seq, uint64_t update_id, uint8_t 
 		.suspend_ms = 22u,
 		.transfer_ms = 33u,
 		.refresh_ms = 44u,
+		.stored_epoch = 3u,
+		.flags = CTAG_RESULT_FLAG_DUPLICATE,
 	};
 	uint8_t p[CTAG_MESH_DELIVERY_RESULT_LEN];
 
 	(void)ctag_mesh_delivery_result_pack(&r, p, sizeof(p));
+	gw_core_mesh_rx(&core, src, CTAG_MESH_OP_DELIVERY_RESULT, p, sizeof(p), now_ms);
+}
+
+void mesh_result_msg(uint16_t src, const struct ctag_mesh_delivery_result *r)
+{
+	uint8_t p[CTAG_MESH_DELIVERY_RESULT_LEN];
+
+	(void)ctag_mesh_delivery_result_pack(r, p, sizeof(p));
 	gw_core_mesh_rx(&core, src, CTAG_MESH_OP_DELIVERY_RESULT, p, sizeof(p), now_ms);
 }
 

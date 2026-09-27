@@ -32,18 +32,28 @@ Errors use `{"error": "<code>", "detail": "..."}` with HTTP 400/401/403/404/409/
 Upsert what the companion physically manages.
 ```json
 {"gateways": [{"hw_id": "gw-<uuid>", "fw": "0.1.0", "board": 1, "boot_id": 123, "port": "COM7"}],
- "bridges":  [{"hw_id": "br-<mesh-uuid>", "addr": 2, "fw": "0.1.0", "board": 3, "fontpack_id": "a1b2c3d4e5f60718", "flash_size": 67108864}],
+ "bridges":  [{"hw_id": "br-<mesh-uuid>", "addr": 2, "fw": "0.1.0", "board": 3, "fontpack_id": "a1b2c3d4e5f60718", "flash_size": 67108864,
+               "max_tags": 20, "assigned": 7}],
  "tags":     [{"tag_id": "1A2B3C4D", "board": 16, "panel": 1, "width": 400, "height": 300, "planes": 1, "fw": "0.1.0", "epoch": 5}]}
 ```
 
 `epoch` (optional, u32) is the highest assignment epoch the companion has used
-for the tag or learned from it (a tag reports its `stored_epoch` in every
-`CHALLENGE`). Cremind keeps `epoch = max(stored, reported)`, so a tag that was
+for the tag or learned from it: its epoch floor, when a tag's `STALE_EPOCH`
+reported a higher `stored_epoch` (protocol.md §10, companion.md §5 "Epoch
+floor"; bounded, at most 256 above what the companion knew per report).
+Cremind keeps `epoch = max(stored, reported)`, so a tag that was
 forgotten and re-reported, or a restore that rewound epochs, never falls below
 the epoch the tag will accept. When the reported epoch is ahead of work Cremind
 still owes, that work is re-queued at `reported + 1` (`assign_tag` for an owned
 tag with a bridge, `clear_tag` for a pending clear) and the tag's active
 deliveries move to the new epoch.
+
+`max_tags` (optional, 1..255) is the bridge's assignment-table capacity from its
+`CAPS_STATUS` (20 on an nRF52840 bridge, 10 on an nRF52832) and `assigned`
+(optional, 0..255) the assignments the gateway holds for it; both are left out
+while the gateway has not reported the bridge. Cremind keeps them in the
+bridge's `info` (a missing or bad value keeps the last good one) and refuses to
+claim or assign a tag onto a bridge that is full.
 → `{"devices": [...device rows...], "assignments": [{"tag_id", "owner_profile", "bridge_hw_id", "epoch", "rotation"}]}`
 
 ### `POST heartbeat`
@@ -68,7 +78,11 @@ Result shapes the companion reports (`result` of `commands/{id}/result`):
 `scan_unprovisioned` → `{"duration_s": 60, "beacons": [{"uuid": "<32 hex>",
 "hw_id": "br-<32 hex>", "rssi": -48, "oob": 0}]}` (strongest first, at most
 40); other kinds return a small object describing what was done (for example
-`{"addr": 2}` after provisioning) or `{}`.
+`{"addr": 2}` after provisioning) or `{}`. A failed `assign_tag` because the
+bridge's table is full (`ASSIGN_SET NO_RESOURCES`) reports `{"status":
+"failed", "error": "bridge_full", "result": {"error": "bridge_full",
+"max_tags": 10}}` (`max_tags` omitted when unknown); Cremind then marks the tag
+`assign_failed`, drops it from that bridge and records `max_tags`.
 
 Kinds: `scan_unprovisioned {duration_s}`, `provision_bridge {uuid, name}`,
 `configure_bridge {hw_id}`, `remove_bridge {hw_id}`,

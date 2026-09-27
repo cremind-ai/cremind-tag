@@ -192,7 +192,12 @@ uint8_t ctag_layout_asm_commit(struct ctag_layout_asm *a, uint16_t xfer_id, uint
   the first failing status; the strike step (5) runs only with a
   `has_strike` callback (`ctag_glyph_source.has_strike` of the font pack fits).
   The QR version-10 fit rule is not evaluated: with `LAYOUT_QR_MAX_TEXT` = 96
-  it cannot fail (§4.3).
+  it cannot fail (§4.3). The render-cost bounds are part of step 3: every
+  `LINE` endpoint in `[−W, 2W) × [−H, 2H)` (checked with the field bounds, in
+  field order), at most `LAYOUT_MAX_QR` QR commands and at most
+  `LAYOUT_MAX_LINE_STEPS` Bresenham steps over all lines (running totals,
+  `INVALID`), so a valid layout never makes the renderer walk more than
+  16384 line plots per strip or encode more than four QR symbols per frame.
 - The iterator is for validated layouts; `cmd->var` points at the glyph entries
   (`ctag_layout_glyph_at()`) or the QR text; `cmd->offset` is the op byte's
   offset.
@@ -224,16 +229,32 @@ uint8_t ctag_fontpack_verify_content(struct ctag_fontpack *fp, const struct ctag
 void ctag_fontpack_glyph_source(struct ctag_fontpack *fp, struct ctag_glyph_source *src);
 ```
 
-- `ctag_render_init()` validates the layout (§4.3 including strikes), the panel
-  geometry rule of §4.4 and `planes` ∈ {1, 2}, and returns the first failing
-  status. The layout, the glyph source and `work` must stay unchanged while
-  rendering (`work` caches the last QR symbol across strips).
+- `ctag_render_init()` validates the layout (§4.3 including strikes and the
+  render-cost bounds), the panel geometry rule of §4.4 and `planes` ∈ {1, 2},
+  and returns the first failing status. The layout, the glyph source and
+  `work` must stay unchanged while rendering (`work` keeps QR symbols across
+  strips; every `ctag_render_init()` starts the cache empty).
+- **QR cache.** `ctag_render_work` holds `CONFIG_CTAG_RENDER_QR_SLOTS`
+  (1..`LAYOUT_MAX_QR`, default 4; `CTAG_RENDER_QR_SLOTS` on the host)
+  encoded symbols of 408 bytes plus one 408-byte scratch buffer. With a slot
+  per QR command every symbol is encoded once per frame (pre-pass and
+  streaming included). With fewer, the first commands keep their slots and
+  the rest share the last one, re-encoded for each strip they reach — with
+  the mask the automatic choice picked the first time (read back from the
+  symbol's format bits), which yields the same symbol without the eight-mask
+  penalty search. A per-command memo (offset, symbol size, mask; 16 bytes)
+  also culls strips by the symbol's real size instead of version 10's 57
+  modules, and painting visits only the module rows and columns that reach
+  the strip. Tested bit for bit with one slot (`ctag_host_tests_qr1`,
+  `ctag.host_suites.qr_one_slot`: four `qr.json` symbols side by side in
+  one-row strips) and with four.
 - `ctag_render_strip()` writes native rows `[y0, min(y0 + rows, height))` of
   one plane, `row_bytes = ceil(width / 8)` per row, exactly the bytes of those
   rows of a full frame. Each command paints logical rectangles clipped to the
   canvas and to the logical region of the strip (rotation 0: `y ∈ [y0, y1)`;
   1: `x ∈ [y0, y1)`; 2: `y ∈ [Hn−y1, Hn−y0)`; 3: `x ∈ [Hn−y1, Hn−y0)`), mapped
-  straight into plane bits; lines always walk their full Bresenham path.
+  straight into plane bits; lines always walk their full Bresenham path
+  (bounded by `LAYOUT_MAX_LINE_STEPS`).
   Glyphs whose box cannot reach the strip are skipped before their index entry
   is read; bitmap rows are read one row at a time through `read`.
 - `ctag_render_frame_digest()` is the bridge's pre-pass for `FRAME_BEGIN.digest`:
@@ -256,7 +277,8 @@ void ctag_fontpack_glyph_source(struct ctag_fontpack *fp, struct ctag_glyph_sour
   ([`lib/third_party/qrcodegen`](../lib/third_party/qrcodegen), MIT): the text
   is copied into a NUL-terminated buffer and encoded with
   `qrcodegen_encodeText(text, tmp, qr, ecc, 1, 10, qrcodegen_Mask_AUTO, true)`
-  into the two 408-byte buffers of `ctag_render_work`.
+  into a slot of `ctag_render_work` (a re-encode passes the remembered mask
+  instead of `AUTO`: the same symbol).
 
 ## ctag_frag — GATT fragmentation (§5.3)
 
@@ -283,8 +305,9 @@ Bridge (client):
 ```c
 int ctag_session_bridge_hello(struct ctag_session *s, uint32_t tag_id, uint32_t epoch,
                               const uint8_t k_epoch[16], const uint8_t nonce_b[16], uint8_t out[26]);
-uint8_t ctag_session_bridge_challenge(struct ctag_session *s, const uint8_t *msg, size_t len,
-                                      struct ctag_ctrl_challenge *ch, uint8_t out[17]); /* -> AUTH */
+uint8_t ctag_session_bridge_challenge(struct ctag_session *s, const uint8_t *caps, size_t caps_len,
+                                      const uint8_t *msg, size_t len, struct ctag_ctrl_challenge *ch,
+                                      uint8_t out[17]); /* -> AUTH */
 uint8_t ctag_session_bridge_auth_ok(struct ctag_session *s, const uint8_t *msg, size_t len);
 ```
 
@@ -292,10 +315,11 @@ Tag (server):
 
 ```c
 uint8_t ctag_session_tag_hello(struct ctag_session *s, uint32_t tag_id, const uint8_t secret[32],
+                               const uint8_t *caps, size_t caps_len,
                                const struct ctag_ctrl_challenge *ch, const uint8_t *msg, size_t len,
                                uint8_t *out /* 30 */, size_t *out_len); /* -> CHALLENGE or ERROR */
-uint8_t ctag_session_tag_auth(struct ctag_session *s, const uint8_t *msg, size_t len,
-                              uint8_t *out /* 17 */, size_t *out_len);  /* -> AUTH_OK or ERROR */
+uint8_t ctag_session_tag_auth(struct ctag_session *s, uint32_t stored_epoch, const uint8_t *msg,
+                              size_t len, uint8_t *out /* 17 */, size_t *out_len); /* -> AUTH_OK or ERROR */
 ```
 
 Records and helpers:
@@ -307,6 +331,8 @@ int ctag_record_open(struct ctag_record_dir *d, const uint8_t *rec, size_t len, 
                      uint8_t *pt, size_t size);                       /* -> plaintext len, -EBADMSG */
 int ctag_session_k_epoch(const uint8_t secret[32], uint32_t tag_id, uint32_t epoch, uint8_t k_epoch[16]);
 bool ctag_session_equal(const uint8_t *a, const uint8_t *b, size_t len); /* constant time */
+size_t ctag_session_error_pack(uint8_t out[6], uint8_t status, uint32_t stored_epoch);
+bool ctag_session_error_unpack(const uint8_t *msg, size_t len, uint8_t *status, uint32_t *stored_epoch);
 ```
 
 - Messages are the reassembled CTRL messages including their type byte. The
@@ -314,14 +340,23 @@ bool ctag_session_equal(const uint8_t *a, const uint8_t *b, size_t len); /* cons
   CHALLENGE fields (`stored_epoch`, `displayed_rev`, `last_status`,
   `battery_mv`, `flags` — bit0 from `ctag_txn_unknown_pending()`), `proto` is
   set by the library.
+- `th = SHA-256(CAPS ‖ HELLO ‖ CHALLENGE)` (§5.4): both roles pass the CAPS
+  characteristic value — the bridge the bytes it read, the tag the bytes it
+  serves (the tag app builds them on the stack at HELLO, keeping nothing in
+  RAM). A missing CAPS (`caps_len` 0) is refused (`INTERNAL`), never hashed as
+  an empty prefix.
 - Tag `HELLO` checks, in order: message (`INVALID`), `tag_id` (`NOT_FOUND`),
   `proto` (`VERSION_MISMATCH`), `epoch ≥ stored_epoch` (`STALE_EPOCH`). Any
-  `AUTH` failure is `AUTH_FAILED`. On failure `out` holds `ERROR{status}` to
-  send, and the session is wiped (`CTAG_SESSION_FAILED`). After `AUTH_OK`,
-  `s->epoch` is authenticated: persist it when above `stored_epoch`. Counting
-  consecutive failures for the wake-window pacing is the tag app's.
+  `AUTH` failure is `AUTH_FAILED`. On failure `out` holds
+  `ERROR{status, stored_epoch}` (6 bytes; the `stored_epoch` of `ch` at
+  HELLO, the argument at AUTH) to send, and the session is wiped
+  (`CTAG_SESSION_FAILED`). After `AUTH_OK`, `s->epoch` is authenticated:
+  persist it when above `stored_epoch`. Counting consecutive failures for the
+  wake-window pacing is the tag app's; its own `ERROR`s use
+  `ctag_session_error_pack()`.
 - The bridge returns the tag's `ERROR` status when one arrives instead of
-  `CHALLENGE`/`AUTH_OK`, `AUTH_FAILED` when `mac_t` does not verify.
+  `CHALLENGE`/`AUTH_OK` (at `CHALLENGE`, `*ch` then holds only the ERROR's
+  `stored_epoch`), `AUTH_FAILED` when `mac_t` does not verify.
 - Once established, `s->tx` and `s->rx` are the record directions (bridge:
   tx = B2T; tag: tx = T2B); `K_epoch` and the handshake secrets are wiped.
   Records need `13 ≤ len ≤ TAG_RECORD_WIRE_MAX`, the expected counter and a
@@ -415,7 +450,7 @@ acceptance of Python's `bytes.decode("utf-8")`.
 | FRAME_BEGIN table, boot rule, persisted record, storage, transaction flow | host, ztest | `tag_txn.json` |
 | Enrollment | host, ztest | `enrollment.json` |
 | Mutation robustness (layouts → renderer, font packs → reader, COBS, fragments) | host, ztest | — |
-| Session: K_epoch, handshake from both roles, records both ways, tampered/replayed/skipped records, handshake failures, backend sanity | ztest (PSA via Mbed TLS) | `session.json` |
+| Session: K_epoch, handshake from both roles over the fixture CAPS, a relayed CAPS (the bridge's AUTH is the fixture's, the tag refuses it), no CAPS refused, ERROR pack/unpack and the fixture ERROR{STALE_EPOCH, 4}, records both ways, tampered/replayed/skipped records, handshake failures, backend sanity | ztest (PSA via Mbed TLS) | `session.json` |
 | CBOR: every fixture payload encoded byte for byte and decoded field for field (nested maps, counters), arrays of maps, strictness rules, encoder rejections; work bounds (the review's nested-map payloads, work counted by `ctag_cbor_steps` under `CTAG_CBOR_STEPS`), scan limits, duplicate keys per map, INFO and GET_INVENTORY at their largest | ztest | `serial_frames.json` |
 
 C test vectors are generated from the JSON fixtures at build time by

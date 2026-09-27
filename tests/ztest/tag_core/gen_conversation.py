@@ -12,7 +12,8 @@ with fake panel/storage/clock/RNG hooks and compares byte for byte.
 
 Frames are the small-panel scenarios of protocol/fixtures/render.json whose
 plane bytes are in the fixture, so FRAME_BEGIN carries the fixture's frame
-digest.
+digest. The tag serves a CAPS value with the frame's geometry; the handshake
+transcript covers it (docs/protocol.md 5.4).
 
 Run with the companion environment (it needs ``cryptography``):
 
@@ -37,9 +38,12 @@ from cremind_tag.protocol.fragments import Fragmenter  # noqa: E402
 from cremind_tag.protocol.ids import (  # noqa: E402
     PROTO_VERSION,
     TAG_CTRL_MSG_MAX,
+    TAG_RECORD_PAYLOAD_MAX,
     TAG_RECORD_WIRE_MAX,
+    Board,
     CtrlMsg,
     DeliveryStage,
+    Panel,
     PlainMsg,
     RecordDir,
     RecordType,
@@ -49,12 +53,14 @@ from cremind_tag.protocol.ids import (  # noqa: E402
 from cremind_tag.protocol.msgs import (  # noqa: E402
     CtrlAuth,
     CtrlChallenge,
+    CtrlError,
     CtrlHello,
     RecCmd,
     RecFrameBegin,
     RecPlaneData,
     RecProgress,
     RecResult,
+    TagCaps,
 )
 
 OUT = Path(__file__).resolve().parent / "src" / "conversation.h"
@@ -73,11 +79,19 @@ def nonce(tag: int) -> bytes:
 @dataclass
 class Frame:
     name: str
+    width: int
+    height: int
     planes: int
     plane_flags: int
     plane_len: int
     data: list[bytes]
     digest: bytes
+
+    def caps(self, plane_flags: int | None = None) -> bytes:
+        """The CAPS value of a development tag with this panel (the tag serves it)."""
+        flags = self.plane_flags if plane_flags is None else plane_flags
+        return TagCaps(PROTO_VERSION, TAG_ID, Board.NRF52DK_TAG, Panel.NONE, self.width, self.height,
+                       self.planes, flags, 0, 1, 0, TAG_RECORD_PAYLOAD_MAX, CREDITS).pack()
 
 
 def load_frames() -> dict[str, Frame]:
@@ -90,7 +104,8 @@ def load_frames() -> dict[str, Frame]:
         digest = bytes.fromhex(sc["frame_digest"])
         assert hashlib.sha256(b"".join(data)).digest() == digest, sc["name"]
         p = sc["panel"]
-        frames[sc["name"]] = Frame(sc["name"], p["planes"], p["plane_flags"], sc["plane_len"], data, digest)
+        frames[sc["name"]] = Frame(sc["name"], p["width"], p["height"], p["planes"], p["plane_flags"],
+                                   sc["plane_len"], data, digest)
     return frames
 
 
@@ -155,6 +170,10 @@ class Conv:
         for v in self.t_ctrl.split(msg):
             self.steps.append(("EXPECT", "CTRL", v))
 
+    def expect_error(self, status: Status, stored_epoch: int) -> None:
+        """ERROR{status, stored_epoch} (5.4: the tag's stored epoch is always filled)."""
+        self.expect_ctrl(bytes([CtrlMsg.ERROR]) + CtrlError(status, stored_epoch).pack())
+
     def expect_credit(self, n: int = 1) -> None:
         for v in self.t_status.split(bytes([PlainMsg.CREDIT, n])):
             self.steps.append(("EXPECT", "STATUS", v))
@@ -186,8 +205,12 @@ class Conv:
         self.steps.append(("REFRESH_DONE", int(status)))
 
     # ---- composite -------------------------------------------------------------
-    def handshake(self, epoch: int, tag_nonce: int, challenge: dict, good: bool = True) -> None:
-        """HELLO / CHALLENGE / AUTH / AUTH_OK + CREDIT (or ERROR{AUTH_FAILED})."""
+    def handshake(self, epoch: int, tag_nonce: int, challenge: dict, good: bool = True,
+                  bridge_caps: bytes | None = None) -> None:
+        """HELLO / CHALLENGE / AUTH / AUTH_OK + CREDIT (or ERROR{AUTH_FAILED}).
+
+        The bridge hashes ``bridge_caps`` (the CAPS it read; by default what the
+        tag serves): other bytes, as a relay would feed it, fail AUTH."""
         hello = bytes([CtrlMsg.HELLO]) + CtrlHello(PROTO_VERSION, TAG_ID, epoch, nonce(0xA0 + tag_nonce)).pack()
         nonce_t = nonce(0x40 + tag_nonce)
         self.steps.append(("NONCE", nonce_t))
@@ -197,13 +220,14 @@ class Conv:
             challenge.get("last_status", 0), BATTERY_MV, challenge.get("flags", 0)).pack()
         self.expect_ctrl(ch)
         k_epoch = S.derive_k_epoch(SECRET, TAG_ID, epoch)
-        th = S.transcript_hash(hello, ch)
-        mac_b = S.mac_b(k_epoch, th)
+        caps = self.frame.caps()
+        th = S.transcript_hash(caps, hello, ch)
+        mac_b = S.mac_b(k_epoch, S.transcript_hash(bridge_caps if bridge_caps is not None else caps, hello, ch))
         if not good:
             mac_b = bytes([mac_b[0] ^ 0x01]) + mac_b[1:]
         self.write_ctrl(bytes([CtrlMsg.AUTH]) + CtrlAuth(mac_b).pack())
-        if not good:
-            self.expect_ctrl(bytes([CtrlMsg.ERROR, Status.AUTH_FAILED]))
+        if not good or (bridge_caps is not None and bridge_caps != caps):
+            self.expect_error(Status.AUTH_FAILED, challenge.get("stored_epoch", 0))
             self.expect_closing()
             return
         self.expect_ctrl(bytes([CtrlMsg.AUTH_OK]) + S.mac_t(k_epoch, th, mac_b))
@@ -342,6 +366,13 @@ def scenarios(frames: dict[str, Frame]) -> list[Conv]:
     c.handshake(1, 7, {}, good=False)
     out.append(c)
 
+    # 5.4: a relay rewrote plane_flags in the CAPS the bridge read; the bridge's
+    # transcript differs from the tag's, so its AUTH fails and nothing is drawn.
+    c = Conv("caps_relayed", bw, Init(rec=displayed, epoch_entry=1))
+    c.link_up()
+    c.handshake(1, 20, {"stored_epoch": 1, "displayed_rev": 5}, bridge_caps=bw.caps(bw.plane_flags ^ 0x01))
+    out.append(c)
+
     # Disconnect after one PLANE_DATA; the next session restarts at offset 0.
     c = Conv("restart_from_zero", bw)
     c.link_up()
@@ -400,7 +431,7 @@ def scenarios(frames: dict[str, Frame]) -> list[Conv]:
     hello = bytes([CtrlMsg.HELLO]) + CtrlHello(PROTO_VERSION, TAG_ID, 3, nonce(0xA0 + 14)).pack()
     c.steps.append(("NONCE", nonce(0x40 + 14)))
     c.write_ctrl(hello)
-    c.expect_ctrl(bytes([CtrlMsg.ERROR, Status.STALE_EPOCH]))
+    c.expect_error(Status.STALE_EPOCH, 4)
     c.expect_closing()
     out.append(c)
 
@@ -520,6 +551,7 @@ def emit(convs: list[Conv], frames: dict[str, Frame]) -> str:
         "struct conv {",
         "\tconst char *name;",
         "\tconst struct conv_frame *frame;",
+        "\tconst uint8_t *caps; /* the CAPS value the tag serves */",
         "\tbool has_rec;",
         "\tuint32_t rec_epoch;",
         "\tuint32_t rec_revision;",
@@ -563,6 +595,7 @@ def emit(convs: list[Conv], frames: dict[str, Frame]) -> str:
             rec = f"true, {e}u, {r}u, {u}u, {c_bytes(d)}, {int(st)}u, {state}u"
         ep = "false, 0u" if i.epoch_entry is None else f"true, {i.epoch_entry}u"
         lines.append(f"static const struct conv conv_{c.name} = {{\"{c.name}\", &conv_frame_{c.frame.name}, "
+                     f"{c_bytes(c.frame.caps())}, "
                      f"{rec}, {ep}, {str(i.panel_ok).lower()}, conv_{c.name}_steps, "
                      f"sizeof(conv_{c.name}_steps) / sizeof(conv_{c.name}_steps[0])}};")
         lines.append("")

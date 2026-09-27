@@ -4,7 +4,9 @@ Key schedule::
 
     K_epoch = HKDF-SHA256(IKM = tag_secret, salt = "cremind-tag/v1/epoch",
                           info = "K_epoch" | tag_id u32 LE | epoch u32 LE, L = 16)
-    th      = SHA-256(HELLO | CHALLENGE)          (reassembled, type byte included)
+    th      = SHA-256(CAPS | HELLO | CHALLENGE)   (CAPS: the exact tag_caps value the tag
+                                                   serves; HELLO, CHALLENGE: reassembled,
+                                                   type byte included)
     mac_b   = HMAC-SHA256(K_epoch, "B" | th)[0:16]
     mac_t   = HMAC-SHA256(K_epoch, "T" | th | mac_b)[0:16]
     k_b2t | k_t2b = HKDF-SHA256(IKM = K_epoch, salt = th, info = "cremind-tag/v1/session", L = 32)
@@ -64,9 +66,14 @@ def derive_k_epoch(tag_secret: bytes, tag_id: int, epoch: int) -> bytes:
     return _hkdf(tag_secret, CRYPTO_HKDF_SALT_EPOCH, info, TAG_KEY_LEN)
 
 
-def transcript_hash(hello: bytes, challenge: bytes) -> bytes:
-    """th over the reassembled HELLO and CHALLENGE messages (type bytes included)."""
-    return hashlib.sha256(hello + challenge).digest()
+def transcript_hash(caps: bytes, hello: bytes, challenge: bytes) -> bytes:
+    """th = SHA-256(CAPS | HELLO | CHALLENGE) (§5.4).
+
+    ``caps`` is the exact CAPS characteristic value: the bytes the bridge read,
+    the bytes the tag serves. Binding it means a relay that alters the geometry
+    or the plane flags a bridge renders with breaks the handshake (AUTH_FAILED).
+    """
+    return hashlib.sha256(caps + hello + challenge).digest()
 
 
 def mac_b(k_epoch: bytes, th: bytes) -> bytes:

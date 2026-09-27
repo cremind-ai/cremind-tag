@@ -112,7 +112,10 @@ still validate against `LAYOUT_HARD_MAX` (§4.3).
 
 Then `EVT_STAGE` (`BRIDGE_RECEIVED`, `TRANSFERRING`, `REFRESHING`) best effort,
 and exactly one retained `EVT_RESULT` with the final `status`
-(`OK` = displayed; see §5.6 for the rest).
+(`OK` = displayed; see §5.6 for the rest). `EVT_RESULT` also carries the
+bridge's `flags` and the tag's `stored_epoch` exactly as `DELIVERY_RESULT`
+reported them (§3.4); results the gateway produces itself (rejections,
+`TIMEOUT`, `CANCELLED`) carry `flags = 0` and `stored_epoch = 0`.
 
 ### 1.6 Bridge maintenance port
 
@@ -202,6 +205,23 @@ every `MESH_RESULT_RETRY_MS` up to `MESH_RESULT_RETRIES` times until the gateway
 answers `RESULT_ACK {result_seq}`. The gateway de-duplicates by
 `(bridge, result_seq)` and turns the first copy into a retained `EVT_RESULT`.
 
+Two fields tell the companion what the tag said, not only the status:
+
+- `stored_epoch`: the tag's stored epoch as its `CHALLENGE` or `ERROR`
+  reported it in the session that produced the result (after `AUTH_OK` at
+  least the session's epoch, which the tag persisted before sending it,
+  §5.4); `0` when no tag session produced the result (commit refusals,
+  `SUPERSEDED`, `CANCELLED`, `NOT_ASSIGNED`, …). For `STALE_EPOCH` it is the
+  epoch the companion must assign above.
+- `flags`: bit0 `RESULT_FLAG_DUPLICATE` — the tag answered with its stored
+  ACK (`RESULT.flags.bit0`, §5.6): the revision was already displayed and
+  nothing was redrawn; bit1 `RESULT_FLAG_ESCALATED` — the status is an
+  unauthenticated refusal that ended the job after 3 consecutive sessions
+  (§10). Other bits are 0.
+
+A result the bridge replays from its history (a `DUPLICATE` re-delivery, §10)
+carries the stored result's `stored_epoch` and `flags`.
+
 ---
 
 ## 4. Logical screen format ("layout")
@@ -223,6 +243,13 @@ answers `RESULT_ACK {result_seq}`. The gateway de-duplicates by
 - `width`, `height` ∈ 1..2048; `rotation` ∈ 0..3; colours ∈ {0,1,2};
 - `LINE.width` ∈ 1..8; `QR.module_px` ∈ 1..8; `QR.ecc` ∈ 0..3;
   `QR.len` ∈ 1..`LAYOUT_QR_MAX_TEXT` and every byte ∈ 0x21..0x7E;
+- **render cost** (a bridge renders every strip of every plane twice, on the
+  work queue that also serves the mesh): every `LINE` endpoint lies in the
+  box `[−W, 2W) × [−H, 2H)` of the logical canvas (`x0`, `x1` ∈ `[−W, 2W)`,
+  `y0`, `y1` ∈ `[−H, 2H)`, `W×H` from the header); the sum over `LINE`
+  commands of `max(|x1−x0|, |y1−y0|) + 1` (the Bresenham steps) is at most
+  `LAYOUT_MAX_LINE_STEPS` (16384); at most `LAYOUT_MAX_QR` (4) `QR`
+  commands;
 - `PROGRESS.value` is clamped to `max` when rendering (not an error).
 
 Validators stop at the first failure and check in this order:
@@ -233,10 +260,21 @@ Validators stop at the first failure and check in this order:
    `background` → `INVALID`; `cmd_count` → `TOO_LARGE`;
 3. each command in stream order: known `op` → `UNSUPPORTED`; fixed and
    variable parts present → `INVALID`; field bounds in field order →
-   `INVALID`; running glyph total → `TOO_LARGE`;
+   `INVALID` (for `LINE`: `x0`, `y0`, `x1`, `y1` against the endpoint box,
+   then `width`, then `color`); then the running total the command adds to:
+   glyphs (`GLYPHS`) > `LAYOUT_MAX_GLYPHS` → `TOO_LARGE`, QR commands
+   (`QR`) > `LAYOUT_MAX_QR` → `INVALID`, line steps (`LINE`) >
+   `LAYOUT_MAX_LINE_STEPS` → `INVALID`;
 4. no bytes after the last command → `INVALID`;
 5. only then, in command order, the strikes against the active font pack:
    `GLYPHS (face, size_px)` and `ICON (0, size_px)` exist → `FONTPACK_MISMATCH`.
+
+The render-cost bounds cap the Bresenham walk at 16384 plots per strip and
+the QR work at four symbols per frame, which a bridge keeps across the strips
+as far as its RAM allows (`docs/firmware-libs.md`, `docs/bridge-firmware.md`
+§6); within the endpoint box every line can still leave the canvas across any
+edge, so clipping is exercised as before. The companion's composer stays far
+inside them (one QR code, three separator lines inside the canvas).
 
 `flags` is informational (bit0: the layout paints `RED`); validators and
 renderers ignore it. `GLYPHS.count = 0` is valid. With `LAYOUT_QR_MAX_TEXT` =
@@ -382,6 +420,7 @@ message's first byte is its type (§5.4).
 
 ```
 bridge                                      tag
+CAPS read (plaintext tag_caps)       ◀───  the CAPS value it serves
 HELLO{proto, tag_id, epoch, nonce_b}  ───▶  checks tag_id, proto, epoch ≥ stored_epoch
                                      ◀───  CHALLENGE{proto, nonce_t, stored_epoch,
                                                      displayed_rev, last_status, battery_mv, flags}
@@ -394,11 +433,26 @@ Keys (`spec.yaml` `crypto`):
 ```
 K_epoch  = HKDF-SHA256(IKM = tag_secret, salt = "cremind-tag/v1/epoch",
                        info = "K_epoch" ‖ tag_id ‖ epoch, L = 16)
-th       = SHA-256(HELLO ‖ CHALLENGE)            (the reassembled messages, type byte included)
+th       = SHA-256(CAPS ‖ HELLO ‖ CHALLENGE)
 mac_b    = HMAC-SHA256(K_epoch, "B" ‖ th)[0:16]
 mac_t    = HMAC-SHA256(K_epoch, "T" ‖ th ‖ mac_b)[0:16]
 k_b2t ‖ k_t2b = HKDF-SHA256(IKM = K_epoch, salt = th, info = "cremind-tag/v1/session", L = 32)
 ```
+
+`CAPS` is the exact `tag_caps` value of the CAPS characteristic: the bridge
+hashes the bytes it read, the tag the bytes it serves. `HELLO` and
+`CHALLENGE` are the reassembled messages, type byte included.
+
+Why CAPS is in the transcript: the bridge reads CAPS in plaintext before the
+handshake and renders with its geometry, `planes` and `plane_flags`, and
+`FRAME_BEGIN` carries only `planes` and `plane_len`. Without the binding, an
+active relay (a central to the real tag and a fake tag to the bridge) could
+forward the handshake and the records untouched but flip a plane-flag bit in
+the CAPS it relays: the bridge would render an inverted or red-swapped frame
+whose digest the tag verifies and refreshes. With CAPS in `th`, any byte a
+relay changes gives the bridge another transcript, its `mac_b` fails at the
+tag (`ERROR{AUTH_FAILED}`), and nothing is rendered from the altered CAPS:
+what the bridge renders with is what the tag authenticated.
 
 - The companion derives `K_epoch` from the tag secret and sends it to the
   assigned bridge (`ASSIGN_SET`); bridges never see `tag_secret`.
@@ -406,6 +460,10 @@ k_b2t ‖ k_t2b = HKDF-SHA256(IKM = K_epoch, salt = th, info = "cremind-tag/v1/s
   failure: malformed → `INVALID`; `tag_id` not its own → `NOT_FOUND`; `proto`
   unsupported → `VERSION_MISMATCH`; `epoch < stored_epoch` → `STALE_EPOCH`. A
   malformed `AUTH` is `AUTH_FAILED`.
+- `ERROR{status, stored_epoch}`: every `ERROR` the tag sends, whatever the
+  step, carries its stored epoch (epochs are not secret; the `CHALLENGE`
+  reports the same value). A bridge that meets `STALE_EPOCH` can thus tell
+  the companion which epoch to assign above (§3.4, §10).
 - The tag rejects `epoch < stored_epoch` (`ERROR STALE_EPOCH`). An
   `epoch > stored_epoch` is persisted only after `AUTH` verifies; from then on
   older epochs (and bridges holding their keys) are refused.
@@ -444,7 +502,7 @@ result (§6; `epoch` is the session's). The first matching row decides:
 |---|---|
 | `(epoch, revision)` < stored (lexicographic) | `RESULT STALE_REVISION` |
 | equal, different digest | `RESULT REVISION_CONFLICT` |
-| equal, same digest, stored state `DISPLAYED` | stored `RESULT OK` with `flags.bit0` (duplicate) |
+| equal, same digest, stored state `DISPLAYED` | stored `RESULT OK` with `flags.bit0` (duplicate; the bridge reports it as `DELIVERY_RESULT.flags` bit0, §3.4) |
 | `planes`/`plane_len` ≠ the panel's | `RESULT INVALID` |
 | otherwise — incl. equal + same digest with stored state `REFRESH_INTENT` (`DISPLAY_STATE_UNKNOWN` recovery, which may repeat the refresh) and no stored record | accept, `begin_frame()` |
 
@@ -578,7 +636,20 @@ These close gaps the sections above leave open. The companion's simulator
   as link-level failures (back-off, no result) until the same status repeats in
   3 consecutive sessions for that tag and epoch; only then does it end the tag's
   jobs of that epoch with it (`AUTH_FAILED`, `STALE_EPOCH`, `VERSION_MISMATCH`,
-  `NOT_FOUND`). Statuses inside authenticated `RESULT` records act at once.
+  `NOT_FOUND`), each result flagged `RESULT_FLAG_ESCALATED` (bit1) and
+  carrying the tag's `stored_epoch` from its `ERROR` or `CHALLENGE`.
+  Statuses inside authenticated `RESULT` records act at once.
+- `STALE_EPOCH` with `stored_epoch` above the epoch the companion knows for
+  the tag means the tag authenticated a newer epoch (an assignment the
+  companion lost, a restored backup): the companion records `stored_epoch` as
+  the tag's epoch floor and reports it, so the next assignment uses a higher
+  epoch and the tag accepts it again. The value is unauthenticated, so the
+  companion only ever raises the epoch it uses next, and only by a bounded
+  step (docs/companion.md §5 "Epoch floor": at most 256 above the highest
+  epoch it knows per report): a forged one costs epoch numbers, never access.
+- A result answered from the tag's stored ACK (`RESULT.flags.bit0`) reaches
+  the companion as `flags` bit0 (`RESULT_FLAG_DUPLICATE`): the revision was
+  already displayed and nothing was redrawn.
 - Session deadlines: the bridge's step deadline advances only on progress (a
   complete handshake message, an authenticated record, or a `CREDIT` with n > 0
   while it waits for credit). A `CREDIT` before `AUTH_OK` ends the session
@@ -604,7 +675,3 @@ These close gaps the sections above leave open. The companion's simulator
 
 - `FLASH_TEST` reports `BUSY` for any test position inside the active slot or the
   slot directory, and tests the rest.
-
-**Known limitation.** `EVT_RESULT`/`DELIVERY_RESULT` carry no "stored ACK re-sent"
-flag, so the tag's duplicate flag (`RESULT.flags.bit0`) does not reach the
-companion; a duplicate is reported as `OK`.

@@ -85,12 +85,14 @@ static void save_hist(struct dlv *d, int idx)
 	ctag_put_le32(&buf[12], h->revision);
 	memcpy(&buf[16], h->digest, sizeof(h->digest));
 	memcpy(&buf[32], h->digest8, sizeof(h->digest8));
-	ctag_put_le16(&buf[40], h->timing.wake_ms);
-	ctag_put_le16(&buf[42], h->timing.suspend_ms);
-	ctag_put_le16(&buf[44], h->timing.transfer_ms);
-	ctag_put_le16(&buf[46], h->timing.refresh_ms);
+	ctag_put_le16(&buf[40], h->report.wake_ms);
+	ctag_put_le16(&buf[42], h->report.suspend_ms);
+	ctag_put_le16(&buf[44], h->report.transfer_ms);
+	ctag_put_le16(&buf[46], h->report.refresh_ms);
 	ctag_put_le64(&buf[48], h->update_id);
 	ctag_put_le16(&buf[56], h->result_seq);
+	ctag_put_le32(&buf[58], h->report.stored_epoch);
+	buf[62] = h->report.flags;
 	save(d, 'h', idx, buf, sizeof(buf));
 }
 
@@ -154,12 +156,14 @@ void dlv_restore(struct dlv *d, const char *name, const void *data, size_t len)
 		h->revision = ctag_get_le32(&p[12]);
 		memcpy(h->digest, &p[16], sizeof(h->digest));
 		memcpy(h->digest8, &p[32], sizeof(h->digest8));
-		h->timing.wake_ms = ctag_get_le16(&p[40]);
-		h->timing.suspend_ms = ctag_get_le16(&p[42]);
-		h->timing.transfer_ms = ctag_get_le16(&p[44]);
-		h->timing.refresh_ms = ctag_get_le16(&p[46]);
+		h->report.wake_ms = ctag_get_le16(&p[40]);
+		h->report.suspend_ms = ctag_get_le16(&p[42]);
+		h->report.transfer_ms = ctag_get_le16(&p[44]);
+		h->report.refresh_ms = ctag_get_le16(&p[46]);
 		h->update_id = ctag_get_le64(&p[48]);
 		h->result_seq = ctag_get_le16(&p[56]);
+		h->report.stored_epoch = ctag_get_le32(&p[58]);
+		h->report.flags = p[62];
 	}
 }
 
@@ -343,7 +347,7 @@ static struct dlv_result *result_slot(struct dlv *d)
  */
 static void send_result(struct dlv *d, uint64_t update_id, uint32_t tag_id, uint32_t epoch,
 			uint32_t revision, uint8_t status, const uint8_t *digest8,
-			uint16_t battery_mv, const struct dlv_timing *t, int32_t seq, uint32_t now)
+			uint16_t battery_mv, const struct dlv_report *t, int32_t seq, uint32_t now)
 {
 	struct dlv_result *r = result_find(d, update_id);
 
@@ -374,6 +378,8 @@ static void send_result(struct dlv *d, uint64_t update_id, uint32_t tag_id, uint
 		r->msg.suspend_ms = t->suspend_ms;
 		r->msg.transfer_ms = t->transfer_ms;
 		r->msg.refresh_ms = t->refresh_ms;
+		r->msg.stored_epoch = t->stored_epoch;
+		r->msg.flags = t->flags;
 	}
 	d->c.results++;
 	send_result_msg(d, r, now);
@@ -423,7 +429,7 @@ void dlv_result_ack(struct dlv *d, uint16_t result_seq)
  * consumed afterwards, is then dropped at boot), else the consumed record.
  */
 void dlv_finish(struct dlv *d, struct dlv_job *job, uint8_t status, const uint8_t digest8[8],
-		uint16_t battery_mv, const struct dlv_timing *timing, uint32_t now)
+		uint16_t battery_mv, const struct dlv_report *report, uint32_t now)
 {
 	struct dlv_job j = *job;
 	int idx = find_asg(d, j.tag_id);
@@ -449,9 +455,9 @@ void dlv_finish(struct dlv *d, struct dlv_job *job, uint8_t status, const uint8_
 				memcpy(h->digest8, digest8, sizeof(h->digest8));
 			}
 			h->battery_mv = battery_mv;
-			memset(&h->timing, 0, sizeof(h->timing));
-			if (timing != NULL) {
-				h->timing = *timing;
+			memset(&h->report, 0, sizeof(h->report));
+			if (report != NULL) {
+				h->report = *report;
 			}
 			save_hist(d, idx);
 		} else if (j.kind == DLV_CMD && j.cmd == CTAG_TAG_CMD_CLEAR &&
@@ -466,7 +472,7 @@ void dlv_finish(struct dlv *d, struct dlv_job *job, uint8_t status, const uint8_
 		}
 	}
 	send_result(d, j.update_id, j.tag_id, j.epoch, j.revision, status, digest8, battery_mv,
-		    timing, seq, now);
+		    report, seq, now);
 	release_slot(d, job);
 	job_free(d, job);
 }
@@ -787,7 +793,7 @@ static bool duplicate(struct dlv *d, int idx, const struct ctag_mesh_layout_begi
 		}
 		(void)seal_xfer(d, NULL);
 		send_result(d, b->update_id, b->tag_id, b->epoch, b->revision, h->status,
-			    h->digest8, h->battery_mv, &h->timing, seq, now);
+			    h->digest8, h->battery_mv, &h->report, seq, now);
 		return true;
 	}
 	job = find_layout_job(d, b->tag_id, b->epoch, b->revision);
@@ -1162,15 +1168,18 @@ void dlv_stage(struct dlv *d, const struct dlv_job *job, uint8_t stage)
 		 ctag_mesh_delivery_stage_pack(&m, buf, sizeof(buf)));
 }
 
-void dlv_fail_epoch(struct dlv *d, uint32_t tag_id, uint32_t epoch, uint8_t status, uint32_t now)
+void dlv_fail_epoch(struct dlv *d, uint32_t tag_id, uint32_t epoch, uint8_t status,
+		    uint32_t stored_epoch, uint32_t now)
 {
+	const struct dlv_report report = {.stored_epoch = stored_epoch,
+					  .flags = CTAG_RESULT_FLAG_ESCALATED};
 	size_t i;
 
 	for (i = 0; i < DLV_MAX_JOBS; i++) {
 		struct dlv_job *j = &d->jobs[i];
 
 		if (j->used && j->tag_id == tag_id && j->epoch == epoch) {
-			dlv_finish(d, j, status, NULL, 0u, NULL, now);
+			dlv_finish(d, j, status, NULL, 0u, &report, now);
 		}
 	}
 }
