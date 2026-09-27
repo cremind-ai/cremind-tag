@@ -33,8 +33,17 @@ Upsert what the companion physically manages.
 ```json
 {"gateways": [{"hw_id": "gw-<uuid>", "fw": "0.1.0", "board": 1, "boot_id": 123, "port": "COM7"}],
  "bridges":  [{"hw_id": "br-<mesh-uuid>", "addr": 2, "fw": "0.1.0", "board": 3, "fontpack_id": "a1b2c3d4e5f60718", "flash_size": 67108864}],
- "tags":     [{"tag_id": "1A2B3C4D", "board": 16, "panel": 1, "width": 400, "height": 300, "planes": 1, "fw": "0.1.0"}]}
+ "tags":     [{"tag_id": "1A2B3C4D", "board": 16, "panel": 1, "width": 400, "height": 300, "planes": 1, "fw": "0.1.0", "epoch": 5}]}
 ```
+
+`epoch` (optional, u32) is the highest assignment epoch the companion has used
+for the tag or learned from it (a tag reports its `stored_epoch` in every
+`CHALLENGE`). Cremind keeps `epoch = max(stored, reported)`, so a tag that was
+forgotten and re-reported, or a restore that rewound epochs, never falls below
+the epoch the tag will accept. When the reported epoch is ahead of work Cremind
+still owes, that work is re-queued at `reported + 1` (`assign_tag` for an owned
+tag with a bridge, `clear_tag` for a pending clear) and the tag's active
+deliveries move to the new epoch.
 → `{"devices": [...device rows...], "assignments": [{"tag_id", "owner_profile", "bridge_hw_id", "epoch", "rotation"}]}`
 
 ### `POST heartbeat`

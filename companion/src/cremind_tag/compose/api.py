@@ -2,7 +2,9 @@
 
 Implemented by `cremind_tag.compose.screen.compose_screen`; called by the daemon
 (`cremind_tag.daemon`) every time a tag's active card set or clock line changes.
-See docs/connector-api.md "Screen model".
+See docs/connector-api.md "Screen model" and docs/layout.md. Also in
+`compose.screen`: ``compose_identify(panel, fonts, tag_id=None)`` and
+``compose_blank(panel)``; previews in `compose.preview` (``preview_png``).
 """
 
 from __future__ import annotations
@@ -56,11 +58,14 @@ class ComposedScreen:
     layout: bytes
     """Encoded logical screen (docs/protocol.md §4), already validated."""
     delivery_ids: tuple[int, ...]
-    """Deliveries whose cards this screen shows (all become `displayed` together)."""
+    """Deliveries whose cards this screen shows (all become `displayed` together), in display order
+    (headline first). Cards only counted in the footer are NOT included (docs/layout.md "Delivery ids")."""
     pending_count: int
     """Active cards not shown for lack of space ("N more updates waiting for this tag")."""
     unsupported_chars: tuple[str, ...] = field(default=())
     """Characters no face in the pack covers (reported in previews and diagnostics)."""
+    pending_delivery_ids: tuple[int, ...] = field(default=())
+    """The deliveries counted in the footer (``len == pending_count``); they stay undisplayed."""
 
 
 class Composer(Protocol):
