@@ -5,6 +5,10 @@
  * the maintenance thread feeds maint_rx() and so processes one frame at a
  * time. The receive ring holds the frames HELLO's caps.credits lets the host
  * send ahead.
+ *
+ * The maintenance thread is the main thread: once main() has started the
+ * bridge work queue it runs maint_port_run(), so one stack
+ * (CONFIG_MAIN_STACK_SIZE) serves the boot and then the port.
  */
 #include <errno.h>
 #include <string.h>
@@ -24,7 +28,7 @@
 LOG_MODULE_REGISTER(bridge_maint, LOG_LEVEL_INF);
 
 #define RX_RING (MAINT_CREDITS * CTAG_COBS_MAX_ENCODED(MAINT_MAX_FRAME) + 256)
-#define TX_RING 512
+#define TX_RING CONFIG_CTAG_BRIDGE_MAINT_TX_RING
 #define TX_WAIT_MS 100
 #define TX_GIVE_UP_MS 1000
 
@@ -34,6 +38,7 @@ RING_BUF_DECLARE(rx_ring, RX_RING);
 RING_BUF_DECLARE(tx_ring, TX_RING);
 static K_SEM_DEFINE(rx_sem, 0, 1);
 static K_SEM_DEFINE(tx_sem, 0, 1);
+static K_SEM_DEFINE(started, 0, 1);
 static struct maint maint;
 static uint32_t rx_overflow;
 static uint32_t tx_timeouts;
@@ -101,14 +106,11 @@ static void port_reboot(void *ctx)
 
 static size_t port_counters(void *ctx, struct ctag_cbor_counter *items, size_t max)
 {
-	const struct ctag_cbor_counter own[] = {
-		CTAG_CBOR_COUNTER("rx_overflow", rx_overflow),
-		CTAG_CBOR_COUNTER("tx_timeouts", tx_timeouts),
-	};
-	size_t n = MIN(max, ARRAY_SIZE(own));
+	size_t n = 0u;
 
 	ARG_UNUSED(ctx);
-	memcpy(items, own, n * sizeof(own[0]));
+	BRIDGE_COUNTER("rx_overflow", rx_overflow);
+	BRIDGE_COUNTER("tx_timeouts", tx_timeouts);
 	return n + bridge_counters(&items[n], max - n);
 }
 
@@ -138,13 +140,28 @@ static int sha_finish(void *ctx, uint8_t digest[32])
 
 static const struct ctag_sha256_ops sha = {sha_init, sha_update, sha_finish, &sha_ctx};
 
-static void maint_thread(void *a, void *b, void *c)
+int maint_port_start(void)
+{
+	if (!device_is_ready(uart)) {
+		return -ENODEV;
+	}
+	maint_init(&maint, &io, NULL, &br.fonts, &sha, br.boot_id, BRIDGE_FW, CTAG_BRIDGE_BUILD,
+		   CONFIG_CTAG_BRIDGE_BOARD_ID);
+	uart_irq_rx_disable(uart);
+	uart_irq_tx_disable(uart);
+	(void)uart_irq_callback_user_data_set(uart, isr, NULL);
+	uart_irq_rx_enable(uart);
+	k_sem_give(&started);
+	return 0;
+}
+
+void maint_port_run(void)
 {
 	uint8_t buf[64];
 
-	ARG_UNUSED(a);
-	ARG_UNUSED(b);
-	ARG_UNUSED(c);
+	k_thread_priority_set(k_current_get(), CONFIG_CTAG_BRIDGE_MAINT_PRIORITY);
+	k_thread_name_set(k_current_get(), "maint");
+	(void)k_sem_take(&started, K_FOREVER);
 	for (;;) {
 		uint32_t n;
 
@@ -161,24 +178,4 @@ static void maint_thread(void *a, void *b, void *c)
 			}
 		}
 	}
-}
-
-K_THREAD_STACK_DEFINE(maint_stack, CONFIG_CTAG_BRIDGE_MAINT_STACK_SIZE);
-static struct k_thread maint_tid;
-
-int maint_port_start(void)
-{
-	if (!device_is_ready(uart)) {
-		return -ENODEV;
-	}
-	maint_init(&maint, &io, NULL, &br.fonts, &sha, br.boot_id, BRIDGE_FW, CTAG_BRIDGE_BUILD,
-		   CONFIG_CTAG_BRIDGE_BOARD_ID);
-	uart_irq_rx_disable(uart);
-	uart_irq_tx_disable(uart);
-	(void)uart_irq_callback_user_data_set(uart, isr, NULL);
-	uart_irq_rx_enable(uart);
-	k_thread_create(&maint_tid, maint_stack, K_THREAD_STACK_SIZEOF(maint_stack), maint_thread,
-			NULL, NULL, NULL, CONFIG_CTAG_BRIDGE_MAINT_PRIORITY, 0, K_NO_WAIT);
-	k_thread_name_set(&maint_tid, "maint");
-	return 0;
 }

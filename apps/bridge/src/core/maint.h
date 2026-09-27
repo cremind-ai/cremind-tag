@@ -26,7 +26,7 @@
 #define MAINT_TX_FRAME  CONFIG_CTAG_BRIDGE_MAINT_TX_FRAME
 #define MAINT_CREDITS   CONFIG_CTAG_BRIDGE_MAINT_CREDITS
 #define MAINT_FT_CACHE  4u
-#define MAINT_COUNTERS  48u
+#define MAINT_COUNTERS  64u /* every bridge counter (59) fits; INFO stays below MAINT_TX_FRAME */
 
 struct maint_io {
 	void (*write)(void *ctx, const uint8_t *data, size_t len);
@@ -74,8 +74,10 @@ struct maint {
 	uint8_t ft_next;
 	struct maint_counters c;
 	uint8_t rxbuf[MAINT_MAX_FRAME] __aligned(4);
-	uint8_t tx[MAINT_TX_FRAME] __aligned(4); /* COBS-encoded on the way out */
-	uint8_t scratch[CONFIG_CTAG_BRIDGE_MAINT_SCRATCH] __aligned(4);
+	/* The response being sent or held; COBS-encoded on the way out. Also
+	 * FONT_COMMIT's read buffer: a held response is replaced by the next
+	 * one anyway (it only waits for a credit the host has not sent). */
+	uint8_t tx[MAINT_TX_FRAME] __aligned(4);
 };
 
 void maint_init(struct maint *m, const struct maint_io *io, void *ctx, struct fontstore *fonts,

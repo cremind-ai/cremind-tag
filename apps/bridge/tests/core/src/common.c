@@ -111,6 +111,7 @@ struct kv {
 };
 
 static struct kv kv[96];
+void (*save_probe)(const char *name);
 
 void kv_clear(void)
 {
@@ -123,6 +124,9 @@ int kv_save(void *ctx, const char *name, const void *data, size_t len)
 	size_t i;
 
 	ARG_UNUSED(ctx);
+	if (save_probe != NULL) {
+		save_probe(name);
+	}
 	zassert_true(len <= sizeof(kv[0].data), "record %s too long (%zu)", name, len);
 	for (i = 0; i < ARRAY_SIZE(kv); i++) {
 		if (kv[i].used && strcmp(kv[i].name, name) == 0) {
@@ -184,6 +188,7 @@ bool kv_get(const char *name, void *data, size_t *len)
 
 struct sent_msg sent_log[128];
 size_t sent_n;
+void (*send_probe)(uint8_t op, const uint8_t *params, size_t len);
 
 void sent_clear(void)
 {
@@ -194,6 +199,9 @@ void record_send(void *ctx, uint8_t op, const uint8_t *params, size_t len)
 {
 	ARG_UNUSED(ctx);
 	zassert_true(len <= CTAG_MESH_MAX_VENDOR_PARAMS);
+	if (send_probe != NULL) {
+		send_probe(op, params, len);
+	}
 	if (sent_n < ARRAY_SIZE(sent_log)) {
 		sent_log[sent_n].op = op;
 		sent_log[sent_n].len = (uint8_t)len;
@@ -246,6 +254,41 @@ size_t results_for(uint64_t update_id)
 	return n;
 }
 
+void assert_one_seq_per_update(void)
+{
+	size_t i, k;
+
+	for (i = 0; i < sent_n; i++) {
+		struct ctag_mesh_delivery_result a, b;
+
+		if (sent_log[i].op != CTAG_MESH_OP_DELIVERY_RESULT ||
+		    ctag_mesh_delivery_result_unpack(&a, sent_log[i].data, sent_log[i].len) != 0) {
+			continue;
+		}
+		for (k = i + 1u; k < sent_n; k++) {
+			if (sent_log[k].op != CTAG_MESH_OP_DELIVERY_RESULT ||
+			    ctag_mesh_delivery_result_unpack(&b, sent_log[k].data, sent_log[k].len) !=
+				    0) {
+				continue;
+			}
+			if (a.update_id == b.update_id) {
+				zassert_equal(a.result_seq, b.result_seq,
+					      "update_id %llu: result_seq %u and %u",
+					      (unsigned long long)a.update_id, a.result_seq,
+					      b.result_seq);
+				zassert_true(a.status == b.status && a.tag_id == b.tag_id &&
+						     a.epoch == b.epoch && a.revision == b.revision &&
+						     memcmp(a.digest, b.digest, sizeof(a.digest)) == 0,
+					     "update_id %llu: another result",
+					     (unsigned long long)a.update_id);
+			} else {
+				zassert_not_equal(a.result_seq, b.result_seq,
+						  "result_seq %u for two update_ids", a.result_seq);
+			}
+		}
+	}
+}
+
 /* ---- Environment ---- */
 
 void env_boot(uint32_t now)
@@ -264,13 +307,15 @@ void env_boot(uint32_t now)
 	env.flash_ok = benv.flash_ok;
 	dlv_init(&benv.dlv, &env);
 	kv_replay(&benv.dlv);
-	dlv_start(&benv.dlv, now, scratch, sizeof(scratch));
+	dlv_start(&benv.dlv, now);
 	small_layout = v_layouts_valid[0].data;
 	small_layout_len = v_layouts_valid[0].len;
 }
 
 void env_fresh(uint32_t now)
 {
+	save_probe = NULL;
+	send_probe = NULL;
 	flash_wipe();
 	kv_clear();
 	sent_clear();
@@ -311,8 +356,8 @@ void layout_digest(const uint8_t *layout, size_t len, uint8_t digest[CTAG_LAYOUT
 	memcpy(digest, full, CTAG_LAYOUT_DIGEST_LEN);
 }
 
-uint8_t deliver(struct dlv *d, const struct xfer *x, const uint8_t *layout, size_t len,
-		uint32_t skip, uint32_t now, uint32_t *missing)
+void transfer(struct dlv *d, const struct xfer *x, const uint8_t *layout, size_t len,
+	      uint32_t skip)
 {
 	struct ctag_mesh_layout_begin b = {
 		.xfer_id = x->xfer_id,
@@ -323,7 +368,6 @@ uint8_t deliver(struct dlv *d, const struct xfer *x, const uint8_t *layout, size
 		.total_len = (uint16_t)len,
 		.chunk_count = (uint8_t)DIV_ROUND_UP(len, CTAG_LAYOUT_CHUNK_DATA_MAX),
 	};
-	uint32_t dummy;
 	size_t i;
 
 	memcpy(b.fontpack_id, x->fontpack_id != NULL ? x->fontpack_id : fixture_pack_id, 8);
@@ -342,6 +386,14 @@ uint8_t deliver(struct dlv *d, const struct xfer *x, const uint8_t *layout, size
 			dlv_layout_chunk(d, &c);
 		}
 	}
+}
+
+uint8_t deliver(struct dlv *d, const struct xfer *x, const uint8_t *layout, size_t len,
+		uint32_t skip, uint32_t now, uint32_t *missing)
+{
+	uint32_t dummy;
+
+	transfer(d, x, layout, len, skip);
 	return dlv_layout_commit(d, x->xfer_id, now, missing != NULL ? missing : &dummy);
 }
 

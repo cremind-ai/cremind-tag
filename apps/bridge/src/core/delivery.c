@@ -10,7 +10,13 @@
 
 #define SENDS_MAX (1u + CTAG_MESH_RESULT_RETRIES)
 #define ASG_LEN   28u
-#define HIST_LEN  52u
+#define HIST_LEN  64u
+#define NEW_SEQ   (-1)
+#define RESTORED  0x80u /* job flag during dlv_start: ordered by restore_order() */
+
+/* Every layout job can hold a ring slot while a transfer takes one more. */
+BUILD_ASSERT(DLV_MAX_JOBS < BFLASH_PENDING_MIN, "pending ring smaller than the job table");
+BUILD_ASSERT(DLV_MAX_TAGS >= 1 && DLV_MAX_TAGS <= CTAG_MAX_TAGS_PER_BRIDGE, "assignment table");
 
 static bool due(uint32_t now, uint32_t at)
 {
@@ -21,7 +27,7 @@ static int find_asg(const struct dlv *d, uint32_t tag_id)
 {
 	int i;
 
-	for (i = 0; i < CTAG_MAX_TAGS_PER_BRIDGE; i++) {
+	for (i = 0; i < DLV_MAX_TAGS; i++) {
 		if (d->asg[i].used && d->asg[i].tag_id == tag_id) {
 			return i;
 		}
@@ -83,6 +89,8 @@ static void save_hist(struct dlv *d, int idx)
 	ctag_put_le16(&buf[42], h->timing.suspend_ms);
 	ctag_put_le16(&buf[44], h->timing.transfer_ms);
 	ctag_put_le16(&buf[46], h->timing.refresh_ms);
+	ctag_put_le64(&buf[48], h->update_id);
+	ctag_put_le16(&buf[56], h->result_seq);
 	save(d, 'h', idx, buf, sizeof(buf));
 }
 
@@ -107,7 +115,7 @@ static int parse_index(const char *s)
 		}
 		v = v * 10 + (*s - '0');
 	}
-	return v < CTAG_MAX_TAGS_PER_BRIDGE ? v : -1;
+	return v < DLV_MAX_TAGS ? v : -1;
 }
 
 void dlv_restore(struct dlv *d, const char *name, const void *data, size_t len)
@@ -150,6 +158,8 @@ void dlv_restore(struct dlv *d, const char *name, const void *data, size_t len)
 		h->timing.suspend_ms = ctag_get_le16(&p[42]);
 		h->timing.transfer_ms = ctag_get_le16(&p[44]);
 		h->timing.refresh_ms = ctag_get_le16(&p[46]);
+		h->update_id = ctag_get_le64(&p[48]);
+		h->result_seq = ctag_get_le16(&p[56]);
 	}
 }
 
@@ -170,6 +180,14 @@ static struct dlv_job *job_alloc(struct dlv *d)
 	}
 	d->c.jobs_dropped++;
 	return NULL;
+}
+
+static void job_free(struct dlv *d, struct dlv_job *job)
+{
+	if (d->lb_job == job) {
+		d->lb_job = NULL;
+	}
+	job->used = 0u;
 }
 
 static bool slot_in_use(const struct dlv *d, uint16_t slot)
@@ -227,38 +245,16 @@ static struct dlv_job *find_layout_job(struct dlv *d, uint32_t tag_id, uint32_t 
 	return NULL;
 }
 
-/* Write a layout job's record (from buf) into a fresh ring slot. */
-static int store_layout(struct dlv *d, struct dlv_job *job, const uint8_t *buf)
+static struct dlv_job *find_update_job(struct dlv *d, uint64_t update_id)
 {
-	struct bflash_pending h = {
-		.seq = d->pending_seq + 1u,
-		.tag_id = job->tag_id,
-		.epoch = job->epoch,
-		.revision = job->revision,
-		.update_id = job->update_id,
-		.len = job->len,
-	};
-	uint16_t slot;
-	int err;
+	size_t i;
 
-	if (!d->env.flash_ok) {
-		return -ENODEV;
+	for (i = 0; i < DLV_MAX_JOBS; i++) {
+		if (d->jobs[i].used && d->jobs[i].update_id == update_id) {
+			return &d->jobs[i];
+		}
 	}
-	slot = ring_alloc(d);
-	if (slot == DLV_NO_SLOT) {
-		return -ENOSPC;
-	}
-	memcpy(h.fontpack_id, job->fontpack_id, sizeof(h.fontpack_id));
-	memcpy(h.digest, job->digest, sizeof(h.digest));
-	err = bflash_pending_write(d->env.flash, slot, &h, buf);
-	if (err != 0) {
-		d->c.storage_errors++;
-		return err;
-	}
-	d->pending_seq = h.seq;
-	release_slot(d, job); /* the previous record of this job, if any */
-	job->slot = slot;
-	return 0;
+	return NULL;
 }
 
 /* ---- Results ---- */
@@ -279,36 +275,91 @@ static void send_msg(struct dlv *d, uint8_t op, const uint8_t *buf, int len)
 	}
 }
 
-static void send_result_msg(struct dlv *d, const struct ctag_mesh_delivery_result *m)
+static void send_result_msg(struct dlv *d, struct dlv_result *r, uint32_t now)
 {
 	uint8_t buf[CTAG_MESH_DELIVERY_RESULT_LEN];
 
 	send_msg(d, CTAG_MESH_OP_DELIVERY_RESULT, buf,
-		 ctag_mesh_delivery_result_pack(m, buf, sizeof(buf)));
+		 ctag_mesh_delivery_result_pack(&r->msg, buf, sizeof(buf)));
+	r->sends++;
+	r->due_ms = now + CTAG_MESH_RESULT_RETRY_MS;
 }
 
-static void send_result(struct dlv *d, uint64_t update_id, uint32_t tag_id, uint32_t epoch,
-			uint32_t revision, uint8_t status, const uint8_t *digest8,
-			uint16_t battery_mv, const struct dlv_timing *t, uint32_t now)
+static struct dlv_result *result_find(struct dlv *d, uint64_t update_id)
 {
-	struct dlv_result *r = NULL;
 	size_t i;
 
 	for (i = 0; i < DLV_RESULT_SLOTS; i++) {
-		if (!d->results[i].used) {
-			r = &d->results[i];
-			break;
-		}
-		if (r == NULL || d->results[i].sends > r->sends) {
-			r = &d->results[i];
+		if (d->results[i].state != DLV_RES_FREE && d->results[i].msg.update_id == update_id) {
+			return &d->results[i];
 		}
 	}
-	if (r->used) {
-		d->c.results_dropped++; /* the one closest to giving up anyway */
+	return NULL;
+}
+
+/* The result_seq of update_id's result: the one it already has, else a new one. */
+static uint16_t result_seq_for(struct dlv *d, uint64_t update_id)
+{
+	const struct dlv_result *r = result_find(d, update_id);
+
+	return r != NULL ? r->msg.result_seq : alloc_seq(d);
+}
+
+/* A table entry for a new result: a free one, else the oldest finished one
+ * (acknowledged or given up), else the one closest to giving up. */
+static struct dlv_result *result_slot(struct dlv *d)
+{
+	struct dlv_result *best = NULL;
+	uint16_t best_age = 0u;
+	size_t i;
+
+	for (i = 0; i < DLV_RESULT_SLOTS; i++) {
+		struct dlv_result *r = &d->results[i];
+		uint16_t age = (uint16_t)(d->next_seq - r->msg.result_seq);
+
+		if (r->state == DLV_RES_FREE) {
+			return r;
+		}
+		if (r->state != DLV_RES_SENDING && (best == NULL || best->state == DLV_RES_SENDING ||
+						    age > best_age)) {
+			best = r;
+			best_age = age;
+		} else if (r->state == DLV_RES_SENDING && (best == NULL ||
+			   (best->state == DLV_RES_SENDING && r->sends > best->sends))) {
+			best = r;
+		}
 	}
+	if (best->state == DLV_RES_SENDING) {
+		d->c.results_dropped++;
+	}
+	return best;
+}
+
+/*
+ * DELIVERY_RESULT for update_id (seq: its result_seq, or NEW_SEQ). 10: one
+ * result_seq per update_id. When the table already has a result for it, that
+ * first result stands: it is sent again under its own result_seq (with a
+ * fresh retry budget) unless its re-sends are still running.
+ */
+static void send_result(struct dlv *d, uint64_t update_id, uint32_t tag_id, uint32_t epoch,
+			uint32_t revision, uint8_t status, const uint8_t *digest8,
+			uint16_t battery_mv, const struct dlv_timing *t, int32_t seq, uint32_t now)
+{
+	struct dlv_result *r = result_find(d, update_id);
+
+	if (r != NULL) {
+		d->c.results_repeated++;
+		if (r->state != DLV_RES_SENDING) {
+			r->state = DLV_RES_SENDING;
+			r->sends = 0u;
+			send_result_msg(d, r, now);
+		}
+		return;
+	}
+	r = result_slot(d);
 	memset(r, 0, sizeof(*r));
-	r->used = 1u;
-	r->msg.result_seq = alloc_seq(d);
+	r->state = DLV_RES_SENDING;
+	r->msg.result_seq = seq >= 0 ? (uint16_t)seq : alloc_seq(d);
 	r->msg.update_id = update_id;
 	r->msg.tag_id = tag_id;
 	r->msg.epoch = epoch;
@@ -325,9 +376,7 @@ static void send_result(struct dlv *d, uint64_t update_id, uint32_t tag_id, uint
 		r->msg.refresh_ms = t->refresh_ms;
 	}
 	d->c.results++;
-	send_result_msg(d, &r->msg);
-	r->sends = 1u;
-	r->due_ms = now + CTAG_MESH_RESULT_RETRY_MS;
+	send_result_msg(d, r, now);
 }
 
 uint32_t dlv_tick(struct dlv *d, uint32_t now)
@@ -338,19 +387,17 @@ uint32_t dlv_tick(struct dlv *d, uint32_t now)
 	for (i = 0; i < DLV_RESULT_SLOTS; i++) {
 		struct dlv_result *r = &d->results[i];
 
-		if (!r->used) {
+		if (r->state != DLV_RES_SENDING) {
 			continue;
 		}
 		if (due(now, r->due_ms)) {
 			if (r->sends >= SENDS_MAX) {
-				r->used = 0u;
+				r->state = DLV_RES_GAVE_UP; /* kept: its update_id keeps its seq */
 				d->c.results_unacked++;
 				continue;
 			}
 			d->c.result_resends++;
-			send_result_msg(d, &r->msg);
-			r->sends++;
-			r->due_ms = now + CTAG_MESH_RESULT_RETRY_MS;
+			send_result_msg(d, r, now);
 		}
 		next = MIN(next, r->due_ms - now);
 	}
@@ -362,28 +409,41 @@ void dlv_result_ack(struct dlv *d, uint16_t result_seq)
 	size_t i;
 
 	for (i = 0; i < DLV_RESULT_SLOTS; i++) {
-		if (d->results[i].used && d->results[i].msg.result_seq == result_seq) {
-			d->results[i].used = 0u;
+		if (d->results[i].state != DLV_RES_FREE &&
+		    d->results[i].msg.result_seq == result_seq) {
+			d->results[i].state = DLV_RES_ACKED;
 		}
 	}
 }
 
+/*
+ * A job's final result. Before the DELIVERY_RESULT goes out, whatever keeps
+ * the layout from being delivered again after a reset is durable: the
+ * history's stored result for the revision it records (its pending record,
+ * consumed afterwards, is then dropped at boot), else the consumed record.
+ */
 void dlv_finish(struct dlv *d, struct dlv_job *job, uint8_t status, const uint8_t digest8[8],
 		uint16_t battery_mv, const struct dlv_timing *timing, uint32_t now)
 {
 	struct dlv_job j = *job;
 	int idx = find_asg(d, j.tag_id);
+	struct dlv_history *h = idx >= 0 ? &d->hist[idx] : NULL;
+	bool recorded = h != NULL && j.kind == DLV_LAYOUT && h->valid && h->tag_id == j.tag_id &&
+			h->epoch == j.epoch && h->revision == j.revision &&
+			memcmp(h->digest, j.digest, sizeof(h->digest)) == 0;
+	int32_t seq = NEW_SEQ;
 
-	release_slot(d, job);
-	job->used = 0u;
-	if (idx >= 0) {
-		struct dlv_history *h = &d->hist[idx];
-
-		if (j.kind == DLV_LAYOUT && h->valid && h->tag_id == j.tag_id &&
-		    h->epoch == j.epoch && h->revision == j.revision &&
-		    memcmp(h->digest, j.digest, sizeof(h->digest)) == 0) {
+	if (!recorded) {
+		release_slot(d, job);
+	}
+	if (h != NULL) {
+		if (recorded) {
+			/* Persisted before it is sent: the result and its seq. */
+			seq = result_seq_for(d, j.update_id);
 			h->has_result = 1u;
 			h->status = status;
+			h->update_id = j.update_id;
+			h->result_seq = (uint16_t)seq;
 			memset(h->digest8, 0, sizeof(h->digest8));
 			if (digest8 != NULL) {
 				memcpy(h->digest8, digest8, sizeof(h->digest8));
@@ -406,17 +466,21 @@ void dlv_finish(struct dlv *d, struct dlv_job *job, uint8_t status, const uint8_
 		}
 	}
 	send_result(d, j.update_id, j.tag_id, j.epoch, j.revision, status, digest8, battery_mv,
-		    timing, now);
+		    timing, seq, now);
+	release_slot(d, job);
+	job_free(d, job);
 }
 
-static void cancel_tag(struct dlv *d, uint32_t tag_id, uint32_t older_than, uint32_t now)
+/* CANCELLED for the tag's jobs of epoch <= upto (not one in a session:
+ * dlv_session_over() ends it when its session does). */
+static void cancel_tag(struct dlv *d, uint32_t tag_id, uint32_t upto, uint32_t now)
 {
 	size_t i;
 
 	for (i = 0; i < DLV_MAX_JOBS; i++) {
 		struct dlv_job *j = &d->jobs[i];
 
-		if (j->used && j->tag_id == tag_id && j->epoch < older_than &&
+		if (j->used && j->tag_id == tag_id && j->epoch <= upto &&
 		    !(j->flags & DLV_JOB_IN_SESSION)) {
 			d->c.cancelled++;
 			dlv_finish(d, j, CTAG_STATUS_CANCELLED, NULL, 0u, NULL, now);
@@ -431,7 +495,7 @@ void dlv_init(struct dlv *d, const struct dlv_env *env)
 	memset(d, 0, sizeof(*d));
 	d->env = *env;
 	d->env.flash_ok = env->flash_ok && env->flash != NULL && env->flash->geom.pending_slots > 0u;
-	ctag_layout_asm_init(&d->asm_, d->asm_buf, sizeof(d->asm_buf));
+	d->x.slot = DLV_NO_SLOT;
 	d->next_seq = 1u;
 }
 
@@ -447,21 +511,23 @@ static void restore_order(struct dlv *d)
 		for (i = 0; i < DLV_MAX_JOBS; i++) {
 			struct dlv_job *j = &d->jobs[i];
 
-			if (j->used && (j->flags & 0x80u) && (best == NULL || j->order < best->order)) {
+			if (j->used && (j->flags & RESTORED) &&
+			    (best == NULL || j->order < best->order)) {
 				best = j;
 			}
 		}
 		if (best == NULL) {
 			break;
 		}
-		best->flags &= (uint8_t)~0x80u;
+		best->flags &= (uint8_t)~RESTORED;
 		for (k = 0; k < DLV_MAX_JOBS; k++) {
 			struct dlv_job *o = &d->jobs[k];
 
-			if (o != best && o->used && (o->flags & 0x80u) && o->tag_id == best->tag_id &&
-			    o->epoch == best->epoch && o->revision == best->revision) {
+			if (o != best && o->used && (o->flags & RESTORED) &&
+			    o->tag_id == best->tag_id && o->epoch == best->epoch &&
+			    o->revision == best->revision) {
 				release_slot(d, best);
-				best->used = 0u;
+				job_free(d, best);
 				break;
 			}
 		}
@@ -471,17 +537,17 @@ static void restore_order(struct dlv *d)
 	}
 }
 
-void dlv_start(struct dlv *d, uint32_t now, uint8_t *scratch, size_t size)
+void dlv_start(struct dlv *d, uint32_t now)
 {
 	struct bflash_pending h;
 	uint32_t max_seq = 0u;
-	uint16_t head = 0u, s;
+	uint16_t head = 0u, newest = DLV_NO_SLOT, s;
 	int i;
 
 	d->next_seq = d->reserve_end != 0u ? d->reserve_end : 1u;
 	d->reserve_end = (uint16_t)(d->next_seq + DLV_SEQ_RESERVE);
 	save_seq(d);
-	for (i = 0; i < CTAG_MAX_TAGS_PER_BRIDGE; i++) {
+	for (i = 0; i < DLV_MAX_TAGS; i++) {
 		if (d->hist[i].valid && (!d->asg[i].used || d->hist[i].tag_id != d->asg[i].tag_id)) {
 			memset(&d->hist[i], 0, sizeof(d->hist[i]));
 			save_hist(d, i);
@@ -499,7 +565,8 @@ void dlv_start(struct dlv *d, uint32_t now, uint8_t *scratch, size_t size)
 		if (st <= 0) {
 			continue;
 		}
-		if (h.seq >= max_seq) {
+		if (newest == DLV_NO_SLOT || h.seq >= max_seq) {
+			newest = s;
 			max_seq = h.seq;
 			head = (uint16_t)((s + 1u) % d->env.flash->geom.pending_slots);
 		}
@@ -515,7 +582,9 @@ void dlv_start(struct dlv *d, uint32_t now, uint8_t *scratch, size_t size)
 				 hi->revision == h.revision &&
 				 memcmp(hi->digest, h.digest, sizeof(h.digest)) == 0);
 		}
-		job = keep && bflash_pending_read(d->env.flash, s, &h, scratch, size) == 1
+		/* The shared buffer is free at boot: the CRC check reads into it. */
+		job = keep && bflash_pending_read(d->env.flash, s, &h, d->layout,
+						  sizeof(d->layout)) == 1
 			      ? job_alloc(d)
 			      : NULL;
 		if (job == NULL) {
@@ -523,7 +592,7 @@ void dlv_start(struct dlv *d, uint32_t now, uint8_t *scratch, size_t size)
 			continue;
 		}
 		job->kind = DLV_LAYOUT;
-		job->flags = 0x80u; /* restored: ordered below */
+		job->flags = RESTORED;
 		job->slot = s;
 		job->len = h.len;
 		job->order = h.seq;
@@ -535,9 +604,18 @@ void dlv_start(struct dlv *d, uint32_t now, uint8_t *scratch, size_t size)
 		memcpy(job->digest, h.digest, sizeof(job->digest));
 		memcpy(job->fontpack_id, h.fontpack_id, sizeof(job->fontpack_id));
 	}
+	/* The newest intact record names the last accepted transfer: a repeated
+	 * commit of it answers DUPLICATE after the reset too (10). A torn one
+	 * (power lost while sealing) was answered STORAGE_ERROR. */
+	if (newest != DLV_NO_SLOT && bflash_pending_check(d->env.flash, newest, &h, d->layout,
+							  sizeof(d->layout)) > 0) {
+		d->x.begin.xfer_id = h.xfer_id;
+		d->x.accepted = true;
+	}
 	d->pending_seq = max_seq;
 	d->ring_head = head;
 	d->order = 0u;
+	d->lb_job = NULL;
 	restore_order(d);
 }
 
@@ -548,47 +626,168 @@ void dlv_reset(struct dlv *d)
 	for (i = 0; i < DLV_MAX_JOBS; i++) {
 		if (d->jobs[i].used) {
 			release_slot(d, &d->jobs[i]);
-			d->jobs[i].used = 0u;
+			job_free(d, &d->jobs[i]);
 		}
 	}
-	for (i = 0; i < CTAG_MAX_TAGS_PER_BRIDGE; i++) {
+	for (i = 0; i < DLV_MAX_TAGS; i++) {
 		memset(&d->asg[i], 0, sizeof(d->asg[i]));
 		memset(&d->hist[i], 0, sizeof(d->hist[i]));
 		save_asg(d, (int)i);
 		save_hist(d, (int)i);
 	}
 	memset(d->results, 0, sizeof(d->results));
-	ctag_layout_asm_cancel(&d->asm_);
+	memset(&d->x, 0, sizeof(d->x));
+	d->x.slot = DLV_NO_SLOT;
 }
 
 /* ---- LAYOUT_SRV ---- */
 
 void dlv_layout_begin(struct dlv *d, const struct ctag_mesh_layout_begin *b)
 {
-	ctag_layout_asm_begin(&d->asm_, b);
+	struct dlv_xfer *x = &d->x;
+	uint16_t slot;
+
+	memset(x, 0, sizeof(*x));
+	x->begin = *b;
+	x->active = true;
+	x->slot = DLV_NO_SLOT;
+	/* A transfer that fails TOO_LARGE / INVALID on its length needs no slot. */
+	if (!d->env.flash_ok || b->total_len == 0u || b->total_len > CTAG_LAYOUT_HARD_MAX) {
+		return;
+	}
+	slot = ring_alloc(d);
+	if (slot == DLV_NO_SLOT || bflash_pending_erase(d->env.flash, slot) != 0) {
+		d->c.storage_errors++; /* the commit answers STORAGE_ERROR */
+		return;
+	}
+	x->slot = slot;
 }
 
 void dlv_layout_chunk(struct dlv *d, const struct ctag_mesh_layout_chunk *c)
 {
-	if (ctag_layout_asm_chunk(&d->asm_, c) != CTAG_STATUS_OK) {
-		d->c.stray_chunks++;
+	struct dlv_xfer *x = &d->x;
+	uint32_t bit;
+
+	if (!x->active || c->xfer_id != x->begin.xfer_id || c->index >= x->begin.chunk_count ||
+	    c->index >= BFLASH_PENDING_CHUNKS) {
+		d->c.stray_chunks++; /* 3.3: another transfer, or an index outside it */
+		return;
 	}
+	bit = (uint32_t)1u << c->index;
+	if (x->have & bit) {
+		return; /* a repeat: the chunk is in flash already */
+	}
+	if (c->index + 1u == x->begin.chunk_count) {
+		x->last_len = (uint16_t)c->data_len;
+	} else if (c->data_len != CTAG_LAYOUT_CHUNK_DATA_MAX) {
+		x->bad = true; /* 3.2 rule 2: every chunk but the last is full */
+	}
+	/* Chunks past LAYOUT_HARD_MAX belong to a TOO_LARGE transfer: not stored. */
+	if (x->slot != DLV_NO_SLOT && c->data_len > 0u &&
+	    (size_t)c->index * CTAG_LAYOUT_CHUNK_DATA_MAX + c->data_len <= CTAG_LAYOUT_HARD_MAX &&
+	    bflash_pending_put(d->env.flash, x->slot, c->index, c->data, c->data_len) != 0) {
+		d->c.storage_errors++;
+		x->slot = DLV_NO_SLOT;
+	}
+	x->have |= bit;
+}
+
+/*
+ * The transfer into the shared buffer (the session's copy is gone until it
+ * reloads) and its digest (3.3): OK, STORAGE_ERROR, INTERNAL or
+ * DIGEST_MISMATCH.
+ */
+static uint8_t load_xfer(struct dlv *d, size_t len)
+{
+	const struct ctag_sha256_ops *sha = d->env.sha;
+	uint8_t digest[32];
+
+	d->lb_job = NULL;
+	if (len > 0u) {
+		if (d->x.slot == DLV_NO_SLOT) {
+			return CTAG_STATUS_STORAGE_ERROR;
+		}
+		if (bflash_pending_body(d->env.flash, d->x.slot, d->layout, len) != 0) {
+			d->c.storage_errors++;
+			return CTAG_STATUS_STORAGE_ERROR;
+		}
+	}
+	if (sha->init(sha->ctx) != 0 || sha->update(sha->ctx, d->layout, len) != 0 ||
+	    sha->finish(sha->ctx, digest) != 0) {
+		return CTAG_STATUS_INTERNAL;
+	}
+	return memcmp(digest, d->x.begin.digest, CTAG_LAYOUT_DIGEST_LEN) == 0
+		       ? CTAG_STATUS_OK
+		       : CTAG_STATUS_DIGEST_MISMATCH;
+}
+
+/*
+ * Seal the accepted transfer's slot (header last; the layout is in the shared
+ * buffer). With a job the record becomes the job's and its previous one is
+ * consumed; without, it is consumed at once and only records, as the newest
+ * record, which transfer was accepted last.
+ */
+static int seal_xfer(struct dlv *d, struct dlv_job *job)
+{
+	const struct ctag_mesh_layout_begin *b = &d->x.begin;
+	struct bflash_pending h = {
+		.seq = d->pending_seq + 1u,
+		.tag_id = b->tag_id,
+		.epoch = b->epoch,
+		.revision = b->revision,
+		.update_id = job != NULL ? job->update_id : b->update_id,
+		.len = b->total_len,
+		.xfer_id = b->xfer_id,
+	};
+	uint16_t slot = d->x.slot;
+	int err;
+
+	if (slot == DLV_NO_SLOT) {
+		return -ENODEV;
+	}
+	memcpy(h.fontpack_id, b->fontpack_id, sizeof(h.fontpack_id));
+	memcpy(h.digest, b->digest, sizeof(h.digest));
+	err = bflash_pending_seal(d->env.flash, slot, &h, d->layout);
+	if (err != 0) {
+		d->c.storage_errors++;
+		return err;
+	}
+	d->pending_seq = h.seq;
+	d->x.slot = DLV_NO_SLOT;
+	if (job != NULL) {
+		release_slot(d, job); /* its previous record, if any */
+		job->slot = slot;
+	} else if (bflash_pending_consume(d->env.flash, slot) != 0) {
+		d->c.storage_errors++;
+	}
+	return 0;
 }
 
 /*
  * Same revision and digest (3.3, 10): a displayed revision re-sends its stored
- * result under the new update_id; a pending one adopts the new update_id.
- * False: the revision ended without being displayed and is accepted again.
+ * result under the new update_id; a pending one adopts the new update_id; the
+ * update_id the stored result was reported for gets that result again (never
+ * new work). False: the revision ended without being displayed and is
+ * accepted again.
  */
 static bool duplicate(struct dlv *d, int idx, const struct ctag_mesh_layout_begin *b, uint32_t now)
 {
-	const struct dlv_history *h = &d->hist[idx];
+	struct dlv_history *h = &d->hist[idx];
+	bool same = h->update_id == b->update_id;
 	struct dlv_job *job;
+	int32_t seq;
 
-	if (h->has_result && h->status == CTAG_STATUS_OK) {
+	if (h->has_result && (h->status == CTAG_STATUS_OK || same)) {
 		d->c.duplicates++;
-		send_result(d, b->update_id, b->tag_id, b->epoch, b->revision, CTAG_STATUS_OK,
-			    h->digest8, h->battery_mv, &h->timing, now);
+		seq = same ? h->result_seq : result_seq_for(d, b->update_id);
+		if (!same) {
+			h->update_id = b->update_id;
+			h->result_seq = (uint16_t)seq;
+			save_hist(d, idx);
+		}
+		(void)seal_xfer(d, NULL);
+		send_result(d, b->update_id, b->tag_id, b->epoch, b->revision, h->status,
+			    h->digest8, h->battery_mv, &h->timing, seq, now);
 		return true;
 	}
 	job = find_layout_job(d, b->tag_id, b->epoch, b->revision);
@@ -596,43 +795,74 @@ static bool duplicate(struct dlv *d, int idx, const struct ctag_mesh_layout_begi
 		return false;
 	}
 	d->c.duplicates++;
-	if (job->update_id != b->update_id) {
+	if (job->len == b->total_len) {
+		/* The new record (same bytes) carries the adopted update_id across a
+		 * reset; the session, if any, reloads from it. */
 		job->update_id = b->update_id;
-		/* Persist the adoption (best effort) unless a session holds the record. */
-		if (!(job->flags & DLV_JOB_IN_SESSION) && job->len == b->total_len) {
-			(void)store_layout(d, job, d->asm_buf);
+		if (!same) {
+			h->update_id = b->update_id;
+			save_hist(d, idx);
 		}
+		(void)seal_xfer(d, job);
 	}
 	return true;
 }
 
+/* A layout job of the tag that a newly accepted layout replaces. */
+static bool supersedable(const struct dlv_job *j, uint32_t tag_id)
+{
+	return j->used && j->kind == DLV_LAYOUT && j->tag_id == tag_id &&
+	       !(j->flags & DLV_JOB_IN_SESSION);
+}
+
+/*
+ * Accept the committed transfer. Nothing changes unless its record is sealed
+ * first: a full job table (with no older layout of the tag to replace)
+ * answers NO_RESOURCES and a flash failure STORAGE_ERROR, with the history
+ * and the older jobs untouched. Then the history takes the revision (saved
+ * before any SUPERSEDED result goes out), the older pending layouts of the
+ * tag end SUPERSEDED, and the new job takes the sealed record.
+ */
 static uint8_t accept(struct dlv *d, int idx, const struct ctag_mesh_layout_begin *b, uint32_t now)
 {
 	struct dlv_history *h = &d->hist[idx];
-	struct dlv_job *job;
+	struct dlv_job sealed = {.slot = DLV_NO_SLOT, .update_id = b->update_id};
+	struct dlv_job *job = NULL;
+	bool room = false;
 	size_t i;
 
+	for (i = 0; i < DLV_MAX_JOBS && !room; i++) {
+		room = !d->jobs[i].used || supersedable(&d->jobs[i], b->tag_id);
+	}
+	if (!room) {
+		d->c.jobs_dropped++;
+		return CTAG_STATUS_NO_RESOURCES;
+	}
+	if (seal_xfer(d, &sealed) != 0) {
+		return CTAG_STATUS_STORAGE_ERROR;
+	}
 	memset(h, 0, sizeof(*h));
 	h->valid = 1u;
 	h->tag_id = b->tag_id;
 	h->epoch = b->epoch;
 	h->revision = b->revision;
+	h->update_id = b->update_id;
 	memcpy(h->digest, b->digest, sizeof(h->digest));
+	save_hist(d, idx);
 	/* An older pending layout of the tag is replaced (a session keeps its own). */
 	for (i = 0; i < DLV_MAX_JOBS; i++) {
-		struct dlv_job *j = &d->jobs[i];
-
-		if (j->used && j->kind == DLV_LAYOUT && j->tag_id == b->tag_id &&
-		    !(j->flags & DLV_JOB_IN_SESSION)) {
+		if (supersedable(&d->jobs[i], b->tag_id)) {
 			d->c.superseded++;
-			dlv_finish(d, j, CTAG_STATUS_SUPERSEDED, NULL, 0u, NULL, now);
+			dlv_finish(d, &d->jobs[i], CTAG_STATUS_SUPERSEDED, NULL, 0u, NULL, now);
 		}
 	}
-	job = job_alloc(d);
+	job = job_alloc(d); /* there is room: checked above */
 	if (job == NULL) {
-		return CTAG_STATUS_NO_RESOURCES;
+		(void)bflash_pending_consume(d->env.flash, sealed.slot);
+		return CTAG_STATUS_INTERNAL;
 	}
 	job->kind = DLV_LAYOUT;
+	job->slot = sealed.slot;
 	job->tag_id = b->tag_id;
 	job->epoch = b->epoch;
 	job->revision = b->revision;
@@ -641,27 +871,44 @@ static uint8_t accept(struct dlv *d, int idx, const struct ctag_mesh_layout_begi
 	job->validated_ms = now;
 	memcpy(job->digest, b->digest, sizeof(job->digest));
 	memcpy(job->fontpack_id, b->fontpack_id, sizeof(job->fontpack_id));
-	if (store_layout(d, job, d->asm_buf) != 0) {
-		job->used = 0u;
-		return CTAG_STATUS_STORAGE_ERROR;
-	}
-	save_hist(d, idx);
 	d->c.layouts_accepted++;
 	return CTAG_STATUS_OK;
 }
 
 uint8_t dlv_layout_commit(struct dlv *d, uint16_t xfer_id, uint32_t now, uint32_t *missing)
 {
-	const struct ctag_mesh_layout_begin *b = &d->asm_.begin;
+	struct dlv_xfer *x = &d->x;
+	const struct ctag_mesh_layout_begin *b = &x->begin;
+	uint8_t n = b->chunk_count;
+	uint32_t want = n >= 32u ? UINT32_MAX : ((uint32_t)1u << n) - 1u;
+	uint32_t len = n == 0u ? 0u : (uint32_t)(n - 1u) * CTAG_LAYOUT_CHUNK_DATA_MAX + x->last_len;
 	const struct dlv_history *h;
 	uint8_t id[CTAG_FONTPACK_ID_LEN];
-	uint8_t st = ctag_layout_asm_commit(&d->asm_, xfer_id, missing, d->env.sha);
+	uint8_t st;
 	int idx;
 
+	*missing = 0u;
+	if (x->accepted && xfer_id == b->xfer_id) {
+		/* 10: its OK was lost; the gateway treats DUPLICATE like OK. */
+		d->c.duplicates++;
+		return CTAG_STATUS_DUPLICATE;
+	}
+	if (!x->active || xfer_id != b->xfer_id) {
+		return CTAG_STATUS_NOT_FOUND;
+	}
+	if ((x->have & want) != want) {
+		*missing = want & ~x->have;
+		d->c.incomplete++;
+		return CTAG_STATUS_INCOMPLETE;
+	}
+	if (b->total_len > CTAG_LAYOUT_HARD_MAX || len > CTAG_LAYOUT_HARD_MAX) {
+		return CTAG_STATUS_TOO_LARGE;
+	}
+	if (x->bad || len != b->total_len) {
+		return CTAG_STATUS_INVALID;
+	}
+	st = load_xfer(d, len);
 	if (st != CTAG_STATUS_OK) {
-		if (st == CTAG_STATUS_INCOMPLETE) {
-			d->c.incomplete++;
-		}
 		return st;
 	}
 	idx = find_asg(d, b->tag_id);
@@ -679,6 +926,7 @@ uint8_t dlv_layout_commit(struct dlv *d, uint16_t xfer_id, uint32_t now, uint32_
 			return CTAG_STATUS_STALE_REVISION;
 		}
 		if (duplicate(d, idx, b, now)) {
+			x->accepted = true;
 			return CTAG_STATUS_DUPLICATE;
 		}
 	}
@@ -686,22 +934,21 @@ uint8_t dlv_layout_commit(struct dlv *d, uint16_t xfer_id, uint32_t now, uint32_
 	    memcmp(id, b->fontpack_id, sizeof(id)) != 0) {
 		return CTAG_STATUS_FONTPACK_MISMATCH;
 	}
-	st = ctag_layout_validate(d->asm_buf, b->total_len, fontstore_has_strike, d->env.fonts);
-	return st != CTAG_STATUS_OK ? st : accept(d, idx, b, now);
+	st = ctag_layout_validate(d->layout, len, fontstore_has_strike, d->env.fonts);
+	if (st == CTAG_STATUS_OK) {
+		st = accept(d, idx, b, now);
+	}
+	x->accepted = st == CTAG_STATUS_OK;
+	return st;
 }
 
 void dlv_layout_cancel(struct dlv *d, uint64_t update_id, uint32_t now)
 {
-	size_t i;
+	struct dlv_job *j = find_update_job(d, update_id);
 
-	for (i = 0; i < DLV_MAX_JOBS; i++) {
-		struct dlv_job *j = &d->jobs[i];
-
-		if (j->used && j->update_id == update_id && !(j->flags & DLV_JOB_IN_SESSION)) {
-			d->c.cancelled++;
-			dlv_finish(d, j, CTAG_STATUS_CANCELLED, NULL, 0u, NULL, now);
-			return;
-		}
+	if (j != NULL && !(j->flags & DLV_JOB_IN_SESSION)) {
+		d->c.cancelled++;
+		dlv_finish(d, j, CTAG_STATUS_CANCELLED, NULL, 0u, NULL, now);
 	}
 }
 
@@ -716,7 +963,7 @@ uint8_t dlv_assign_set(struct dlv *d, const struct ctag_mesh_assign_set *m, uint
 		return CTAG_STATUS_STALE_EPOCH;
 	}
 	if (idx < 0) {
-		for (i = 0; i < CTAG_MAX_TAGS_PER_BRIDGE && idx < 0; i++) {
+		for (i = 0; i < DLV_MAX_TAGS && idx < 0; i++) {
 			if (!d->asg[i].used) {
 				idx = i;
 			}
@@ -730,7 +977,11 @@ uint8_t dlv_assign_set(struct dlv *d, const struct ctag_mesh_assign_set *m, uint
 		}
 		d->battery[idx] = 0u;
 	} else if (d->asg[idx].epoch < m->epoch) {
-		cancel_tag(d, m->tag_id, m->epoch, now);
+		cancel_tag(d, m->tag_id, m->epoch - 1u, now);
+	}
+	if (d->asg[idx].epoch != m->epoch || !d->asg[idx].used) {
+		d->asg[idx].unauth_status = 0u; /* 10: counted per tag and epoch */
+		d->asg[idx].unauth_count = 0u;
 	}
 	d->asg[idx].used = 1u;
 	d->asg[idx].flags = m->flags;
@@ -755,7 +1006,7 @@ uint8_t dlv_assign_del(struct dlv *d, const struct ctag_mesh_assign_del *m, uint
 	memset(&d->hist[idx], 0, sizeof(d->hist[idx]));
 	save_asg(d, idx);
 	save_hist(d, idx);
-	cancel_tag(d, m->tag_id, m->epoch + 1u, now);
+	cancel_tag(d, m->tag_id, m->epoch, now); /* inclusive: also epoch 0xFFFFFFFF */
 	return CTAG_STATUS_OK;
 }
 
@@ -763,8 +1014,22 @@ void dlv_tag_cmd(struct dlv *d, const struct ctag_mesh_tag_cmd *m, uint32_t now)
 {
 	int idx = find_asg(d, m->tag_id);
 	uint8_t st = CTAG_STATUS_OK;
+	struct dlv_result *r;
 	struct dlv_job *job;
 
+	/* A repeated TAG_CMD (the gateway re-sends it when the segment ACK was
+	 * lost): no second job, and one result_seq for its update_id (10). */
+	if (find_update_job(d, m->update_id) != NULL) {
+		d->c.duplicates++;
+		return;
+	}
+	r = result_find(d, m->update_id);
+	if (r != NULL) {
+		d->c.duplicates++;
+		send_result(d, m->update_id, m->tag_id, m->epoch, 0u, r->msg.status, NULL, 0u, NULL,
+			    NEW_SEQ, now);
+		return;
+	}
 	if (idx < 0 || d->asg[idx].epoch < m->epoch) {
 		st = CTAG_STATUS_NOT_ASSIGNED;
 	} else if (d->asg[idx].epoch > m->epoch) {
@@ -776,7 +1041,8 @@ void dlv_tag_cmd(struct dlv *d, const struct ctag_mesh_tag_cmd *m, uint32_t now)
 	job = st == CTAG_STATUS_OK ? job_alloc(d) : NULL;
 	if (job == NULL) {
 		send_result(d, m->update_id, m->tag_id, m->epoch, 0u,
-			    st == CTAG_STATUS_OK ? CTAG_STATUS_NO_RESOURCES : st, NULL, 0u, NULL, now);
+			    st == CTAG_STATUS_OK ? CTAG_STATUS_NO_RESOURCES : st, NULL, 0u, NULL,
+			    NEW_SEQ, now);
 		return;
 	}
 	job->kind = DLV_CMD;
@@ -792,7 +1058,7 @@ uint8_t dlv_assigned_count(const struct dlv *d)
 	uint8_t n = 0u;
 	size_t i;
 
-	for (i = 0; i < CTAG_MAX_TAGS_PER_BRIDGE; i++) {
+	for (i = 0; i < DLV_MAX_TAGS; i++) {
 		n += d->asg[i].used ? 1u : 0u;
 	}
 	return n;
@@ -850,15 +1116,26 @@ struct dlv_job *dlv_next_job(struct dlv *d, uint32_t tag_id, uint32_t after, uin
 	return best;
 }
 
-int dlv_job_layout(struct dlv *d, const struct dlv_job *job, uint8_t *buf, size_t size)
+bool dlv_job_layout_held(const struct dlv *d, const struct dlv_job *job)
+{
+	return job != NULL && d->lb_job == job;
+}
+
+int dlv_job_layout(struct dlv *d, const struct dlv_job *job, const uint8_t **layout)
 {
 	struct bflash_pending h;
 	int st;
 
+	*layout = d->layout;
+	if (dlv_job_layout_held(d, job)) {
+		return job->len;
+	}
+	d->lb_job = NULL;
 	if (job->kind != DLV_LAYOUT || job->slot == DLV_NO_SLOT || !d->env.flash_ok) {
 		return -ENOENT;
 	}
-	st = bflash_pending_read(d->env.flash, job->slot, &h, buf, size);
+	d->c.layout_loads++;
+	st = bflash_pending_read(d->env.flash, job->slot, &h, d->layout, sizeof(d->layout));
 	if (st < 0) {
 		return st;
 	}
@@ -867,6 +1144,7 @@ int dlv_job_layout(struct dlv *d, const struct dlv_job *job, uint8_t *buf, size_
 	    memcmp(h.digest, job->digest, sizeof(h.digest)) != 0) {
 		return -EBADMSG;
 	}
+	d->lb_job = job;
 	return h.len;
 }
 
@@ -893,6 +1171,54 @@ void dlv_fail_epoch(struct dlv *d, uint32_t tag_id, uint32_t epoch, uint8_t stat
 
 		if (j->used && j->tag_id == tag_id && j->epoch == epoch) {
 			dlv_finish(d, j, status, NULL, 0u, NULL, now);
+		}
+	}
+}
+
+bool dlv_unauth_status(struct dlv *d, uint32_t tag_id, uint32_t epoch, uint8_t status)
+{
+	int idx = find_asg(d, tag_id);
+	struct dlv_assignment *a;
+
+	if (idx < 0 || d->asg[idx].epoch != epoch) {
+		return false; /* the assignment changed meanwhile: nothing to end */
+	}
+	a = &d->asg[idx];
+	if (a->unauth_count > 0u && a->unauth_status == status) {
+		a->unauth_count++;
+	} else {
+		a->unauth_status = status;
+		a->unauth_count = 1u;
+	}
+	if (a->unauth_count < DLV_UNAUTH_REPEATS) {
+		return false;
+	}
+	a->unauth_count = 0u;
+	d->c.unauth_final++;
+	return true;
+}
+
+void dlv_tag_authenticated(struct dlv *d, uint32_t tag_id, uint32_t epoch)
+{
+	int idx = find_asg(d, tag_id);
+
+	if (idx >= 0 && d->asg[idx].epoch == epoch) {
+		d->asg[idx].unauth_count = 0u;
+	}
+}
+
+void dlv_session_over(struct dlv *d, uint32_t tag_id, uint32_t now)
+{
+	const struct dlv_assignment *a = dlv_assignment(d, tag_id);
+	size_t i;
+
+	for (i = 0; i < DLV_MAX_JOBS; i++) {
+		struct dlv_job *j = &d->jobs[i];
+
+		if (j->used && j->tag_id == tag_id && !(j->flags & DLV_JOB_IN_SESSION) &&
+		    (a == NULL || j->epoch < a->epoch)) {
+			d->c.cancelled++;
+			dlv_finish(d, j, CTAG_STATUS_CANCELLED, NULL, 0u, NULL, now);
 		}
 	}
 }

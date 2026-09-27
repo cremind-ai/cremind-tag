@@ -26,16 +26,21 @@ config CTAG_BRIDGE_WQ_PRIORITY
 	  Preemptible and below the mesh advertiser (7): rendering never delays
 	  mesh transmissions.
 
-config CTAG_BRIDGE_MAINT_STACK_SIZE
-	int "Maintenance thread stack"
-	default 3072
-	help
-	  CBOR decode (~0.5 KiB), INFO's counter list, and FONT_COMMIT's
-	  SHA-256 and font-pack validation (fontpack_open ~0.5 KiB).
-
 config CTAG_BRIDGE_MAINT_PRIORITY
 	int "Maintenance thread priority"
 	default 12
+	help
+	  The maintenance thread is the main thread (after it started the work
+	  queue), so its stack is CONFIG_MAIN_STACK_SIZE: CBOR decode (~0.5 KiB),
+	  INFO's counter list (~1.2 KiB), and FONT_COMMIT's SHA-256 and
+	  font-pack validation (fontpack_open ~0.5 KiB).
+
+config CTAG_BRIDGE_MAINT_TX_RING
+	int "Maintenance port: transmit ring (bytes)"
+	default 512
+	help
+	  Responses are COBS-encoded into it block by block; the thread waits
+	  while the port drains it.
 
 config CTAG_BRIDGE_EVENT_QUEUE
 	int "Bluetooth events queued for the work queue"
@@ -56,6 +61,15 @@ config CTAG_BRIDGE_CFG_QUIET_MS
 config CTAG_BRIDGE_TAG_SEEN_INTERVAL_MS
 	int "TAG_SEEN at most this often per tag"
 	default 60000
+
+config CTAG_BRIDGE_LIVENESS_S
+	int "Reboot after this long idle without any advertising report (0: off)"
+	default 1800
+	help
+	  A provisioned, idle bridge (its mesh scanning) that hears no
+	  advertising report at all for this long reboots: its scanner stopped
+	  without an error the scheduler could see (docs/bridge-firmware.md 4).
+	  Every mesh node in range beacons at least every 600 s.
 
 endmenu
 

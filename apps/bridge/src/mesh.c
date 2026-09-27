@@ -334,7 +334,7 @@ static void caps_status(uint16_t dst)
 		.fw_patch = BRIDGE_FW_PATCH,
 		.board = CONFIG_CTAG_BRIDGE_BOARD_ID,
 		.flash_mib = (uint16_t)MIN(br.flash.geom.flash_size >> 20, UINT16_MAX),
-		.max_tags = CTAG_MAX_TAGS_PER_BRIDGE,
+		.max_tags = CONFIG_CTAG_BRIDGE_MAX_TAGS,
 		.assigned = dlv_assigned_count(&br.dlv),
 	};
 	uint8_t buf[CTAG_MESH_CAPS_STATUS_LEN];
@@ -513,18 +513,15 @@ void mesh_start(void)
 
 size_t mesh_counters(struct ctag_cbor_counter *items, size_t max)
 {
-	const struct ctag_cbor_counter all[] = {
-		CTAG_CBOR_COUNTER("mesh_rx", cnt.rx),
-		CTAG_CBOR_COUNTER("mesh_rx_dropped", cnt.rx_dropped),
-		CTAG_CBOR_COUNTER("mesh_tx", cnt.tx),
-		CTAG_CBOR_COUNTER("mesh_tx_failed", cnt.tx_failed),
-		CTAG_CBOR_COUNTER("mesh_tx_dropped", cnt.tx_dropped),
-		CTAG_CBOR_COUNTER("mesh_tx_busy", cnt.tx_busy),
-		CTAG_CBOR_COUNTER("provisioned", bt_mesh_is_provisioned() ? 1u : 0u),
-		CTAG_CBOR_COUNTER("configured", mesh_node_ready() ? 1u : 0u),
-	};
-	size_t n = MIN(max, ARRAY_SIZE(all));
+	size_t n = 0u;
 
-	memcpy(items, all, n * sizeof(all[0]));
+	BRIDGE_COUNTER("mesh_rx", cnt.rx);
+	BRIDGE_COUNTER("mesh_rx_dropped", cnt.rx_dropped);
+	BRIDGE_COUNTER("mesh_tx", cnt.tx);
+	BRIDGE_COUNTER("mesh_tx_failed", cnt.tx_failed);
+	BRIDGE_COUNTER("mesh_tx_dropped", cnt.tx_dropped);
+	BRIDGE_COUNTER("mesh_tx_busy", cnt.tx_busy);
+	BRIDGE_COUNTER("provisioned", bt_mesh_is_provisioned() ? 1u : 0u);
+	BRIDGE_COUNTER("configured", mesh_node_ready() ? 1u : 0u);
 	return n;
 }

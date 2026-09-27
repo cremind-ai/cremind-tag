@@ -5,8 +5,9 @@
  *
  * Threads: Bluetooth callbacks and mesh model handlers only copy events into
  * queues; everything else runs on the bridge work queue (`bwq`), so the core
- * needs no locks. The maintenance port has its own thread; it shares only
- * the font store (which has a mutex) with the work queue.
+ * needs no locks. The maintenance port runs on the main thread; it shares
+ * only the font store (which has a mutex) with the work queue, and reads the
+ * counters for INFO.
  */
 #ifndef BRIDGE_APP_H_
 #define BRIDGE_APP_H_
@@ -29,6 +30,15 @@
 #define BRIDGE_FW_MINOR 1
 #define BRIDGE_FW_PATCH 0
 #define BRIDGE_FW       "0.1.0"
+
+/* INFO counters, written straight into items[max] (n: entries used) so the
+ * lists are not copied on the maintenance stack. */
+#define BRIDGE_COUNTER(lit, val)                                                                   \
+	do {                                                                                       \
+		if (n < max) {                                                                     \
+			items[n++] = (struct ctag_cbor_counter)CTAG_CBOR_COUNTER(lit, (val));      \
+		}                                                                                  \
+	} while (0)
 
 struct bridge {
 	struct bflash flash;
@@ -94,7 +104,11 @@ void bridge_dlv_tick(void);
 size_t bridge_counters(struct ctag_cbor_counter *items, size_t max);
 
 /* maint_port.c */
+/* On the work queue at the end of the boot: the port's receiver. */
 int maint_port_start(void);
+/* The main thread, once the work queue runs: the maintenance thread (never
+ * returns once the port started). */
+void maint_port_run(void);
 
 /* persist.c */
 int persist_save(void *ctx, const char *name, const void *data, size_t len);

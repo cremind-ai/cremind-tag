@@ -3,7 +3,8 @@
  *
  *   IDLE --advert(T), work pending, ready, no back-off, rate limit ok-->
  *        [WAIT_SENDS: own mesh sends in flight, poll up to 500 ms, else defer]
- *        bt_mesh_suspend() --fail--> IDLE (MESH_SUSPEND_FAILED, back-off)
+ *        bt_mesh_suspend() --refused (-EINVAL, -EBUSY)--> IDLE (MESH_SUSPEND_FAILED, back-off)
+ *                          --failed part-way--> RECOVERY (suspend + resume, reboot after 5 s)
  *        bt_conn_le_create() --sync fail--> resume
  *   CONNECTING --connected(err)--> resume (session only when err == 0)
  *              --watchdog--> cancel --> CANCELLING --connected(err) or watchdog--> resume
@@ -97,6 +98,7 @@ struct sched {
 	uint8_t state;
 	uint8_t last_status;
 	bool mesh_suspended; /* between a successful suspend and resume */
+	bool mesh_unknown;   /* a suspend failed part-way: suspend again, then resume */
 	bool conn_up;        /* a connection exists (until its disconnected event) */
 	uint32_t tag_id;
 	struct sched_peer peer;
@@ -106,7 +108,7 @@ struct sched {
 	uint32_t last_suspend_ms;
 	uint32_t suspends[CTAG_BRIDGE_MAX_SUSPENDS_PER_MIN];
 	uint8_t n_suspends;
-	struct sched_backoff backoff[CTAG_MAX_TAGS_PER_BRIDGE];
+	struct sched_backoff backoff[CONFIG_CTAG_BRIDGE_MAX_TAGS];
 	struct sched_counters c;
 };
 
@@ -123,6 +125,13 @@ void sched_timeout(struct sched *s);
 void sched_session_done(struct sched *s, uint8_t status);
 
 bool sched_busy(const struct sched *s); /* an attempt or session is in progress */
+/*
+ * Liveness: true when the bridge has been idle (the mesh scanning) and heard
+ * no advertising report at all (mesh traffic, beacons, tags) for limit_ms,
+ * since heard_ms and since it went idle. A scanner that silently stopped
+ * leaves the node deaf: the caller reboots (0 disables the check).
+ */
+bool sched_deaf(const struct sched *s, uint32_t now, uint32_t heard_ms, uint32_t limit_ms);
 /* Attempts allowed right now by the rolling-minute limit. */
 bool sched_rate_ok(const struct sched *s, uint32_t now);
 

@@ -29,24 +29,30 @@ void maint_init(struct maint *m, const struct maint_io *io, void *ctx, struct fo
 	ctag_credits_reset(&m->cr);
 }
 
+/* Written straight into items (no copy of the list on the thread's stack). */
+#define COUNTER(lit, val)                                                                          \
+	do {                                                                                       \
+		if (n < max) {                                                                     \
+			items[n++] = (struct ctag_cbor_counter)CTAG_CBOR_COUNTER(lit, (val));      \
+		}                                                                                  \
+	} while (0)
+
 size_t maint_counters(const struct maint *m, struct ctag_cbor_counter *items, size_t max)
 {
-	const struct ctag_cbor_counter all[] = {
-		CTAG_CBOR_COUNTER("frames_rx", m->c.frames_rx),
-		CTAG_CBOR_COUNTER("frames_tx", m->c.frames_tx),
-		CTAG_CBOR_COUNTER("len_errors", m->rx.len_errors),
-		CTAG_CBOR_COUNTER("crc_errors", m->rx.crc_errors),
-		CTAG_CBOR_COUNTER("version_errors", m->rx.version_errors),
-		CTAG_CBOR_COUNTER("overruns", m->c.overruns),
-		CTAG_CBOR_COUNTER("unsupported", m->c.unsupported),
-		CTAG_CBOR_COUNTER("invalid", m->c.invalid),
-		CTAG_CBOR_COUNTER("hellos", m->c.hellos),
-		CTAG_CBOR_COUNTER("credit_violations", m->c.credit_violations),
-		CTAG_CBOR_COUNTER("fonts_installed", m->fonts->installs),
-	};
-	size_t n = MIN(max, ARRAY_SIZE(all));
+	size_t n = 0u;
 
-	memcpy(items, all, n * sizeof(all[0]));
+	COUNTER("frames_rx", m->c.frames_rx);
+	COUNTER("frames_tx", m->c.frames_tx);
+	COUNTER("len_errors", m->rx.len_errors);
+	COUNTER("crc_errors", m->rx.crc_errors);
+	COUNTER("version_errors", m->rx.version_errors);
+	COUNTER("oversize", m->rx.cobs.oversize);
+	COUNTER("overruns", m->c.overruns);
+	COUNTER("unsupported", m->c.unsupported);
+	COUNTER("invalid", m->c.invalid);
+	COUNTER("hellos", m->c.hellos);
+	COUNTER("credit_violations", m->c.credit_violations);
+	COUNTER("fonts_installed", m->fonts->installs);
 	return n;
 }
 
@@ -239,6 +245,13 @@ static void on_info(struct maint *m, const struct ctag_serial_header *h)
 	f[5].kind = CTAG_CBOR_COUNTERS;
 	f[5].v.counters.items = items;
 	f[5].v.counters.count = n;
+	/* INFO always answers: counters that would not fit the frame are left
+	 * out (tx is free to encode into: see on_font_commit()). */
+	while (f[5].v.counters.count > 0u &&
+	       ctag_cbor_encode(f, ARRAY_SIZE(f), &m->tx[CTAG_SERIAL_HEADER_LEN],
+				sizeof(m->tx) - CTAG_SERIAL_MIN_FRAME) < 0) {
+		f[5].v.counters.count--;
+	}
 	respond(m, h->type, h->request_id, f, ARRAY_SIZE(f), false);
 }
 
@@ -327,7 +340,8 @@ static void on_font_commit(struct maint *m, const struct ctag_serial_header *h)
 {
 	struct ctag_cbor_field f[2];
 	uint8_t id[CTAG_FONTPACK_ID_LEN];
-	uint8_t st = fontstore_commit(m->fonts, m->sha, m->scratch, sizeof(m->scratch), id);
+	/* tx as the read buffer: nothing it holds survives this request's answer. */
+	uint8_t st = fontstore_commit(m->fonts, m->sha, m->tx, sizeof(m->tx), id);
 
 	if (st != CTAG_STATUS_OK) {
 		respond_status(m, h, st, status_text(st));

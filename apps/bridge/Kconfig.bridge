@@ -35,10 +35,22 @@ config CTAG_BRIDGE_STRIP_BUF
 	  One strip of BRIDGE_STRIP_ROWS native rows: 800 bytes for a 400-px
 	  panel. Wider panels render fewer rows per strip.
 
+config CTAG_BRIDGE_MAX_TAGS
+	int "Assignment table (tags per bridge, CAPS max_tags)"
+	default 20
+	range 1 20
+	help
+	  MAX_TAGS_PER_BRIDGE (20) unless the board's RAM needs a smaller
+	  table. The bridge reports it as CAPS_STATUS.max_tags and answers
+	  ASSIGN_SET beyond it with NO_RESOURCES.
+
 config CTAG_BRIDGE_MAX_JOBS
 	int "Jobs (pending layouts and tag commands)"
 	default 24
-	range 4 64
+	range 4 40
+	help
+	  Below the pending ring's minimum (2 * MAX_TAGS_PER_BRIDGE + 2 slots),
+	  so a transfer always finds a free ring slot.
 
 config CTAG_BRIDGE_RESULT_SLOTS
 	int "DELIVERY_RESULTs awaiting RESULT_ACK"
@@ -57,11 +69,17 @@ config CTAG_BRIDGE_MAINT_MAX_FRAME
 	int "Maintenance port: largest decoded frame (caps.max_frame)"
 	default 4096
 	range 256 4096
+	help
+	  The host learns it from HELLO's caps.max_frame and sizes FONT_DATA
+	  chunks to fit (companion bridge_maint/client.py: max_frame - 36).
 
 config CTAG_BRIDGE_MAINT_TX_FRAME
 	int "Maintenance port: response frame buffer"
-	default 1024
+	default 1536
 	range 256 4096
+	help
+	  Holds the largest response (INFO with every counter) and doubles as
+	  FONT_COMMIT's read buffer for the pack's SHA-256.
 
 config CTAG_BRIDGE_MAINT_CREDITS
 	int "Maintenance port: frames the host may send ahead (caps.credits)"
@@ -69,10 +87,5 @@ config CTAG_BRIDGE_MAINT_CREDITS
 	range 1 8
 	help
 	  The receive ring must hold this many maximum-size encoded frames.
-
-config CTAG_BRIDGE_MAINT_SCRATCH
-	int "Maintenance port: read buffer for FONT_COMMIT's SHA-256"
-	default 1024
-	range 128 8192
 
 endmenu

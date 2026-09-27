@@ -18,10 +18,36 @@ static void timer(struct tsess *s, uint8_t which, uint32_t ms)
 	s->io->timer(s->ctx, which, ms);
 }
 
-static void step(struct tsess *s)
+static uint32_t until(const struct tsess *s, uint32_t deadline)
+{
+	int32_t left = (int32_t)(deadline - now(s));
+
+	return left > 0 ? (uint32_t)left : 0u;
+}
+
+/*
+ * The step timer, never beyond the session's absolute bounds (10 "Session
+ * deadlines"): the handshake within TSESS_HANDSHAKE_MS of the connection,
+ * and each frame within its bound from FRAME_BEGIN. Expiry: TIMEOUT.
+ */
+static void arm_step(struct tsess *s, uint32_t ms)
+{
+	if (s->state < TS_GRANT) {
+		ms = MIN(ms, until(s, s->hs_deadline));
+	}
+	if (s->in_frame) {
+		ms = MIN(ms, until(s, s->frame_deadline));
+	}
+	timer(s, TSESS_T_STEP, ms);
+}
+
+/* Progress (10): a complete handshake message, an authenticated record, or a
+ * CREDIT with n > 0 while waiting for credit. Nothing else moves the step
+ * deadline; the RESULT wait keeps its own bound. */
+static void progress(struct tsess *s)
 {
 	if (s->state != TS_RESULT) {
-		timer(s, TSESS_T_STEP, TSESS_STEP_TIMEOUT_MS);
+		arm_step(s, TSESS_STEP_TIMEOUT_MS);
 	}
 }
 
@@ -70,6 +96,7 @@ static void end(struct tsess *s, uint8_t status)
 	close_view(s);
 	s->state = TS_DONE;
 	s->status = status;
+	s->in_frame = false;
 	timer(s, TSESS_T_STEP, TSESS_TIMER_OFF);
 	timer(s, TSESS_T_PACE, TSESS_TIMER_OFF);
 	memset(&s->sess, 0, sizeof(s->sess));
@@ -78,6 +105,9 @@ static void end(struct tsess *s, uint8_t status)
 		s->c.protocol_errors += status == CTAG_STATUS_INVALID ? 1u : 0u;
 		s->c.timeouts += status == CTAG_STATUS_TIMEOUT ? 1u : 0u;
 	}
+	/* Jobs whose assignment went away (or moved to a newer epoch) while this
+	 * session held them are finished now instead of waiting forever. */
+	dlv_session_over(s->dlv, s->tag_id, now(s));
 	s->io->done(s->ctx, status);
 }
 
@@ -86,17 +116,26 @@ void tsess_abort(struct tsess *s, uint8_t status)
 	end(s, status);
 }
 
-/* ERROR from the tag (or a failed MAC): security/config errors end the tag's
- * jobs of this epoch, anything else is retried after the back-off (10). */
+/*
+ * A security or configuration status from the tag outside an authenticated
+ * record (CAPS, CHALLENGE, a bad mac_t, a plaintext ERROR): anyone who can
+ * advertise the tag's public id could send it, so it is a link-level failure
+ * (back-off, no result) until the same status repeats in 3 consecutive
+ * sessions for this tag and epoch; only then does it end the tag's jobs of
+ * that epoch (10).
+ */
 static void tag_error(struct tsess *s, uint8_t status)
 {
 	if (final_tag_error(status)) {
-		if (s->job != NULL) {
-			s->job->flags &= (uint8_t)~DLV_JOB_IN_SESSION;
-			s->job = NULL;
+		s->c.unauth_statuses++;
+		if (dlv_unauth_status(s->dlv, s->tag_id, s->epoch, status)) {
+			if (s->job != NULL) {
+				s->job->flags &= (uint8_t)~DLV_JOB_IN_SESSION;
+				s->job = NULL;
+			}
+			close_view(s);
+			dlv_fail_epoch(s->dlv, s->tag_id, s->epoch, status, now(s));
 		}
-		close_view(s);
-		dlv_fail_epoch(s->dlv, s->tag_id, s->epoch, status, now(s));
 	}
 	end(s, status);
 }
@@ -125,7 +164,6 @@ static void send_ctrl(struct tsess *s, const uint8_t *msg, size_t len)
 	memcpy(s->ctrl_out, msg, len);
 	s->ctrl_len = len;
 	s->ctrl_off = 0u;
-	step(s);
 	ctrl_pump(s);
 }
 
@@ -219,9 +257,9 @@ static bool send_record(struct tsess *s, uint8_t type, const uint8_t *pt, size_t
 	s->rec_len = (size_t)n;
 	s->rec_off = 0u;
 	s->credits--;
+	s->records_sent++;
 	s->records_in_event++;
 	s->c.records_tx++;
-	step(s);
 	data_pump(s);
 	return tsess_active(s);
 }
@@ -240,8 +278,21 @@ static void finish_job(struct tsess *s, uint8_t status, const uint8_t *digest8,
 	};
 
 	s->job = NULL;
+	s->in_frame = false;
 	close_view(s);
 	dlv_finish(s->dlv, job, status, digest8, battery_mv, &t, now(s));
+}
+
+/* The job's layout in the shared buffer, and the renderer set up over it. */
+static uint8_t load_layout(struct tsess *s, struct dlv_job *job)
+{
+	const uint8_t *layout;
+	int n = dlv_job_layout(s->dlv, job, &layout);
+
+	if (n <= 0) {
+		return CTAG_STATUS_STORAGE_ERROR;
+	}
+	return ctag_render_init(&s->render, layout, (size_t)n, &s->panel, &s->view.src, &s->work);
 }
 
 /* Render pre-pass of a layout job: OK, or the status that ends the job. */
@@ -257,10 +308,6 @@ static uint8_t prepare_frame(struct tsess *s, struct dlv_job *job)
 	if (memcmp(s->view.pack.pack_id, job->fontpack_id, CTAG_FONTPACK_ID_LEN) != 0) {
 		return CTAG_STATUS_FONTPACK_MISMATCH;
 	}
-	n = dlv_job_layout(s->dlv, job, s->layout, sizeof(s->layout));
-	if (n <= 0) {
-		return CTAG_STATUS_STORAGE_ERROR;
-	}
 	s->panel.width = s->caps.width;
 	s->panel.height = s->caps.height;
 	s->panel.planes = s->caps.planes;
@@ -274,7 +321,7 @@ static uint8_t prepare_frame(struct tsess *s, struct dlv_job *job)
 	if (s->strip_rows == 0u) {
 		return CTAG_STATUS_INVALID;
 	}
-	st = ctag_render_init(&s->render, s->layout, (size_t)n, &s->panel, &s->view.src, &s->work);
+	st = load_layout(s, job);
 	if (st != CTAG_STATUS_OK) {
 		return st;
 	}
@@ -329,7 +376,7 @@ static void next_job(struct tsess *s)
 		}
 		dlv_stage(s->dlv, job, CTAG_STAGE_TRANSFERRING);
 		s->state = TS_JOB_CREDIT;
-		step(s);
+		progress(s); /* after the tag's RESULT or first CREDIT */
 		advance(s);
 		return;
 	}
@@ -348,9 +395,19 @@ static int fill_plane(struct tsess *s, uint8_t *out, size_t n)
 		if (s->strip_y0 < 0 || s->strip_plane != s->plane || row < (uint32_t)s->strip_y0 ||
 		    abs >= (uint32_t)s->strip_y0 * s->row_bytes + s->strip_len) {
 			uint16_t y0 = (uint16_t)(row - row % s->strip_rows);
-			int r = ctag_render_strip(&s->render, s->plane, y0, s->strip_rows, s->strip,
-						  sizeof(s->strip));
+			int r;
 
+			/* A LAYOUT_COMMIT used the shared buffer since the last strip:
+			 * the same bytes again from the job's record. */
+			if (!dlv_job_layout_held(s->dlv, s->job)) {
+				s->c.layout_reloads++;
+				if (load_layout(s, s->job) != CTAG_STATUS_OK) {
+					s->strip_y0 = -1;
+					return -EIO;
+				}
+			}
+			r = ctag_render_strip(&s->render, s->plane, y0, s->strip_rows, s->strip,
+					      sizeof(s->strip));
 			if (r <= 0) {
 				s->strip_y0 = -1;
 				return r < 0 ? r : -EIO;
@@ -406,6 +463,14 @@ static void stream(struct tsess *s)
 	}
 }
 
+/* 10: FRAME_BEGIN's own credit came back (credits are counted per record:
+ * the tag returns one for each record it has processed, after its initial
+ * window). */
+static bool frame_begin_credited(const struct tsess *s)
+{
+	return s->credited > s->fb_index;
+}
+
 static void advance(struct tsess *s)
 {
 	uint8_t buf[CTAG_REC_FRAME_BEGIN_LEN];
@@ -417,7 +482,7 @@ static void advance(struct tsess *s)
 	}
 	switch (s->state) {
 	case TS_GRANT:
-		if (s->grants > 0u) {
+		if (s->window_set) {
 			next_job(s);
 		}
 		break;
@@ -430,7 +495,7 @@ static void advance(struct tsess *s)
 
 			len = ctag_rec_cmd_pack(&cmd, buf, sizeof(buf));
 			s->state = TS_RESULT;
-			timer(s, TSESS_T_STEP, TSESS_RESULT_TIMEOUT_MS);
+			arm_step(s, TSESS_RESULT_TIMEOUT_MS);
 			(void)send_record(s, CTAG_REC_CMD, buf, (size_t)len);
 		} else {
 			struct ctag_rec_frame_begin fb = {
@@ -439,18 +504,22 @@ static void advance(struct tsess *s)
 				.planes = s->panel.planes,
 				.plane_len = (uint16_t)s->plane_len,
 			};
+			uint32_t kib = DIV_ROUND_UP((uint32_t)s->panel.planes * s->plane_len, 1024u);
 
 			memcpy(fb.digest, s->digest, sizeof(fb.digest));
 			len = ctag_rec_frame_begin_pack(&fb, buf, sizeof(buf));
-			s->fb_grants = s->grants;
+			s->fb_index = s->records_sent;
+			s->frame_deadline = now(s) + TSESS_FRAME_BASE_MS + kib * TSESS_FRAME_PER_KIB_MS +
+					    TSESS_REFRESH_BOUND_MS;
+			s->in_frame = true; /* the step timer never runs past frame_deadline */
 			s->state = TS_FB_GRANT;
 			s->c.frames++;
 			(void)send_record(s, CTAG_REC_FRAME_BEGIN, buf, (size_t)len);
 		}
 		break;
 	case TS_FB_GRANT:
-		/* 10: FRAME_BEGIN's credit (or the tag's immediate RESULT) first. */
-		if (s->grants != s->fb_grants) {
+		/* 10: that record's credit (or the tag's immediate RESULT) first. */
+		if (frame_begin_credited(s)) {
 			s->state = TS_STREAM;
 			stream(s);
 		}
@@ -464,7 +533,7 @@ static void advance(struct tsess *s)
 		}
 		job->flags |= DLV_JOB_FRAME_END_SENT;
 		s->state = TS_RESULT;
-		timer(s, TSESS_T_STEP, TSESS_RESULT_TIMEOUT_MS);
+		arm_step(s, TSESS_RESULT_TIMEOUT_MS);
 		(void)send_record(s, CTAG_REC_FRAME_END, NULL, 0u);
 		break;
 	default:
@@ -474,7 +543,8 @@ static void advance(struct tsess *s)
 
 /* ---- Session ---- */
 
-void tsess_start(struct tsess *s, uint32_t tag_id, uint32_t suspend_ms, uint16_t pace_ms)
+void tsess_start(struct tsess *s, uint32_t tag_id, uint32_t suspend_ms, uint16_t pace_ms,
+		 uint32_t connected_ms)
 {
 	const struct dlv_assignment *a = dlv_assignment(s->dlv, tag_id);
 
@@ -482,7 +552,8 @@ void tsess_start(struct tsess *s, uint32_t tag_id, uint32_t suspend_ms, uint16_t
 	s->tag_id = tag_id;
 	s->suspend_ms = suspend_ms;
 	s->pace_ms = pace_ms;
-	s->connected_ms = now(s);
+	s->connected_ms = connected_ms;
+	s->hs_deadline = connected_ms + TSESS_HANDSHAKE_MS;
 	s->status = CTAG_STATUS_OK;
 	s->strip_y0 = -1;
 	s->state = TS_CAPS;
@@ -497,7 +568,7 @@ void tsess_start(struct tsess *s, uint32_t tag_id, uint32_t suspend_ms, uint16_t
 	ctag_frag_tx_init(&s->data_tx);
 	ctag_frag_rx_init(&s->ctrl_rx, s->ctrl_in, sizeof(s->ctrl_in));
 	ctag_frag_rx_init(&s->status_rx, s->status_in, sizeof(s->status_in));
-	step(s);
+	arm_step(s, TSESS_STEP_TIMEOUT_MS);
 	if (s->io->read_caps(s->ctx) != 0) {
 		end(s, CTAG_STATUS_DISCONNECTED);
 	}
@@ -515,12 +586,13 @@ void tsess_caps(struct tsess *s, int err, const uint8_t *data, uint16_t len)
 		end(s, CTAG_STATUS_INVALID);
 		return;
 	}
+	/* CAPS is read before the handshake: its statuses are unauthenticated. */
 	if (s->caps.proto != CTAG_PROTO_VERSION) {
-		end(s, CTAG_STATUS_VERSION_MISMATCH);
+		tag_error(s, CTAG_STATUS_VERSION_MISMATCH);
 		return;
 	}
 	if (s->caps.tag_id != s->tag_id) {
-		end(s, CTAG_STATUS_NOT_FOUND);
+		tag_error(s, CTAG_STATUS_NOT_FOUND);
 		return;
 	}
 	if (ctag_crypto_random(nonce, sizeof(nonce)) != 0) {
@@ -530,6 +602,7 @@ void tsess_caps(struct tsess *s, int err, const uint8_t *data, uint16_t len)
 	(void)ctag_session_bridge_hello(&s->sess, s->tag_id, s->epoch, s->key, nonce, hello);
 	memset(s->key, 0, sizeof(s->key));
 	s->state = TS_HELLO;
+	progress(s);
 	send_ctrl(s, hello, sizeof(hello));
 }
 
@@ -547,9 +620,8 @@ void tsess_ctrl_value(struct tsess *s, const uint8_t *val, uint16_t len)
 		end(s, CTAG_STATUS_INVALID);
 		return;
 	}
-	step(s);
 	if (n == 0) {
-		return;
+		return; /* a fragment is not progress (10) */
 	}
 	switch (s->state) {
 	case TS_HELLO:
@@ -560,6 +632,7 @@ void tsess_ctrl_value(struct tsess *s, const uint8_t *val, uint16_t len)
 		}
 		dlv_note_battery(s->dlv, s->tag_id, s->ch.battery_mv);
 		s->state = TS_AUTH;
+		progress(s);
 		send_ctrl(s, auth, sizeof(auth));
 		break;
 	case TS_AUTH:
@@ -568,7 +641,9 @@ void tsess_ctrl_value(struct tsess *s, const uint8_t *val, uint16_t len)
 			tag_error(s, st);
 			return;
 		}
+		dlv_tag_authenticated(s->dlv, s->tag_id, s->epoch);
 		s->state = TS_GRANT;
+		progress(s);
 		advance(s);
 		break;
 	case TS_CAPS:
@@ -594,6 +669,33 @@ static void on_result(struct tsess *s, const struct ctag_rec_result *res)
 	next_job(s);
 }
 
+static bool waits_for_credit(const struct tsess *s)
+{
+	return s->state == TS_GRANT || s->state == TS_JOB_CREDIT || s->state == TS_FB_GRANT ||
+	       s->state == TS_STREAM || s->state == TS_END_CREDIT;
+}
+
+static void on_credit(struct tsess *s, uint8_t n)
+{
+	if (s->state < TS_GRANT) {
+		end(s, CTAG_STATUS_INVALID); /* 10: a CREDIT before AUTH_OK */
+		return;
+	}
+	if (n == 0u) {
+		return; /* no progress */
+	}
+	if (!s->window_set) {
+		s->window_set = true; /* the initial window after AUTH_OK */
+	} else {
+		s->credited += n; /* records the tag has processed */
+	}
+	s->credits += n;
+	if (waits_for_credit(s)) {
+		progress(s);
+	}
+	advance(s);
+}
+
 void tsess_status_value(struct tsess *s, const uint8_t *val, uint16_t len)
 {
 	struct ctag_rec_progress prog;
@@ -609,18 +711,15 @@ void tsess_status_value(struct tsess *s, const uint8_t *val, uint16_t len)
 		end(s, CTAG_STATUS_INVALID);
 		return;
 	}
-	step(s);
 	if (n == 0) {
-		return;
+		return; /* a fragment is not progress (10) */
 	}
 	if (s->status_in[0] == CTAG_PLAIN_CREDIT) {
 		if (n != 1 + CTAG_PLAIN_CREDIT_LEN) {
 			end(s, CTAG_STATUS_INVALID);
 			return;
 		}
-		s->credits += s->status_in[1];
-		s->grants++;
-		advance(s);
+		on_credit(s, s->status_in[1]);
 		return;
 	}
 	if (s->state < TS_GRANT) {
@@ -633,6 +732,7 @@ void tsess_status_value(struct tsess *s, const uint8_t *val, uint16_t len)
 		return;
 	}
 	s->c.records_rx++;
+	progress(s); /* an authenticated record */
 	if (type == CTAG_REC_PROGRESS && ctag_rec_progress_unpack(&prog, s->pt, (size_t)n) == 0) {
 		if (prog.stage == CTAG_STAGE_REFRESHING && s->job != NULL && !s->refreshing_reported) {
 			s->refreshing_reported = true;

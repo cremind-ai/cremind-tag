@@ -208,6 +208,52 @@ ZTEST(bridge_flash, test_pending_records)
 		      -EINVAL);
 }
 
+/* A transfer assembled in place: chunks at their stride, header last. */
+ZTEST(bridge_flash, test_pending_assembly)
+{
+	static uint8_t big[CTAG_LAYOUT_HARD_MAX];
+	size_t n = big_layout(big);
+	struct bflash_pending h = {.seq = 9, .tag_id = 1, .epoch = 1, .revision = 1,
+				   .update_id = 5, .len = (uint16_t)n, .xfer_id = 0xBEEF};
+	struct bflash_pending back;
+	int i;
+
+	env_fresh(0u);
+	memcpy(h.fontpack_id, fixture_pack_id, 8);
+	zassert_ok(bflash_pending_erase(&benv.flash, 3));
+	for (i = 27; i >= 0; i--) {
+		zassert_ok(bflash_pending_put(&benv.flash, 3, (unsigned int)i, &big[i * 150],
+					      MIN(150u, n - (size_t)i * 150u)));
+	}
+	/* NOR is written once per erase: a chunk cannot be written again. */
+	zassert_not_equal(bflash_pending_put(&benv.flash, 3, 4, big, 150), 0);
+	zassert_equal(bflash_pending_peek(&benv.flash, 3, &back), BFLASH_PENDING_EMPTY);
+	zassert_ok(bflash_pending_body(&benv.flash, 3, scratch, n));
+	zassert_mem_equal(scratch, big, n);
+	zassert_ok(bflash_pending_seal(&benv.flash, 3, &h, big));
+	zassert_equal(bflash_pending_check(&benv.flash, 3, &back, scratch, sizeof(scratch)),
+		      BFLASH_PENDING_LIVE);
+	zassert_equal(back.xfer_id, 0xBEEF);
+	zassert_equal(back.len, n);
+	zassert_ok(bflash_pending_consume(&benv.flash, 3));
+	zassert_equal(bflash_pending_check(&benv.flash, 3, &back, scratch, sizeof(scratch)),
+		      BFLASH_PENDING_CONSUMED, "a consumed record is still intact");
+	/* A sealed header over other bytes fails the CRC. */
+	zassert_ok(bflash_pending_erase(&benv.flash, 4));
+	zassert_ok(bflash_pending_put(&benv.flash, 4, 0, big, 150));
+	h.len = 150;
+	big[0] ^= 1;
+	zassert_ok(bflash_pending_seal(&benv.flash, 4, &h, big));
+	big[0] ^= 1;
+	zassert_equal(bflash_pending_check(&benv.flash, 4, &back, scratch, sizeof(scratch)),
+		      BFLASH_PENDING_EMPTY);
+	/* Arguments. */
+	zassert_equal(bflash_pending_put(&benv.flash, 5, BFLASH_PENDING_CHUNKS, big, 10), -EINVAL);
+	zassert_equal(bflash_pending_put(&benv.flash, 5, 0, big, 151), -EINVAL);
+	zassert_equal(bflash_pending_put(&benv.flash, 5, 0, big, 0), -EINVAL);
+	zassert_equal(bflash_pending_erase(&benv.flash, benv.flash.geom.pending_slots), -EINVAL);
+}
+
 ZTEST(bridge_flash, test_read_cache)
 {
 	uint8_t w[256] __aligned(4);

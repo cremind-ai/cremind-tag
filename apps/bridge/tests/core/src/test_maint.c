@@ -5,6 +5,8 @@
  */
 #include <string.h>
 
+#include <zephyr/sys/printk.h>
+
 #include <ctag/ctag_cbor.h>
 #include <ctag/ctag_frame.h>
 
@@ -29,13 +31,24 @@ static void io_reboot(void *ctx)
 	rebooted = true;
 }
 
+static bool many_counters;
+static char many_names[MAINT_COUNTERS][24];
+
 static size_t io_counters(void *ctx, struct ctag_cbor_counter *items, size_t max)
 {
 	const struct ctag_cbor_counter c = CTAG_CBOR_COUNTER("sessions_ok", 3);
+	size_t n = 1;
 
 	zassert_true(max > 0);
 	items[0] = c;
-	return 1;
+	/* Worst case: every slot, long names, values that need five bytes. */
+	for (; many_counters && n < max; n++) {
+		snprintk(many_names[n], sizeof(many_names[n]), "counter_%02u_with_long_name",
+			 (unsigned int)n);
+		items[n] = (struct ctag_cbor_counter){many_names[n], strlen(many_names[n]),
+						      UINT32_MAX};
+	}
+	return n;
 }
 
 static const struct maint_io io = {.write = io_write, .reboot = io_reboot, .counters = io_counters};
@@ -196,8 +209,10 @@ ZTEST(bridge_maint, test_hello_caps_and_credits)
 	zassert_equal(responses(), 64, "SERIAL_DEFAULT_CREDITS + the HELLO grant");
 	send_frame(CTAG_SERIAL_MSG_PING, NULL, 0, 0);
 	zassert_equal(responses(), 0);
-	/* Each answered frame granted its buffer back: no overrun counted. */
-	zassert_equal(mt.c.credit_violations, 0);
+	/* Each answered frame granted its buffer back: no overrun counted, except
+	 * with a single credit, where the PING sent to release the held answer
+	 * above already exceeded the host's budget. */
+	zassert_equal(mt.c.credit_violations, CONFIG_CTAG_BRIDGE_MAINT_CREDITS > 1 ? 0 : 1);
 }
 
 ZTEST(bridge_maint, test_version_mismatch)
@@ -270,7 +285,9 @@ ZTEST(bridge_maint, test_font_install)
 		{.key = CTAG_CBOR_KEY_OFFSET, .kind = CTAG_CBOR_UINT},
 		{.key = CTAG_CBOR_KEY_DATA, .kind = CTAG_CBOR_BSTR},
 	};
-	struct ctag_cbor_counter counters[48];
+	struct ctag_cbor_counter counters[MAINT_COUNTERS];
+	/* The client's chunk: what caps.max_frame leaves (bridge_maint/client.py). */
+	const size_t chunk = MIN(2048u, CONFIG_CTAG_BRIDGE_MAINT_MAX_FRAME - 8u - 4u - 24u);
 	int nc;
 
 	sha256(fixture_pack, fixture_pack_len, digest);
@@ -292,10 +309,18 @@ ZTEST(bridge_maint, test_font_install)
 	call(CTAG_SERIAL_MSG_FONT_DATA, data, 2);
 	zassert_equal(fields[K_STATUS].v.u, CTAG_STATUS_INVALID);
 	zassert_true(fields[K_TEXT].present);
-	for (size_t off = 0; off < fixture_pack_len; off += 2048) {
+	/* A frame above caps.max_frame is dropped and counted. */
+	if (CONFIG_CTAG_BRIDGE_MAINT_MAX_FRAME + 64 <= CTAG_SERIAL_MAX_FRAME) {
+		data[0].v.u = 0;
+		data[1].v.str = (struct ctag_cbor_str){fixture_pack, CONFIG_CTAG_BRIDGE_MAINT_MAX_FRAME};
+		(void)send_frame(CTAG_SERIAL_MSG_FONT_DATA, data, 2, 1);
+		zassert_equal(responses(), 0);
+		zassert_equal(mt.rx.cobs.oversize, 1);
+	}
+	for (size_t off = 0; off < fixture_pack_len; off += chunk) {
 		data[0].v.u = off;
 		data[1].v.str = (struct ctag_cbor_str){&fixture_pack[off],
-						       MIN(2048u, fixture_pack_len - off)};
+						       MIN(chunk, fixture_pack_len - off)};
 		call(CTAG_SERIAL_MSG_FONT_DATA, data, 2);
 		zassert_equal(fields[K_STATUS].v.u, CTAG_STATUS_OK);
 	}
@@ -322,6 +347,13 @@ ZTEST(bridge_maint, test_font_install)
 		}
 	}
 	zassert_true(installed && sessions);
+	/* However many counters there are, INFO answers within MAINT_TX_FRAME. */
+	many_counters = true;
+	call(CTAG_SERIAL_MSG_INFO, NULL, 0);
+	many_counters = false;
+	zassert_equal(fields[K_STATUS].v.u, CTAG_STATUS_OK);
+	nc = ctag_cbor_counters(&fields[K_COUNTERS].v.str, counters, ARRAY_SIZE(counters));
+	zassert_true(nc > 20 && nc <= (int)MAINT_COUNTERS, "%d counters", nc);
 }
 
 ZTEST(bridge_maint, test_flash_test_idempotent)

@@ -44,7 +44,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| bridge-nrf52840dk | `apps/bridge` | 301,272 / 1,015,808 | 70.3 % (15 %) | 109,186 / 262,144 | 152,958 (none) | pass (edtlib) | ok | 2026-09-27 |
+| bridge-nrf52840dk | `apps/bridge` | 303,668 / 1,015,808 | 70.1 % (15 %) | 103,362 / 262,144 | 158,782 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -89,3 +89,4 @@ Measure with development equipment disconnected, after a power-on reset.
 |---|---|---|
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
 | 2026-09-28 | buildable | `bridge-nrf52840dk` (`apps/bridge`): 301,272 B flash of 992 KiB (70.3 % free), 109,186 B RAM of 256 KiB; `verify_stack.py` 16/16 pass; 108 native_sim test cases and the companion maintenance client (`apps/bridge/tests/maint_pty/interop.py`) pass. Development geometry: DK MX25R64 (8 MiB) with a 1 MiB working space. |
+| 2026-09-28 | buildable | Layouts assembled in external flash with one shared layout buffer, the maintenance port on the main thread, the §10 session rules (deadlines, per-record credits, unauthenticated statuses) and the review fixes: 303,668 B flash (70.1 % free), 103,362 B RAM (158,782 B free); `verify_stack.py` 16/16 pass; 312 native_sim test cases (both configurations) and the interop pass. `max_tags` stays 20. |

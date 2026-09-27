@@ -17,6 +17,7 @@ import asyncio
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -28,7 +29,10 @@ from cremind_tag.protocol.ids import NodeRole, Status  # noqa: E402
 
 
 def start(exe: str) -> tuple[subprocess.Popen[str], str]:
-    proc = subprocess.Popen([exe], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # A fresh directory: the simulated part (flash.bin) starts erased.
+    workdir = tempfile.mkdtemp(prefix="maint_pty-")
+    proc = subprocess.Popen([exe], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            cwd=workdir)
     assert proc.stdout is not None
     for _ in range(50):
         line = proc.stdout.readline()
@@ -73,6 +77,10 @@ async def run(pty: str, pack: bytes) -> None:
         assert repeat.items == test.items, repeat
         info = await client.info()
         assert info.counters.get("fonts_installed") == 2, info.counters
+        # Every FONT_DATA frame fit caps.max_frame: the client sized its chunks from HELLO.
+        assert info.counters.get("oversize", 0) == 0 and info.counters.get("len_errors", 0) == 0, info.counters
+        print(f"FONT_DATA: {min(2048, hello.caps.max_frame - 36)}-byte chunks for max_frame "
+              f"{hello.caps.max_frame}, none oversize")
         print(f"INFO: {len(info.counters)} counters, fonts_installed={info.counters['fonts_installed']}, "
               f"crc_errors={info.counters.get('crc_errors')}, overruns={info.counters.get('overruns')}")
 

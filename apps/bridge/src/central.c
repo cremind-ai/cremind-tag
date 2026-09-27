@@ -27,7 +27,10 @@
 LOG_MODULE_REGISTER(bridge_central, LOG_LEVEL_INF);
 
 #define GATEWAY_ADDR    0x0001
-#define GATT_SETUP_MS   10000
+/* 10: CAPS to AUTH_OK within 5 s of the connection, GATT setup included. */
+#define GATT_SETUP_MS   TSESS_HANDSHAKE_MS
+#define LIVENESS_MS     ((uint32_t)CONFIG_CTAG_BRIDGE_LIVENESS_S * 1000u)
+#define LIVENESS_CHECK_MS 60000u
 #define ADV_VERSION     1u
 #define MSD_LEN         10u /* company u16, ver u8, tag_id u32, flags u8, disp_rev u16 */
 #define CONN_INT_MIN    24  /* 30 ms (1.25 ms units) */
@@ -63,13 +66,16 @@ enum gatt_phase {
 };
 
 static struct bt_conn *conn;
-static struct handles cache[CTAG_MAX_TAGS_PER_BRIDGE];
+static struct handles cache[CONFIG_CTAG_BRIDGE_MAX_TAGS];
 static uint8_t cache_next;
 static struct handles cur;
 static uint8_t phase;
 static uint8_t subscribed;
 static uint32_t cur_tag;
 static uint32_t cur_suspend_ms;
+static uint32_t cur_conn_ms;
+/* Uptime of the last advertising report of any kind (liveness). */
+static atomic_t heard_ms;
 static struct bt_gatt_discover_params disc;
 static struct bt_gatt_subscribe_params sub_ctrl;
 static struct bt_gatt_subscribe_params sub_status;
@@ -83,7 +89,7 @@ static struct {
 	uint32_t tag_id;
 	uint32_t at;
 	bool used;
-} seen[CTAG_MAX_TAGS_PER_BRIDGE];
+} seen[CONFIG_CTAG_BRIDGE_MAX_TAGS];
 
 static struct {
 	uint32_t adverts;
@@ -105,6 +111,7 @@ static void scan_recv(const struct bt_le_scan_recv_info *info, struct net_buf_si
 	struct bev e = {.type = BEV_ADVERT};
 	bool found = false;
 
+	(void)atomic_set(&heard_ms, (atomic_val_t)k_uptime_get_32()); /* the scanner runs */
 	if (info->adv_type != BT_GAP_ADV_TYPE_ADV_IND) {
 		return; /* mesh traffic is non-connectable */
 	}
@@ -362,7 +369,7 @@ static void session_ready(void)
 	if (bt_conn_get_info(conn, &info) == 0 && info.le.interval_us >= 1000u) {
 		pace = (uint16_t)(info.le.interval_us / 1000u);
 	}
-	tsess_start(&br.sess, cur_tag, cur_suspend_ms, pace);
+	tsess_start(&br.sess, cur_tag, cur_suspend_ms, pace, cur_conn_ms);
 }
 
 static void gatt_step(const struct bev *e)
@@ -587,6 +594,7 @@ static void op_start(void *ctx, uint32_t tag_id, uint32_t suspend_ms)
 	ARG_UNUSED(ctx);
 	cur_tag = tag_id;
 	cur_suspend_ms = suspend_ms;
+	cur_conn_ms = k_uptime_get_32(); /* connected; the mesh has just resumed */
 	gatt_setup();
 }
 
@@ -777,9 +785,36 @@ const struct tsess_io central_tsess_io = {
 	.now = io_now,
 };
 
+/*
+ * Liveness (CONFIG_CTAG_BRIDGE_LIVENESS_S): a provisioned bridge that is idle
+ * (its mesh scanning) and hears no advertising report at all for that long
+ * has a scanner that stopped without an error the scheduler could see; it
+ * reboots and the mesh reloads from settings. Every mesh node in range sends
+ * a secure network beacon at least every 600 s, so a working scanner always
+ * hears something within the default 1800 s.
+ */
+static void liveness_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(liveness, liveness_fn);
+
+static void liveness_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (bt_mesh_is_provisioned() &&
+	    sched_deaf(&br.sched, k_uptime_get_32(), (uint32_t)atomic_get(&heard_ms), LIVENESS_MS)) {
+		LOG_ERR("no advertising report for %u s while idle: rebooting",
+			CONFIG_CTAG_BRIDGE_LIVENESS_S);
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+	(void)k_work_reschedule_for_queue(&bwq, &liveness, K_MSEC(LIVENESS_CHECK_MS));
+}
+
 int central_init(void)
 {
+	(void)atomic_set(&heard_ms, (atomic_val_t)k_uptime_get_32());
 	bt_le_scan_cb_register(&scan_cb);
+	if (LIVENESS_MS != 0u) {
+		(void)k_work_reschedule_for_queue(&bwq, &liveness, K_MSEC(LIVENESS_CHECK_MS));
+	}
 	return 0;
 }
 
@@ -787,30 +822,29 @@ size_t central_counters(struct ctag_cbor_counter *items, size_t max)
 {
 	const struct sched_counters *s = &br.sched.c;
 	const struct tsess_counters *t = &br.sess.c;
-	const struct ctag_cbor_counter all[] = {
-		CTAG_CBOR_COUNTER("adverts", cnt.adverts),
-		CTAG_CBOR_COUNTER("tag_seen", cnt.tag_seen),
-		CTAG_CBOR_COUNTER("gatt_discoveries", cnt.discoveries),
-		CTAG_CBOR_COUNTER("gatt_cache_hits", cnt.cache_hits),
-		CTAG_CBOR_COUNTER("gatt_failures", cnt.gatt_failures),
-		CTAG_CBOR_COUNTER("attempts", s->attempts),
-		CTAG_CBOR_COUNTER("suspend_count", s->suspend_count),
-		CTAG_CBOR_COUNTER("suspend_fail", s->suspend_fail),
-		CTAG_CBOR_COUNTER("suspend_max_ms", s->suspend_max_ms),
-		CTAG_CBOR_COUNTER("resume_fail", s->resume_fail),
-		CTAG_CBOR_COUNTER("connect_failed", s->connect_failed),
-		CTAG_CBOR_COUNTER("cancels", s->cancels),
-		CTAG_CBOR_COUNTER("deferred", s->deferred),
-		CTAG_CBOR_COUNTER("rate_limited", s->rate_limited),
-		CTAG_CBOR_COUNTER("backoff_skips", s->backoff_skips),
-		CTAG_CBOR_COUNTER("sessions_ok", s->sessions_ok),
-		CTAG_CBOR_COUNTER("sessions_fail", s->sessions_fail),
-		CTAG_CBOR_COUNTER("records_tx", t->records_tx),
-		CTAG_CBOR_COUNTER("frames", t->frames),
-		CTAG_CBOR_COUNTER("render_ms_max", t->render_ms_max),
-	};
-	size_t n = MIN(max, ARRAY_SIZE(all));
+	size_t n = 0u;
 
-	memcpy(items, all, n * sizeof(all[0]));
+	BRIDGE_COUNTER("adverts", cnt.adverts);
+	BRIDGE_COUNTER("tag_seen", cnt.tag_seen);
+	BRIDGE_COUNTER("gatt_discoveries", cnt.discoveries);
+	BRIDGE_COUNTER("gatt_cache_hits", cnt.cache_hits);
+	BRIDGE_COUNTER("gatt_failures", cnt.gatt_failures);
+	BRIDGE_COUNTER("attempts", s->attempts);
+	BRIDGE_COUNTER("suspend_count", s->suspend_count);
+	BRIDGE_COUNTER("suspend_fail", s->suspend_fail);
+	BRIDGE_COUNTER("suspend_max_ms", s->suspend_max_ms);
+	BRIDGE_COUNTER("resume_fail", s->resume_fail);
+	BRIDGE_COUNTER("connect_failed", s->connect_failed);
+	BRIDGE_COUNTER("cancels", s->cancels);
+	BRIDGE_COUNTER("deferred", s->deferred);
+	BRIDGE_COUNTER("rate_limited", s->rate_limited);
+	BRIDGE_COUNTER("backoff_skips", s->backoff_skips);
+	BRIDGE_COUNTER("sessions_ok", s->sessions_ok);
+	BRIDGE_COUNTER("sessions_fail", s->sessions_fail);
+	BRIDGE_COUNTER("records_tx", t->records_tx);
+	BRIDGE_COUNTER("frames", t->frames);
+	BRIDGE_COUNTER("render_ms_max", t->render_ms_max);
+	BRIDGE_COUNTER("layout_reloads", t->layout_reloads);
+	BRIDGE_COUNTER("unauth_statuses", t->unauth_statuses);
 	return n;
 }

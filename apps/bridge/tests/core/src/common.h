@@ -35,6 +35,8 @@ void sha256(const void *data, size_t len, uint8_t out[32]);
 void kv_clear(void);
 int kv_save(void *ctx, const char *name, const void *data, size_t len);
 void kv_replay(struct dlv *d);
+/* Called on every save before it is stored (NULL: none). */
+extern void (*save_probe)(const char *name);
 size_t kv_count(void);
 bool kv_get(const char *name, void *data, size_t *len);
 
@@ -49,10 +51,15 @@ extern struct sent_msg sent_log[128];
 extern size_t sent_n;
 void sent_clear(void);
 void record_send(void *ctx, uint8_t op, const uint8_t *params, size_t len);
+/* Called on every outbound message before it is logged (NULL: none). */
+extern void (*send_probe)(uint8_t op, const uint8_t *params, size_t len);
 size_t sent_count(uint8_t op);
 /* The last DELIVERY_RESULT for update_id; false when none. */
 bool last_result(uint64_t update_id, struct ctag_mesh_delivery_result *r);
 size_t results_for(uint64_t update_id);
+/* 10: every DELIVERY_RESULT sent for an update_id is the same message with
+ * the same result_seq, and different update_ids never share a result_seq. */
+void assert_one_seq_per_update(void);
 
 /* ---- A booted bridge core (flash, fonts, delivery) ---- */
 struct bridge_env {
@@ -87,7 +94,10 @@ struct xfer {
 };
 
 void layout_digest(const uint8_t *layout, size_t len, uint8_t digest[CTAG_LAYOUT_DIGEST_LEN]);
-/* Begin + every chunk (skip: bitmap of chunks not sent) + commit. */
+/* Begin + every chunk (skip: bitmap of chunks not sent), no commit. */
+void transfer(struct dlv *d, const struct xfer *x, const uint8_t *layout, size_t len,
+	      uint32_t skip);
+/* transfer() + commit. */
 uint8_t deliver(struct dlv *d, const struct xfer *x, const uint8_t *layout, size_t len,
 		uint32_t skip, uint32_t now, uint32_t *missing);
 void assign(struct dlv *d, uint32_t tag_id, uint32_t epoch, const uint8_t key[16]);

@@ -6,6 +6,18 @@
  * CANCELLED, and DELIVERY_RESULT with a persisted result_seq, re-sent every
  * MESH_RESULT_RETRY_MS up to MESH_RESULT_RETRIES times until RESULT_ACK.
  *
+ * Memory: the transfer being assembled lives in its external-flash ring slot
+ * (bflash.h), not in RAM. One LAYOUT_HARD_MAX buffer (dlv.layout) is shared:
+ * LAYOUT_COMMIT reads the transfer into it to check the digest and validate
+ * it, and the tag session renders the current job's layout from it. Both run
+ * on the same thread; a commit invalidates the session's copy and the session
+ * reloads it from the job's record (dlv_job_layout_held()).
+ *
+ * One result_seq per update_id (10): a DELIVERY_RESULT for an update_id that
+ * already has one re-sends that first result under its result_seq. The
+ * results table keeps acknowledged results for this; the history keeps each
+ * tag's last result (update_id, result_seq) across resets.
+ *
  * Pure logic: no Bluetooth. Time is passed in (ms); outbound mesh messages and
  * persistence go through the dlv_env callbacks. Runs on one thread (the
  * bridge work queue).
@@ -53,10 +65,18 @@ struct dlv_job {
 struct dlv_assignment {
 	uint8_t used;
 	uint8_t flags; /* bit0 primary bridge */
+	/* RAM only (10): the unauthenticated status of the last sessions and how
+	 * many consecutive sessions ended with it (this epoch). */
+	uint8_t unauth_status;
+	uint8_t unauth_count;
 	uint32_t tag_id;
 	uint32_t epoch;
 	uint8_t key[CTAG_TAG_KEY_LEN];
 };
+
+/* 10: sessions in a row ending with the same unauthenticated status before
+ * it ends the tag's jobs. */
+#define DLV_UNAUTH_REPEATS 3u
 
 struct dlv_timing {
 	uint16_t wake_ms;
@@ -70,20 +90,42 @@ struct dlv_history {
 	uint8_t valid;
 	uint8_t has_result;
 	uint8_t status;
+	uint16_t result_seq; /* of the result reported for update_id */
 	uint32_t tag_id;
 	uint32_t epoch;
 	uint32_t revision;
+	uint64_t update_id; /* the revision's current update_id */
 	uint8_t digest[CTAG_LAYOUT_DIGEST_LEN];
 	uint8_t digest8[8];
 	uint16_t battery_mv;
 	struct dlv_timing timing;
 };
 
+enum dlv_result_state {
+	DLV_RES_FREE = 0,
+	DLV_RES_SENDING,
+	DLV_RES_ACKED,
+	DLV_RES_GAVE_UP, /* MESH_RESULT_RETRIES re-sends without RESULT_ACK */
+};
+
 struct dlv_result {
-	uint8_t used;
+	uint8_t state;
 	uint8_t sends;
 	uint32_t due_ms;
 	struct ctag_mesh_delivery_result msg;
+};
+
+/* The transfer being assembled into its ring slot (3.2 rule 4: one at a time). */
+struct dlv_xfer {
+	struct ctag_mesh_layout_begin begin;
+	uint32_t have;     /* bit i: chunk i received (and written) */
+	uint16_t last_len; /* bytes in chunk chunk_count - 1 */
+	uint16_t slot;     /* its ring slot; DLV_NO_SLOT: none or unusable */
+	bool active;       /* chunks and commits for begin.xfer_id are taken */
+	bool bad;          /* a chunk other than the last was not full */
+	/* Committed OK or DUPLICATE: a repeated commit answers DUPLICATE (10).
+	 * Also set at boot for the transfer of the newest ring record. */
+	bool accepted;
 };
 
 struct dlv_counters {
@@ -97,8 +139,11 @@ struct dlv_counters {
 	uint32_t result_resends;
 	uint32_t results_unacked;
 	uint32_t results_dropped;
+	uint32_t results_repeated; /* same update_id: the first result again */
 	uint32_t storage_errors;
 	uint32_t jobs_dropped;
+	uint32_t unauth_final; /* unauthenticated statuses that ended jobs */
+	uint32_t layout_loads; /* the shared buffer (re)loaded from a record */
 };
 
 struct dlv_env {
@@ -108,8 +153,8 @@ struct dlv_env {
 	 * len 0 deletes it. */
 	int (*save)(void *ctx, const char *name, const void *data, size_t len);
 	void *ctx;
-	/* Pending layouts; without usable flash no pack is valid either, so every
-	 * layout already fails FONTPACK_MISMATCH before it could be stored. */
+	/* Transfers and pending layouts; without usable flash every commit fails
+	 * STORAGE_ERROR at the digest check (no pack is valid either). */
 	struct bflash *flash;
 	bool flash_ok;
 	struct fontstore *fonts;
@@ -119,14 +164,16 @@ struct dlv_env {
 #define DLV_MAX_JOBS    CONFIG_CTAG_BRIDGE_MAX_JOBS
 #define DLV_RESULT_SLOTS CONFIG_CTAG_BRIDGE_RESULT_SLOTS
 #define DLV_SEQ_RESERVE 16u
+/* Assignment table: MAX_TAGS_PER_BRIDGE, or fewer on a small board (CAPS
+ * reports it as max_tags). */
+#define DLV_MAX_TAGS    CONFIG_CTAG_BRIDGE_MAX_TAGS
 
 struct dlv {
 	struct dlv_env env;
-	struct ctag_layout_asm asm_;
-	uint8_t asm_buf[CTAG_LAYOUT_HARD_MAX] __aligned(4);
-	struct dlv_assignment asg[CTAG_MAX_TAGS_PER_BRIDGE];
-	struct dlv_history hist[CTAG_MAX_TAGS_PER_BRIDGE];
-	uint16_t battery[CTAG_MAX_TAGS_PER_BRIDGE];
+	struct dlv_xfer x;
+	struct dlv_assignment asg[DLV_MAX_TAGS];
+	struct dlv_history hist[DLV_MAX_TAGS];
+	uint16_t battery[DLV_MAX_TAGS];
 	struct dlv_job jobs[DLV_MAX_JOBS];
 	struct dlv_result results[DLV_RESULT_SLOTS];
 	uint32_t order;
@@ -134,22 +181,29 @@ struct dlv {
 	uint16_t ring_head;   /* next pending-layout slot to try */
 	uint16_t next_seq;    /* result_seq of the next DELIVERY_RESULT */
 	uint16_t reserve_end; /* persisted: seqs below it may have been used */
+	/* The shared layout buffer holds lb_job's layout (NULL: anything else). */
+	const struct dlv_job *lb_job;
 	struct dlv_counters c;
+	uint8_t layout[CTAG_LAYOUT_HARD_MAX] __aligned(4);
 };
 
 void dlv_init(struct dlv *d, const struct dlv_env *env);
 
 /* Boot: persisted records (settings), then dlv_start() restores the jobs. */
 void dlv_restore(struct dlv *d, const char *name, const void *data, size_t len);
-/* Reserve result_seqs and restore pending layouts; scratch >= LAYOUT_HARD_MAX. */
-void dlv_start(struct dlv *d, uint32_t now, uint8_t *scratch, size_t size);
+/* Reserve result_seqs, restore pending layouts and the last accepted transfer. */
+void dlv_start(struct dlv *d, uint32_t now);
 /* Config Node Reset: forget assignments, history, jobs and pending layouts. */
 void dlv_reset(struct dlv *d);
 
 /* ---- LAYOUT_SRV ---- */
+/* Replaces any transfer; erases the next free ring slot for it. */
 void dlv_layout_begin(struct dlv *d, const struct ctag_mesh_layout_begin *b);
+/* Writes the chunk into the transfer's slot (a chunk already received is
+ * ignored: flash is written once per erase). */
 void dlv_layout_chunk(struct dlv *d, const struct ctag_mesh_layout_chunk *c);
-/* 3.3 in order; *missing is valid with INCOMPLETE. Returns the LAYOUT_STATUS status. */
+/* 3.3 in order; *missing is valid with INCOMPLETE. Returns the LAYOUT_STATUS
+ * status; a repeated commit of an accepted transfer answers DUPLICATE (10). */
 uint8_t dlv_layout_commit(struct dlv *d, uint16_t xfer_id, uint32_t now, uint32_t *missing);
 void dlv_layout_cancel(struct dlv *d, uint64_t update_id, uint32_t now);
 void dlv_result_ack(struct dlv *d, uint16_t result_seq);
@@ -170,14 +224,33 @@ bool dlv_has_work(const struct dlv *d, uint32_t tag_id);
 uint32_t dlv_last_order(const struct dlv *d);
 /* The tag's next job with after < order <= upto, in arrival order. */
 struct dlv_job *dlv_next_job(struct dlv *d, uint32_t tag_id, uint32_t after, uint32_t upto);
-/* Read a layout job's bytes from its pending record (checks the CRC and identity). */
-int dlv_job_layout(struct dlv *d, const struct dlv_job *job, uint8_t *buf, size_t size);
+/*
+ * A layout job's bytes in the shared buffer, loaded from its pending record
+ * (CRC and identity checked) unless the buffer already holds them. Returns
+ * the length (*layout = the buffer) or a negative error.
+ */
+int dlv_job_layout(struct dlv *d, const struct dlv_job *job, const uint8_t **layout);
+/* Whether the shared buffer still holds the job's layout (a commit borrows it). */
+bool dlv_job_layout_held(const struct dlv *d, const struct dlv_job *job);
 void dlv_stage(struct dlv *d, const struct dlv_job *job, uint8_t stage);
 /* Final result of a job (removes it, persists history, sends DELIVERY_RESULT). */
 void dlv_finish(struct dlv *d, struct dlv_job *job, uint8_t status, const uint8_t digest8[8],
 		uint16_t battery_mv, const struct dlv_timing *timing, uint32_t now);
-/* AUTH_FAILED, STALE_EPOCH, VERSION_MISMATCH, NOT_FOUND from a tag end its jobs of that epoch. */
+/* End the tag's jobs of that epoch with status (see dlv_unauth_status()). */
 void dlv_fail_epoch(struct dlv *d, uint32_t tag_id, uint32_t epoch, uint8_t status, uint32_t now);
+/*
+ * 10: a session ended with a security status that was not inside an
+ * authenticated record (AUTH_FAILED, STALE_EPOCH, VERSION_MISMATCH,
+ * NOT_FOUND from CAPS, CHALLENGE, a bad mac_t or a plaintext ERROR). True
+ * when it is the DLV_UNAUTH_REPEATS-th consecutive session of this tag and
+ * epoch ending with that status: only then does it end the jobs.
+ */
+bool dlv_unauth_status(struct dlv *d, uint32_t tag_id, uint32_t epoch, uint8_t status);
+/* The tag authenticated (AUTH_OK verified): its count starts over. */
+void dlv_tag_authenticated(struct dlv *d, uint32_t tag_id, uint32_t epoch);
+/* A session with the tag ended: its jobs whose assignment went away (or is
+ * now of a newer epoch) while the session held them end CANCELLED. */
+void dlv_session_over(struct dlv *d, uint32_t tag_id, uint32_t now);
 void dlv_note_battery(struct dlv *d, uint32_t tag_id, uint16_t mv);
 uint16_t dlv_battery(const struct dlv *d, uint32_t tag_id);
 

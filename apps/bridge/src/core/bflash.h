@@ -11,7 +11,11 @@
  * Pending layouts are 8 KiB records (a LAYOUT_HARD_MAX layout plus its header
  * does not fit one 4 KiB sector) written round-robin over the ring, so the
  * erase wear of frequent deliveries spreads over the whole working space
- * instead of one sector per tag.
+ * instead of one sector per tag. A transfer is assembled straight into its
+ * ring slot: LAYOUT_BEGIN erases the slot, each LAYOUT_CHUNK is written at
+ * its own 4-byte-aligned position (any order, each written once), and the
+ * header that makes it a record is written last, after the commit accepted
+ * it. No RAM holds a transfer while it arrives.
  */
 #ifndef BRIDGE_BFLASH_H_
 #define BRIDGE_BFLASH_H_
@@ -22,6 +26,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/util.h>
 
 #include <ctag/proto_ids.h>
 
@@ -31,11 +36,15 @@
 #define BFLASH_DIR_VERSION 1u
 
 /* One pending-layout record: a 64-byte header, the layout (<= LAYOUT_HARD_MAX)
- * and a consumed marker in the slot's last word. */
+ * as its mesh chunks at a 152-byte stride (chunk i at HDR + i * STRIDE, 150
+ * bytes and 2 pad bytes, so every chunk starts on a write unit), and a
+ * consumed marker in the slot's last word. */
 #define BFLASH_PENDING_SLOT     (2u * BFLASH_SECTOR)
 #define BFLASH_PENDING_HDR      64u
+#define BFLASH_PENDING_STRIDE   ROUND_UP(CTAG_LAYOUT_CHUNK_DATA_MAX, 4u)
+#define BFLASH_PENDING_CHUNKS   32u /* chunk indexes a transfer can use (the missing bitmap) */
 #define BFLASH_PENDING_MAGIC    0x4C505443u /* bytes 'C','T','P','L' */
-#define BFLASH_PENDING_VERSION  1u
+#define BFLASH_PENDING_VERSION  2u
 /* At most two live records per tag (one in a session, one waiting) plus room
  * to write the next one: the smallest ring that always has a free slot. */
 #define BFLASH_PENDING_MIN      (2u * CTAG_MAX_TAGS_PER_BRIDGE + 2u)
@@ -136,6 +145,7 @@ struct bflash_pending {
 	uint8_t fontpack_id[CTAG_FONTPACK_ID_LEN];
 	uint8_t digest[CTAG_LAYOUT_DIGEST_LEN];
 	uint16_t len;
+	uint16_t xfer_id; /* the LAYOUT_BEGIN transfer that carried it */
 };
 
 static inline uint32_t bflash_pending_offset(const struct bflash *f, unsigned int index)
@@ -143,7 +153,26 @@ static inline uint32_t bflash_pending_offset(const struct bflash *f, unsigned in
 	return f->geom.pending_off + index * BFLASH_PENDING_SLOT;
 }
 
-/* Erase the slot, write the layout, then the header (CRC over header + layout). */
+/* Erase a slot for a transfer: no record until it is sealed. */
+int bflash_pending_erase(struct bflash *f, unsigned int index);
+
+/* Write chunk `chunk` (< BFLASH_PENDING_CHUNKS, len <= LAYOUT_CHUNK_DATA_MAX)
+ * into an erased slot, padded with 0xFF to a write unit. */
+int bflash_pending_put(struct bflash *f, unsigned int index, unsigned int chunk,
+		       const uint8_t *data, size_t len);
+
+/* Read the layout bytes [0, len) of a slot as written, without the header. */
+int bflash_pending_body(struct bflash *f, unsigned int index, uint8_t *buf, size_t len);
+
+/*
+ * Make the slot a record: write its header (CRC over the header and `layout`,
+ * the h->len bytes the slot holds). The header goes last, so a reset at any
+ * earlier moment leaves no record.
+ */
+int bflash_pending_seal(struct bflash *f, unsigned int index, const struct bflash_pending *h,
+			const uint8_t *layout);
+
+/* Erase, write every chunk, seal (tests and tools). */
 int bflash_pending_write(struct bflash *f, unsigned int index, const struct bflash_pending *h,
 			 const uint8_t *layout);
 
@@ -155,6 +184,11 @@ enum bflash_pending_state {
 
 /* Header only: the slot's state; *h is filled for LIVE and CONSUMED. */
 int bflash_pending_peek(struct bflash *f, unsigned int index, struct bflash_pending *h);
+
+/* Header and CRC (the layout lands in buf, >= CTAG_LAYOUT_HARD_MAX bytes):
+ * LIVE or CONSUMED for an intact record, EMPTY otherwise, or a read error. */
+int bflash_pending_check(struct bflash *f, unsigned int index, struct bflash_pending *h,
+			 uint8_t *buf, size_t size);
 
 /*
  * Read a live record: 1 = live (layout in buf, which holds at least

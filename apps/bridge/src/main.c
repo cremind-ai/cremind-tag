@@ -76,24 +76,23 @@ void bev_post(const struct bev *e)
 size_t bridge_counters(struct ctag_cbor_counter *items, size_t max)
 {
 	const struct dlv_counters *d = &br.dlv.c;
-	const struct ctag_cbor_counter all[] = {
-		CTAG_CBOR_COUNTER("events_dropped", (uint32_t)atomic_get(&bev_dropped)),
-		CTAG_CBOR_COUNTER("layouts_accepted", d->layouts_accepted),
-		CTAG_CBOR_COUNTER("duplicates", d->duplicates),
-		CTAG_CBOR_COUNTER("superseded", d->superseded),
-		CTAG_CBOR_COUNTER("results", d->results),
-		CTAG_CBOR_COUNTER("result_resends", d->result_resends),
-		CTAG_CBOR_COUNTER("results_unacked", d->results_unacked),
-		CTAG_CBOR_COUNTER("storage_errors", d->storage_errors),
-		CTAG_CBOR_COUNTER("queue_depth", dlv_queue_depth(&br.dlv)),
-		CTAG_CBOR_COUNTER("assigned", dlv_assigned_count(&br.dlv)),
-		CTAG_CBOR_COUNTER("flash_errors", br.flash.errors),
-		CTAG_CBOR_COUNTER("cache_hits", br.flash.hits),
-		CTAG_CBOR_COUNTER("cache_misses", br.flash.misses),
-	};
-	size_t n = MIN(max, ARRAY_SIZE(all));
+	size_t n = 0u;
 
-	memcpy(items, all, n * sizeof(all[0]));
+	BRIDGE_COUNTER("events_dropped", (uint32_t)atomic_get(&bev_dropped));
+	BRIDGE_COUNTER("layouts_accepted", d->layouts_accepted);
+	BRIDGE_COUNTER("duplicates", d->duplicates);
+	BRIDGE_COUNTER("superseded", d->superseded);
+	BRIDGE_COUNTER("results", d->results);
+	BRIDGE_COUNTER("result_resends", d->result_resends);
+	BRIDGE_COUNTER("results_unacked", d->results_unacked);
+	BRIDGE_COUNTER("results_repeated", d->results_repeated);
+	BRIDGE_COUNTER("storage_errors", d->storage_errors);
+	BRIDGE_COUNTER("unauth_final", d->unauth_final);
+	BRIDGE_COUNTER("queue_depth", dlv_queue_depth(&br.dlv));
+	BRIDGE_COUNTER("assigned", dlv_assigned_count(&br.dlv));
+	BRIDGE_COUNTER("flash_errors", br.flash.errors);
+	BRIDGE_COUNTER("cache_hits", br.flash.hits);
+	BRIDGE_COUNTER("cache_misses", br.flash.misses);
 	n += central_counters(&items[n], max - n);
 	n += mesh_counters(&items[n], max - n);
 	return n;
@@ -130,7 +129,7 @@ static void dlv_send(void *ctx, uint8_t op, const uint8_t *params, size_t len)
 	}
 }
 
-/* ---- Boot (on the work queue: its stack serves both, main's stays small) ---- */
+/* ---- Boot (on the work queue; the main thread then serves the maintenance port) ---- */
 
 static void init_fn(struct k_work *work)
 {
@@ -190,8 +189,7 @@ static void init_fn(struct k_work *work)
 	}
 	/* Mesh state (keys, addresses, IV index) and the bridge's records. */
 	(void)settings_load();
-	/* The session's layout buffer doubles as scratch for the boot scan. */
-	dlv_start(&br.dlv, k_uptime_get_32(), br.sess.layout, sizeof(br.sess.layout));
+	dlv_start(&br.dlv, k_uptime_get_32());
 	LOG_INF("%u tags assigned, %u jobs restored", dlv_assigned_count(&br.dlv),
 		dlv_queue_depth(&br.dlv));
 	err = central_init();
@@ -217,5 +215,7 @@ int main(void)
 	k_work_queue_start(&bwq, bwq_stack, K_THREAD_STACK_SIZEOF(bwq_stack),
 			   CONFIG_CTAG_BRIDGE_WQ_PRIORITY, &cfg);
 	(void)k_work_submit_to_queue(&bwq, &init_work);
+	/* This thread (and its stack) becomes the maintenance port's. */
+	maint_port_run();
 	return 0;
 }

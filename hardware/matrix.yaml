@@ -40,7 +40,7 @@ bridges:
     external_flash: soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only)
     maintenance_link: usb_cdc_acm
     status: buildable
-    notes: apps/bridge links in the exact geometry and passes verify_stack.py (flash 70 % free, 150 KB RAM free); not flashed yet.
+    notes: apps/bridge links in the exact geometry and passes verify_stack.py (flash 70 % free, 155 KiB RAM free); not flashed yet.
   - id: nrf52832_bridge
     board_id: 4
     zephyr_board: nrf52dk/nrf52832
@@ -49,17 +49,13 @@ bridges:
     ram_kib: 64
     external_flash: soldered SPI NOR
     maintenance_link: uart_ch340
-    status: blocked
-    blocked_reason: >-
-      Measured (apps/bridge, NCS v3.4.1, 2026-09-28): the full bridge links with 65,321 of 65,536 B RAM used,
-      215 B free against the 8,192 B target, after the RAM trims of apps/bridge/socs/nrf52832.conf (one
-      advertising set, 68-byte HCI events, 1 KiB maintenance frames, 3.5 KiB work-queue stack). The bridge
-      application holds 31.3 KiB (two LAYOUT_HARD_MAX layout buffers 8 KiB: the one being assembled and the
-      one being rendered; maintenance port 7.6 KiB; work-queue stack 3.5 KiB); Zephyr controller 9.4 KiB,
-      host 9.2 KiB, mesh 5.3 KiB, kernel stacks 6.3 KiB, PSA 1.9 KiB. Meeting 8 KiB needs a design change
-      (assembling layouts in external flash and one shared layout buffer, a 10-tag table), not a
-      controller switch. docs/bridge-firmware.md "Memory".
-    notes: Pending layouts already live in external flash; SPI NOR pins on the nRF52 DK are placeholders.
+    status: buildable
+    notes: >-
+      apps/bridge links in the exact geometry, passes verify_stack.py and meets the targets (measured 2026-09-28,
+      NCS v3.4.1): 8,537 B RAM free (target 8,192), flash 44.9 % free. Layouts are assembled in external flash
+      with one shared layout buffer, the maintenance port runs on the main thread with 512-byte frames, and the
+      assignment table holds 10 tags (CAPS max_tags 10; the nRF52840 keeps 20). Stack sizes are estimates until
+      measured; SPI NOR pins on the nRF52 DK are placeholders; not flashed yet. docs/bridge-firmware.md "Memory".
 
 tags:
   - id: laowu_bw

@@ -15,8 +15,12 @@
 #define NO_LINE   UINT32_MAX
 #define CONSUMED  (BFLASH_PENDING_SLOT - 4u)
 
+#define CHUNK     CTAG_LAYOUT_CHUNK_DATA_MAX
+
 BUILD_ASSERT((LINE & (LINE - 1)) == 0 && LINE >= 32, "cache line: a power of two >= 32");
-BUILD_ASSERT(BFLASH_PENDING_HDR + CTAG_LAYOUT_HARD_MAX <= CONSUMED, "pending slot too small");
+BUILD_ASSERT(BFLASH_PENDING_HDR + BFLASH_PENDING_CHUNKS * BFLASH_PENDING_STRIDE <= CONSUMED,
+	     "pending slot too small");
+BUILD_ASSERT(BFLASH_PENDING_CHUNKS * CHUNK >= CTAG_LAYOUT_HARD_MAX, "chunks cannot hold a layout");
 
 int bflash_geom_compute(uint64_t flash_size, uint32_t working_space, struct bflash_geom *g)
 {
@@ -283,6 +287,7 @@ static void pending_encode(const struct bflash_pending *h, uint8_t out[BFLASH_PE
 	memcpy(&out[32], h->fontpack_id, CTAG_FONTPACK_ID_LEN);
 	memcpy(&out[40], h->digest, CTAG_LAYOUT_DIGEST_LEN);
 	ctag_put_le16(&out[56], h->len);
+	ctag_put_le16(&out[58], h->xfer_id);
 }
 
 static bool pending_decode(const uint8_t in[BFLASH_PENDING_HDR], struct bflash_pending *h)
@@ -299,36 +304,82 @@ static bool pending_decode(const uint8_t in[BFLASH_PENDING_HDR], struct bflash_p
 	memcpy(h->fontpack_id, &in[32], CTAG_FONTPACK_ID_LEN);
 	memcpy(h->digest, &in[40], CTAG_LAYOUT_DIGEST_LEN);
 	h->len = ctag_get_le16(&in[56]);
+	h->xfer_id = ctag_get_le16(&in[58]);
 	return h->len > 0u && h->len <= CTAG_LAYOUT_HARD_MAX;
 }
 
-int bflash_pending_write(struct bflash *f, unsigned int index, const struct bflash_pending *h,
-			 const uint8_t *layout)
+static uint32_t chunk_offset(const struct bflash *f, unsigned int index, unsigned int chunk)
 {
-	uint32_t off = bflash_pending_offset(f, index);
+	return bflash_pending_offset(f, index) + BFLASH_PENDING_HDR + chunk * BFLASH_PENDING_STRIDE;
+}
+
+int bflash_pending_erase(struct bflash *f, unsigned int index)
+{
+	if (index >= f->geom.pending_slots) {
+		return -EINVAL;
+	}
+	return bflash_erase(f, bflash_pending_offset(f, index), BFLASH_PENDING_SLOT);
+}
+
+int bflash_pending_put(struct bflash *f, unsigned int index, unsigned int chunk,
+		       const uint8_t *data, size_t len)
+{
+	uint8_t buf[BFLASH_PENDING_STRIDE] __aligned(4);
+
+	if (index >= f->geom.pending_slots || chunk >= BFLASH_PENDING_CHUNKS || len == 0u ||
+	    len > CHUNK) {
+		return -EINVAL;
+	}
+	memcpy(buf, data, len);
+	memset(&buf[len], 0xFF, sizeof(buf) - len);
+	return bflash_write(f, chunk_offset(f, index, chunk), buf,
+			    ROUND_UP(len, BFLASH_WRITE_UNIT));
+}
+
+int bflash_pending_body(struct bflash *f, unsigned int index, uint8_t *buf, size_t len)
+{
+	unsigned int i;
+	int err = 0;
+
+	if (index >= f->geom.pending_slots || len > CTAG_LAYOUT_HARD_MAX) {
+		return -EINVAL;
+	}
+	for (i = 0u; err == 0 && (size_t)i * CHUNK < len; i++) {
+		err = bflash_read(f, chunk_offset(f, index, i), &buf[i * CHUNK],
+				  MIN((size_t)CHUNK, len - (size_t)i * CHUNK));
+	}
+	return err;
+}
+
+int bflash_pending_seal(struct bflash *f, unsigned int index, const struct bflash_pending *h,
+			const uint8_t *layout)
+{
 	uint8_t hdr[BFLASH_PENDING_HDR] __aligned(4);
-	uint8_t tail[BFLASH_WRITE_UNIT] __aligned(4);
-	size_t whole = ROUND_DOWN((size_t)h->len, BFLASH_WRITE_UNIT);
-	uint32_t crc;
-	int err;
 
 	if (index >= f->geom.pending_slots || h->len == 0u || h->len > CTAG_LAYOUT_HARD_MAX) {
 		return -EINVAL;
 	}
 	pending_encode(h, hdr);
-	crc = ctag_crc32(ctag_crc32(0u, hdr, 60u), layout, h->len);
-	ctag_put_le32(&hdr[60], crc);
-	err = bflash_erase(f, off, BFLASH_PENDING_SLOT);
-	if (err == 0) {
-		err = bflash_write(f, off + BFLASH_PENDING_HDR, layout, whole);
+	ctag_put_le32(&hdr[60], ctag_crc32(ctag_crc32(0u, hdr, 60u), layout, h->len));
+	return bflash_write(f, bflash_pending_offset(f, index), hdr, sizeof(hdr));
+}
+
+int bflash_pending_write(struct bflash *f, unsigned int index, const struct bflash_pending *h,
+			 const uint8_t *layout)
+{
+	unsigned int i;
+	int err;
+
+	if (index >= f->geom.pending_slots || h->len == 0u || h->len > CTAG_LAYOUT_HARD_MAX) {
+		return -EINVAL;
 	}
-	if (err == 0 && whole < h->len) {
-		memset(tail, 0xFF, sizeof(tail));
-		memcpy(tail, &layout[whole], h->len - whole);
-		err = bflash_write(f, off + BFLASH_PENDING_HDR + (uint32_t)whole, tail, sizeof(tail));
+	err = bflash_pending_erase(f, index);
+	for (i = 0u; err == 0 && (size_t)i * CHUNK < h->len; i++) {
+		err = bflash_pending_put(f, index, i, &layout[i * CHUNK],
+					 MIN((size_t)CHUNK, (size_t)h->len - i * CHUNK));
 	}
 	/* The header goes last: a reset before this point leaves no valid record. */
-	return err != 0 ? err : bflash_write(f, off, hdr, sizeof(hdr));
+	return err != 0 ? err : bflash_pending_seal(f, index, h, layout);
 }
 
 static int pending_header(struct bflash *f, unsigned int index, uint8_t hdr[BFLASH_PENDING_HDR],
@@ -361,24 +412,34 @@ int bflash_pending_peek(struct bflash *f, unsigned int index, struct bflash_pend
 	return pending_header(f, index, hdr, h);
 }
 
-int bflash_pending_read(struct bflash *f, unsigned int index, struct bflash_pending *h,
-			uint8_t *buf, size_t size)
+int bflash_pending_check(struct bflash *f, unsigned int index, struct bflash_pending *h,
+			 uint8_t *buf, size_t size)
 {
 	uint8_t hdr[BFLASH_PENDING_HDR] __aligned(4);
-	int st;
+	int st, err;
 
 	if (buf == NULL || size < CTAG_LAYOUT_HARD_MAX) {
 		return -EINVAL;
 	}
 	st = pending_header(f, index, hdr, h);
-	if (st != BFLASH_PENDING_LIVE) {
-		return st < 0 ? st : 0;
-	}
-	st = bflash_read(f, bflash_pending_offset(f, index) + BFLASH_PENDING_HDR, buf, h->len);
-	if (st != 0) {
+	if (st <= 0) {
 		return st;
 	}
-	return ctag_crc32(ctag_crc32(0u, hdr, 60u), buf, h->len) == ctag_get_le32(&hdr[60]) ? 1 : 0;
+	err = bflash_pending_body(f, index, buf, h->len);
+	if (err != 0) {
+		return err;
+	}
+	return ctag_crc32(ctag_crc32(0u, hdr, 60u), buf, h->len) == ctag_get_le32(&hdr[60])
+		       ? st
+		       : BFLASH_PENDING_EMPTY;
+}
+
+int bflash_pending_read(struct bflash *f, unsigned int index, struct bflash_pending *h,
+			uint8_t *buf, size_t size)
+{
+	int st = bflash_pending_check(f, index, h, buf, size);
+
+	return st < 0 ? st : (st == BFLASH_PENDING_LIVE ? 1 : 0);
 }
 
 int bflash_pending_consume(struct bflash *f, unsigned int index)

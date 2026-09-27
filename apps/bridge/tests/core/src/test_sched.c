@@ -20,6 +20,13 @@ struct mock {
 	bool suspended; /* the mesh's real state */
 	bool initiating;
 	int suspend_ret;
+	int suspend_seq[8]; /* consumed in order before suspend_ret */
+	size_t suspend_n, suspend_i;
+	/* The pinned bt_mesh_suspend()/resume() semantics: a suspend that fails
+	 * part-way stops the scanner without flagging the mesh suspended, and a
+	 * resume of a mesh not flagged suspended is -EALREADY and does nothing. */
+	bool strict;
+	bool scanning;
 	int create_ret;
 	int resume_ret[16]; /* consumed in order; 0 afterwards */
 	size_t resume_i;
@@ -50,11 +57,16 @@ static bool op_busy(void *ctx)
 
 static int op_suspend(void *ctx)
 {
+	int r = m.suspend_i < m.suspend_n ? m.suspend_seq[m.suspend_i++] : m.suspend_ret;
+
 	m.suspends++;
-	if (m.suspend_ret == 0 || m.suspend_ret == -EALREADY) {
+	if (r == 0 || r == -EALREADY) {
 		m.suspended = true;
+		m.scanning = false;
+	} else if (m.strict && r != -EBUSY && r != -EINVAL) {
+		m.scanning = false; /* failed after stopping the scanner */
 	}
-	return m.suspend_ret;
+	return r;
 }
 
 static int op_resume(void *ctx)
@@ -63,12 +75,16 @@ static int op_resume(void *ctx)
 
 	m.resumes++;
 	m.now += m.resume_ms;
+	if (m.strict && !m.suspended) {
+		return -EALREADY;
+	}
 	/* Scanning cannot restart while the controller still initiates. */
 	if (r == 0 && m.initiating) {
 		r = -EPERM;
 	}
 	if (r == 0) {
 		m.suspended = false;
+		m.scanning = true;
 	}
 	return r;
 }
@@ -213,6 +229,79 @@ ZTEST(bridge_sched, test_suspend_rejected_no_attempt)
 	zassert_equal(s.c.backoff_skips, 1);
 	sched_advert(&s, 9, &peer); /* another tag is not held back */
 	zassert_equal(m.suspends, 2);
+}
+
+/* -EINVAL (mesh not ready) and -EBUSY (provisioning) touch nothing. */
+ZTEST(bridge_sched, test_suspend_refusals_leave_the_mesh_alone)
+{
+	m.strict = true;
+	m.scanning = true;
+	m.suspend_ret = -EINVAL;
+	sched_advert(&s, 7, &peer);
+	zassert_equal(s.state, SCHED_IDLE);
+	zassert_true(m.scanning);
+	zassert_equal(s.c.recoveries, 0);
+}
+
+/* bt_mesh_suspend() failing part-way (review: the scanner stopped, the mesh
+ * not flagged suspended): RECOVERY suspends fully, then resumes. */
+ZTEST(bridge_sched, test_partial_suspend_failure_recovers)
+{
+	m.strict = true;
+	m.scanning = true;
+	m.suspend_seq[0] = -EIO;
+	m.suspend_n = 1;
+	sched_advert(&s, 7, &peer);
+	zassert_equal(m.creates, 0, "no connection attempt");
+	zassert_false(m.scanning, "the failure stopped the scanner");
+	zassert_equal(s.state, SCHED_RECOVERY);
+	zassert_equal(s.last_status, CTAG_STATUS_MESH_SUSPEND_FAILED);
+	/* A plain resume would be -EALREADY and change nothing. */
+	fire();
+	zassert_equal(m.suspends, 2);
+	zassert_equal(m.resumes, 1);
+	zassert_true(m.scanning, "scanning again");
+	zassert_equal(s.state, SCHED_IDLE);
+	zassert_equal(m.reboots, 0);
+}
+
+ZTEST(bridge_sched, test_partial_suspend_failure_reboots)
+{
+	uint32_t t0 = m.now;
+
+	m.strict = true;
+	m.scanning = true;
+	m.suspend_ret = -EIO; /* the controller keeps refusing */
+	sched_advert(&s, 7, &peer);
+	zassert_equal(s.state, SCHED_RECOVERY);
+	while (m.reboots == 0u) {
+		zassert_true(m.now - t0 < 2u * SCHED_RECOVERY_MS, "never rebooted");
+		fire();
+		zassert_equal(m.creates, 0);
+	}
+	zassert_true(m.now - t0 >= SCHED_RECOVERY_MS, "rebooted after %u ms", m.now - t0);
+	zassert_false(m.scanning);
+}
+
+/* Liveness: idle (scanning) and no advertising report for the limit. */
+ZTEST(bridge_sched, test_liveness)
+{
+	const uint32_t limit = 1800u * 1000u;
+	uint32_t t0 = m.now;
+
+	zassert_false(sched_deaf(&s, t0 + limit - 1u, t0, limit));
+	zassert_true(sched_deaf(&s, t0 + limit, t0, limit));
+	zassert_false(sched_deaf(&s, t0 + limit, t0 + 1000u, limit), "a report since");
+	zassert_false(sched_deaf(&s, t0 + limit, t0, 0u), "disabled");
+	/* Not idle (the mesh is suspended for an attempt): not a deaf scanner. */
+	sched_advert(&s, 7, &peer);
+	zassert_equal(s.state, SCHED_CONNECTING);
+	zassert_false(sched_deaf(&s, t0 + 2u * limit, t0, limit));
+	/* Back to idle: silence counts from then. */
+	connected(HCI_UNKNOWN_CONN_ID);
+	zassert_equal(s.state, SCHED_IDLE);
+	zassert_false(sched_deaf(&s, m.now + limit - 1u, t0, limit));
+	zassert_true(sched_deaf(&s, m.now + limit, t0, limit));
 }
 
 ZTEST(bridge_sched, test_suspend_already_never_left_suspended)

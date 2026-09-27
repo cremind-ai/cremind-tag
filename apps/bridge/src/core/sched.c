@@ -100,6 +100,14 @@ bool sched_busy(const struct sched *s)
 	return s->state != SCHED_IDLE;
 }
 
+bool sched_deaf(const struct sched *s, uint32_t t, uint32_t heard_ms, uint32_t limit_ms)
+{
+	/* Idle means scanning (the mesh runs); silence counts from the later of the
+	 * last report and the moment the scheduler went idle. */
+	return limit_ms != 0u && s->state == SCHED_IDLE && t - heard_ms >= limit_ms &&
+	       t - s->t_state >= limit_ms;
+}
+
 static void to_idle(struct sched *s)
 {
 	set_state(s, SCHED_IDLE);
@@ -111,6 +119,21 @@ static void to_disconnecting(struct sched *s)
 	(void)s->ops->disconnect(s->ctx);
 	set_state(s, SCHED_DISCONNECTING);
 	arm(s, SCHED_DISCONNECT_WAIT_MS);
+}
+
+/*
+ * RECOVERY: retry until the mesh runs again, reboot after SCHED_RECOVERY_MS.
+ * unknown: bt_mesh_suspend() failed part-way (it may have stopped the scanner
+ * and not flagged the mesh suspended, so bt_mesh_resume() alone would answer
+ * -EALREADY and change nothing): each retry suspends fully, then resumes.
+ */
+static void enter_recovery(struct sched *s, bool unknown)
+{
+	s->c.recoveries++;
+	s->mesh_unknown = unknown;
+	set_state(s, SCHED_RECOVERY);
+	s->retry_ms = SCHED_RESUME_RETRY_MS;
+	arm(s, s->retry_ms);
 }
 
 /*
@@ -146,14 +169,11 @@ static void resume_after_attempt(struct sched *s, bool session, uint8_t fail_sta
 	}
 	/* Resume failure: no session on this link; controlled recovery. */
 	s->c.resume_fail++;
-	s->c.recoveries++;
 	backoff(s, s->tag_id, CTAG_STATUS_MESH_RESUME_FAILED);
 	if (s->conn_up) {
 		(void)s->ops->disconnect(s->ctx);
 	}
-	set_state(s, SCHED_RECOVERY);
-	s->retry_ms = SCHED_RESUME_RETRY_MS;
-	arm(s, s->retry_ms);
+	enter_recovery(s, false);
 }
 
 static void attempt(struct sched *s)
@@ -178,7 +198,11 @@ static void attempt(struct sched *s)
 		/* 5.2 step 4: no connection is attempted. */
 		s->c.suspend_fail++;
 		backoff(s, s->tag_id, CTAG_STATUS_MESH_SUSPEND_FAILED);
-		to_idle(s);
+		if (err == -EINVAL || err == -EBUSY) {
+			to_idle(s); /* refused before touching anything (not ready, provisioning) */
+		} else {
+			enter_recovery(s, true); /* failed part-way: the mesh state is unknown */
+		}
 		return;
 	}
 	s->mesh_suspended = true;
@@ -327,7 +351,14 @@ void sched_timeout(struct sched *s)
 		resume_after_attempt(s, false, CTAG_STATUS_CONNECT_FAILED);
 		break;
 	case SCHED_RECOVERY:
-		err = s->ops->mesh_resume(s->ctx);
+		if (s->mesh_unknown) {
+			err = s->ops->mesh_suspend(s->ctx);
+			if (err == 0 || err == -EALREADY) {
+				s->mesh_unknown = false;
+				s->mesh_suspended = true;
+			}
+		}
+		err = s->mesh_unknown ? -EIO : s->ops->mesh_resume(s->ctx);
 		if (err == 0 || err == -EALREADY) {
 			s->mesh_suspended = false;
 			if (s->conn_up) {

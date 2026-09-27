@@ -1,15 +1,20 @@
 # Qualification report: nRF52832 bridge (`nrf52832_bridge`)
 
-Status: **blocked** ([status definitions](../hardware/matrix.md))
+Status: **buildable** ([status definitions](../hardware/matrix.md))
 
-> **Blocked on RAM (measured, not a controller issue).** The complete bridge
-> (`apps/bridge`, [bridge-firmware.md](../bridge-firmware.md)) links in this
-> board's geometry and passes `tools/verify_stack.py`, but leaves **215 B** of
-> RAM free against the **8,192 B** target, after the trims of
-> `apps/bridge/socs/nrf52832.conf`. Where the 64 KiB go and what would free
-> 8 KiB: [bridge-firmware.md §9](../bridge-firmware.md#9-memory). The external
-> SPI NOR pins in `apps/bridge/boards/nrf52dk_nrf52832.overlay` are
-> placeholders until an nRF52832 bridge board is chosen.
+> The complete bridge (`apps/bridge`, [bridge-firmware.md](../bridge-firmware.md))
+> links in this board's exact geometry, passes `tools/verify_stack.py` and
+> meets both targets: **8,537 B** of RAM free (target 8,192 B) and 44.9 % of
+> the flash free. It got there by a design change shared with the nRF52840 —
+> layouts assembled in their external-flash record and one shared layout
+> buffer, the maintenance thread on the main thread — plus this SoC's
+> 512-byte maintenance frames and a **10-tag assignment table**
+> (`CAPS_STATUS.max_tags` = 10; the nRF52840 keeps 20): see
+> [bridge-firmware.md §9](../bridge-firmware.md#9-memory). The margin is
+> 345 B. Its 3.5 KiB work-queue and 2 KiB main (maintenance) stacks are
+> estimates until measured on hardware (§11 H12). The external SPI NOR pins in
+> `apps/bridge/boards/nrf52dk_nrf52832.overlay` are placeholders until an
+> nRF52832 bridge board is chosen. Nothing has run on a physical sample yet.
 
 ## 1. Identity
 
@@ -47,7 +52,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| bridge-nrf52dk | `apps/bridge` | 272,928 / 499,712 | 45.4 % (15 %) | 65,321 / 65,536 | 215 (8,192) | pass (edtlib) | resource-miss | 2026-09-27 |
+| bridge-nrf52dk | `apps/bridge` | 275,148 / 499,712 | 44.9 % (15 %) | 56,999 / 65,536 | 8,537 (8,192) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -92,3 +97,4 @@ Measure with development equipment disconnected, after a power-on reset.
 |---|---|---|
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
 | 2026-09-28 | blocked | `bridge-nrf52dk` (`apps/bridge`): 272,928 B flash of 488 KiB (45.4 % free); RAM 65,321 of 65,536 B, 215 B free vs the 8,192 B target (bridge application 31.3 KiB incl. two 4 KiB layout buffers, maintenance port 7.6 KiB, work-queue stack 3.5 KiB; controller 9.4 KiB, host 9.2 KiB, mesh 5.3 KiB, kernel stacks 6.3 KiB, PSA 1.9 KiB). `verify_stack.py` 16/16 pass. |
+| 2026-09-28 | buildable | Design change of bridge-firmware.md §9: layouts assembled in external flash with one shared 4 KiB layout buffer (−4 KiB), the maintenance thread on the main thread (−1.1 KiB), 512-byte maintenance frames and a 1,280-byte response buffer, a 10-tag assignment table (`max_tags` 10). `bridge-nrf52dk`: 275,148 B flash (44.9 % free); RAM 56,999 of 65,536 B, **8,537 B free** (bridge core state 10,984 B incl. the shared layout buffer; maintenance port 3,484 B; work-queue stack 3.5 KiB; kernel stacks incl. the 2 KiB main/maintenance stack 7,370 B; controller 9,439 B, host 9,195 B, mesh 5,336 B, PSA 1,856 B). `verify_stack.py` 16/16 pass; 312 native_sim test cases (the nRF52832 sizes are a twister configuration of their own) and the companion interop at 512-byte frames pass. |
