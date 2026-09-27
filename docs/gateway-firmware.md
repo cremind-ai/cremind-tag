@@ -309,8 +309,12 @@ simulator does: `ASSIGN_TAG` sets `(bridge, tag) → epoch`, `UNASSIGN_TAG`
 removes it unless a newer epoch is stored), which the inventory and
 `EVT_BRIDGE_INFO` list. Inventory items: `addr, uuid, name, configured,
 last_seen_s, assigned` and, once the bridge answered, `fw, fontpack_id, caps
-{board, flash_size, max_tags, flags, proto}, board, flash_size` and `counters`
-(its HEALTH_STATUS).
+{board, flash_size, max_tags, assigned_count, flags, proto}, board, flash_size`
+and `counters` (its HEALTH_STATUS). `caps.assigned_count` is the bridge's own
+count of assigned tags (`CAPS_STATUS.assigned`), which `EVT_BRIDGE_INFO`
+carries too: the gateway's `assigned` list only holds what it assigned itself,
+so a bridge restored or moved with tags already on it reports more; the
+companion reports the bridge's count as its capacity use.
 
 `TAG_SEEN` from a bridge becomes `EVT_TAG_SEEN {bridge, tag_id, rssi,
 battery_mv, flags}`, at most one per `(bridge, tag)` every 10 s

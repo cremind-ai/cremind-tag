@@ -24,8 +24,8 @@ Every board moves through these states; qualification reports in
 
 | Board | Board id | Zephyr board | MCU | Flash / RAM | External flash | Maintenance link | Status | Notes |
 |---|---|---|---|---|---|---|---|---|
-| [nrf52840_bridge](../qualification/nrf52840_bridge.md) | 3 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only) | usb_cdc_acm | buildable | apps/bridge links in the exact geometry and passes verify_stack.py (flash 70 % free, 154 KiB RAM free); not flashed yet. |
-| [nrf52832_bridge](../qualification/nrf52832_bridge.md) | 4 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | soldered SPI NOR | uart_ch340 | buildable | apps/bridge links in the exact geometry, passes verify_stack.py and meets the targets (measured 2026-09-28, NCS v3.4.1): 8,473 B RAM free (target 8,192), flash 44.8 % free. Layouts are assembled in external flash with one shared layout buffer, the maintenance port runs on the main thread with 512-byte frames, and the assignment table holds 10 tags (CAPS max_tags 10; the nRF52840 keeps 20), with one cached QR symbol (the nRF52840 keeps four). Stack sizes are estimates until measured; SPI NOR pins on the nRF52 DK are placeholders; not flashed yet. docs/bridge-firmware.md "Memory". |
+| [nrf52840_bridge](../qualification/nrf52840_bridge.md) | 3 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only) | usb_cdc_acm | buildable | apps/bridge links in the exact geometry and passes verify_stack.py (flash 69.7 % free, 144 KiB RAM free with two tag sessions at once); not flashed yet. |
+| [nrf52832_bridge](../qualification/nrf52832_bridge.md) | 4 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | soldered SPI NOR | uart_ch340 | buildable | apps/bridge links in the exact geometry, passes verify_stack.py and meets the targets (measured 2026-09-28, NCS v3.4.1): 8,409 B RAM free (target 8,192), flash 44.5 % free. Layouts are assembled in external flash with one shared layout buffer, the maintenance port runs on the main thread with 512-byte frames, and the assignment table holds 10 tags (CAPS max_tags 10; the nRF52840 keeps 20), with one cached QR symbol (the nRF52840 keeps four) and one tag session at a time (the nRF52840 holds two). Stack sizes are estimates until measured; SPI NOR pins on the nRF52 DK are placeholders; not flashed yet. docs/bridge-firmware.md "Memory". |
 
 ## Tags
 
@@ -67,14 +67,14 @@ From [`tools/targets.yaml`](../../tools/targets.yaml); build with `python tools/
 
 ## Latest build facts
 
-From `build/memory-report.json` generated 2026-09-27T21:09:57+00:00 (NCS v3.4.1).
+From `build/memory-report.json` generated 2026-09-27T22:43:34+00:00 (NCS v3.4.1).
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| gateway-nrf52840dk | `apps/gateway` | 229,912 / 1,015,808 | 77.4 % (15 %) | 100,372 / 262,144 | 161,772 (none) | pass (edtlib) | ok | 2026-09-27 |
-| gateway-nrf52dk | `apps/gateway` | 198,764 / 499,712 | 60.2 % (15 %) | 60,848 / 65,536 | 4,688 (none) | pass (edtlib) | ok | 2026-09-27 |
-| bridge-nrf52840dk | `apps/bridge` | 304,648 / 1,015,808 | 70.0 % (15 %) | 104,770 / 262,144 | 157,374 (none) | pass (edtlib) | ok | 2026-09-27 |
-| bridge-nrf52dk | `apps/bridge` | 276,080 / 499,712 | 44.8 % (15 %) | 57,063 / 65,536 | 8,473 (8,192) | pass (edtlib) | ok | 2026-09-27 |
+| gateway-nrf52840dk | `apps/gateway` | 229,928 / 1,015,808 | 77.4 % (15 %) | 100,436 / 262,144 | 161,708 (none) | pass (edtlib) | ok | 2026-09-27 |
+| gateway-nrf52dk | `apps/gateway` | 198,800 / 499,712 | 60.2 % (15 %) | 60,912 / 65,536 | 4,624 (none) | pass (edtlib) | ok | 2026-09-27 |
+| bridge-nrf52840dk | `apps/bridge` | 307,960 / 1,015,808 | 69.7 % (15 %) | 114,474 / 262,144 | 147,670 (none) | pass (edtlib) | ok | 2026-09-27 |
+| bridge-nrf52dk | `apps/bridge` | 277,460 / 499,712 | 44.5 % (15 %) | 57,127 / 65,536 | 8,409 (8,192) | pass (edtlib) | ok | 2026-09-27 |
 | tag-laowu-bw | `apps/tag` | 95,508 / 126,976 | 24.8 % (15 %) | 14,316 / 16,384 | 2,068 (2,048) | pass (edtlib) | ok | 2026-09-27 |
 | tag-laowu-bwr | `apps/tag` | 95,628 / 258,048 | 62.9 % (15 %) | 14,324 / 16,384 | 2,060 (2,048) | pass (edtlib) | ok | 2026-09-27 |
 | tag-sifei-52810 | `apps/tag` | 100,492 / 188,416 | 46.7 % (15 %) | 15,520 / 24,576 | 9,056 (3,072) | pass (edtlib) | ok | 2026-09-27 |

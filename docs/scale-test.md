@@ -24,12 +24,20 @@ uv run --project companion python tools/sim_scale.py --json build/scale.json --m
 
 cd companion
 uv run pytest tests/scale -q                            # fast: 20 trials per scenario at time scale 20 (~40 s)
-CREMIND_TAG_SCALE_FULL=1 uv run pytest tests/scale -q   # full: 200 trials at time scale 10 (~5 min)
+CREMIND_TAG_SCALE_FULL=1 uv run pytest tests/scale -q   # full: 200 trials at time scale 10 (~6 min)
 uv run pytest -m "not slow"                             # everything else
 ```
 
-Both pytest variants fail on any invariant (§3.5); the full one also warns
-when the baseline misses the 60 s target, which it does for some seeds (§6.1).
+Both pytest variants gate on the **invariants** (§3.5): a violation fails
+them whatever the timing. Latency is asserted only by the fast variant and only
+for the baseline, with a bound its ~20 trials can carry: at least 70 %
+initiated within 60 s (the full runs measure 96–100 %, §5; if the true share
+were even 95 %, 15–30 trials would miss 70 % with probability below 0.001, so
+a failure is a regression, not noise — `test_fast_floor_is_not_noise` checks
+the arithmetic). The faults scenario asserts no latency (its ~20 trials are
+dominated by the two injected 45 s Cremind outages), only its invariants and
+that every fault fired. The full variant reports its latency without failing
+on it (a warning when the baseline misses the target).
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -41,6 +49,8 @@ when the baseline misses the 60 s target, which it does for some seeds (§6.1).
 | `--competing` | 1 | competing-traffic level (multiplies the loss rates of §3.2; 0 = off) |
 | `--relayed` | 1 | how many of the last bridges sit behind a relay |
 | `--adv-window-ms` | protocol (2000) | what-if only: the simulated tags' advertising window (§6.2) |
+| `--sessions` | the simulator's (2: the nRF52840 bridge's) | what-if: tag sessions per bridge at once (protocol §5.2; 1 = the scheduling before §6.2) |
+| `--quick-retry` / `--no-quick-retry` | the simulator's (on) | what-if: one retry within the tag's window after a failed connection (protocol §5.2) |
 | `--json`, `--markdown`, `--daemon-log`, `--keep` | – | the full report, the result tables, the daemon's and simulator's INFO log, the run's data directory |
 
 The exit status is 0 when every invariant holds in every scenario and the
@@ -52,10 +62,11 @@ a few trials (§6.3).
 ## 2. What runs
 
 - **Topology.** One gateway, five bridges (`bridge-1` … `bridge-5`, mesh
-  addresses 0x0002–0x0006), twenty tags assigned round-robin (four per bridge,
-  `bridge-5` serves tags 5, 10, 15 and 20), all 400 × 300 black/white panels
-  (UC8176, 4 s refresh), tags waking every 30 s ± 3 s with 2 s advertising
-  windows (the protocol constants).
+  addresses 0x0002–0x0006, nRF52840 bridges: two tag sessions at once and the
+  quick retry of protocol §5.2, as the firmware), twenty tags assigned
+  round-robin (four per bridge, `bridge-5` serves tags 5, 10, 15 and 20), all
+  400 × 300 black/white panels (UC8176, 4 s refresh), tags waking every
+  30 s ± 3 s with 2 s advertising windows (the protocol constants).
 - **The relay.** `bridge-5` reaches the gateway only through `bridge-4`. The
   simulator models no mesh relaying (docs/simulator.md, "not modelled"), so the
   tool wraps `MeshNetwork.send`: every message to or from `bridge-5` takes a
@@ -143,10 +154,19 @@ BLE connection attempts fail although the tag advertises.
   `refresh` (the tag's), and `ble_transfer` = `transfer` − `refresh`. The fields
   are u16 milliseconds: 65.53 s means "65.5 s or more".
 - **Advertising windows**: every 2 s window in which a tag had work waiting at
-  its bridge, with what became of it — served, or missed because the bridge was
-  in a session with another tag (one session per bridge at a time, held through
-  the 4 s refresh), the connection attempt failed, the tag was in its 15 s
-  back-off, or the bridge's 6-per-minute suspend limit was reached.
+  its bridge, with what became of it — served (possibly by the quick retry of
+  a failed connection), or missed because the bridge could not start an
+  attempt (`bridge_busy`: another initiation in progress, both session slots
+  taken, or an open session streaming; with one session per bridge, any
+  session with another tag, held through the 4 s refresh), the connection
+  attempts failed, the tag was in its 15 s back-off, or the bridge's
+  6-per-minute suspend limit was reached. The tool records why each of the
+  tag's advertisements started no attempt.
+- **Scheduling and the relay**: per bridge the suspensions (the most in any
+  rolling minute, the rate during the traffic, the mesh's suspended share),
+  failed connections, quick retries, sessions started beside another one;
+  the relay hop's mesh time (`mesh` of the relayed bridge's screens against
+  the direct ones) and the messages that waited for the relay's resume.
 - **Delivery initiation** = queued → `transferring` (the tag started receiving
   a screen that shows the card). The acceptance population is the trials minus
   cards held in a footer by the screen model (counted in "N more updates
@@ -175,9 +195,11 @@ BLE connection attempts fail although the tag advertises.
 Modelled, with the real code: the serial protocol, credits, retained events and
 op-id idempotency; the gateway's queue of four (`BUSY`), one segmented send at a
 time, chunk re-sends and commit repeats; the bridges' validation, history,
-`SUPERSEDED`, results with retries and acks, the protocol §5.2 scheduler (one attempt or
-session at a time, 6 suspends per rolling minute, 15 s per-tag back-off, 1 s
-connection attempts); the full GATT session with the real handshake and AES-CCM
+`SUPERSEDED`, results with retries and acks, the protocol §5.2 scheduler (one
+initiation at a time, two sessions per bridge with the second initiated only
+while the first refreshes, one quick retry after a failed connection, 6
+suspends per rolling minute, 15 s per-tag back-off, 1 s connection attempts);
+the full GATT session with the real handshake and AES-CCM
 records at ≤ 4 records per 40 ms connection event; the tag's wake cycle and
 display transaction; the daemon end to end, including SQLite durability, and
 Cremind's connector semantics.
@@ -189,6 +211,7 @@ Not modelled, and which way it biases the numbers:
 | Radio physics: range, collisions, interference, channel maps, supervision timeouts | replaced by the loss/latency model of §3.2; real interference is burstier (correlated losses) — **optimistic** |
 | Mesh relaying, TTL, network retransmissions, friend/proxy | the relay is a latency + suspension wrapper; a real relay also forwards other bridges' traffic and has its own queue — **optimistic** for bursts through the relay |
 | Radio time shared between the BLE link and the mesh during a session | the simulated mesh keeps full speed while a bridge streams a frame — **optimistic** for mesh latency to a busy bridge |
+| Two links on one bridge | two streaming links split the connection events evenly; an initiation beside an idle link costs it nothing; the GATT setup and handshake take no air time — **optimistic** until H19 (bridge-firmware.md §11) measures the controller's scheduling |
 | Host speed | composition, SQLite and crypto run at host speed ×10 in simulated time (≈ 18 % of one core at time scale 10) — **pessimistic**, by up to a few seconds per delivery |
 | Real refresh and transfer times | the simulator's BW refresh is 4 s ± 5 % and a record costs one 40 ms connection event per 4 records; a BWR panel (15 s) holds a bridge four times longer — not tested here |
 | Reboot durations | a bridge is off the mesh for 3 s; a gateway reboot and a USB re-enumeration are instant (real USB enumeration takes 1–3 s) |
@@ -198,104 +221,130 @@ Not modelled, and which way it biases the numbers:
 
 ## 5. Results
 
-All results are from the final code (the fixes of §7 included): 200 trials per
-run, time scale 10, the traffic of §3.1 at 5 events per minute. The raw reports
-are the JSON and Markdown files `tools/sim_scale.py` writes.
+All results are from the final code — the bridge scheduling of protocol §5.2
+(two tag sessions per nRF52840 bridge, the second initiated while the first
+refreshes; one quick retry of a failed connection inside the tag's window) and
+the fixes of §7 — with 200 trials per run, time scale 10, the traffic of §3.1
+at 5 events per minute. §6.2 compares the scheduling with the one-session
+bridge measured before. The raw reports are the JSON and Markdown files
+`tools/sim_scale.py` writes.
 
 ### 5.1 Delivery initiation
 
 | Run | within 60 s | initiation p50 / p95 / p99 (s) | end to end (queued → displayed) p50 / p95 / p99 (s) |
 |---|---|---|---|
-| **baseline**, seed 1 | **162 / 170 = 95.3 %** (met) | 22.5 / 59.0 / 88.7 | 27.9 / 64.0 / 93.7 |
-| baseline, seed 2 | 166 / 176 = 94.3 % | 26.0 / 63.1 / 72.3 | 31.2 / 68.6 / 77.7 |
-| baseline, seed 3 | 170 / 184 = 92.4 % | 26.6 / 66.9 / 86.4 | 31.7 / 69.6 / 86.0 |
-| baseline, six runs of seeds 1–3 pooled | **995 / 1064 = 93.5 %** (not met) | | |
-| **faults**, seed 1 | 143 / 166 = 86.1 % | 29.5 / 88.1 / 107.1 | 38.8 / 95.6 / 113.0 |
-| faults, seed 2 | 126 / 167 = 75.4 % | 31.3 / 135.0 / 209.4 | 41.7 / 155.5 / 264.8 |
+| **baseline**, seed 1 | **169 / 169 = 100 %** (met) | 22.4 / 46.9 / 49.8 | 27.6 / 52.1 / 55.0 |
+| baseline, seed 2 | 169 / 176 = 96.0 % (met) | 26.1 / 59.1 / 95.6 | 31.5 / 64.2 / 100.9 |
+| baseline, seed 3 | 184 / 187 = 98.4 % (met) | 25.5 / 40.5 / 61.6 | 30.6 / 45.5 / 66.9 |
+| baseline, seeds 1–3 pooled | **522 / 532 = 98.1 %** (met) | 24.9 / 47.0 / 86.4 | |
+| baseline, six runs of seeds 1–3 pooled (these and the study's, §6.2) | **1057 / 1070 = 98.8 %** (met) | 24.2 / 45.8 / 61.6 | |
+| baseline, 2 events per minute, seeds 1–3 | 550 / 551 = 99.8 % | 22.3 / 37.4 / 47.5 | |
+| **faults**, seed 1 | 147 / 167 = 88.0 % | 31.4 / 86.4 / 141.9 | 39.6 / 99.6 / 143.5 |
+| faults, seed 2 | 133 / 170 = 78.2 % | 31.4 / 116.4 / 150.1 | 39.6 / 124.2 / 155.3 |
+| faults, seed 3 | 144 / 181 = 79.6 % | 29.5 / 97.2 / 127.0 | 35.2 / 113.7 / 160.1 |
 
-Initiation from the `transferring` receipt and from the simulator's ground truth
-agree within 0.2 s at every percentile; 168 of 170 baseline trials have their
-`transferring` receipt (for the other two a best-effort stage event was lost and
-the ground truth stands in).
+Every baseline run meets the target, and so does every pooling of them. Runs of
+one seed differ by one to three points (event-loop interleavings, §6.4); seed 2
+is the hardest (its bursts fill the gateway's queue of four, below).
+Initiation from the `transferring` receipt and from the simulator's ground
+truth agree within 0.2 s at every percentile; 526 of 532 baseline trials have
+their `transferring` receipt (for the others a best-effort stage event was lost
+and the ground truth stands in).
 
 ### 5.2 Where the time goes (baseline, seed 1, simulated seconds)
 
 | Stage | meaning | p50 | p95 | p99 | max |
 |---|---|---|---|---|---|
-| queued → companion_accepted | Cremind → companion (events poll: 2 s while active, up to 10 s when idle) | 2.1 | 7.6 | 9.8 | 10.2 |
-| companion_accepted → gateway_received | compose + `DELIVER_LAYOUT` accepted (`BUSY` while the gateway's queue of 4 is full) | 0.4 | 2.1 | 8.8 | 8.8 |
-| gateway_received → bridge_received | gateway queue + mesh transfer | 3.7 | 11.9 | 24.2 | 24.2 |
-| bridge_received → transferring | **waiting for the tag's wake** + the bridge's scheduling | 17.3 | 55.3 | 80.4 | 80.4 |
-| transferring → refreshing | BLE frame transfer | 1.1 | 1.4 | 1.4 | 1.7 |
-| refreshing → displayed | panel refresh + result back to Cremind | 4.1 | 4.6 | 4.8 | 4.9 |
+| queued → companion_accepted | Cremind → companion (events poll: 2 s while active, up to 10 s when idle) | 1.9 | 8.3 | 9.1 | 9.6 |
+| companion_accepted → gateway_received | compose + `DELIVER_LAYOUT` accepted (`BUSY` while the gateway's queue of 4 is full) | 0.4 | 1.9 | 4.7 | 4.8 |
+| gateway_received → bridge_received | gateway queue + mesh transfer | 4.4 | 21.2 | 24.5 | 24.7 |
+| bridge_received → transferring | **waiting for the tag's wake** + the bridge's scheduling | 13.7 | 27.0 | 35.6 | 42.2 |
+| transferring → refreshing | BLE frame transfer | 1.1 | 1.4 | 1.5 | 1.5 |
+| refreshing → displayed | panel refresh + result back to Cremind | 4.1 | 4.5 | 4.6 | 4.9 |
 
-Tag side, one sample per displayed screen (136 screens in the baseline, 128 with faults):
+With one session per bridge the wait for the tag took 17.3 / 55.3 / 80.4 s at
+p50 / p95 / p99: a missed window cost a whole wake period. Now nearly every
+first window after the layout arrives is served, so the wait is the rest of
+one wake period (at most about 33 s).
+
+Tag side, one sample per displayed screen (142 screens in the baseline, 132 with faults, seed 1):
 
 | Time (s) | baseline p50 | p95 | p99 | faults p50 | p95 | p99 |
 |---|---|---|---|---|---|---|
-| wake (layout at the bridge → tag connected) | 12.9 | 55.1 | 65.5\* | 14.0 | 53.7 | 65.5\* |
-| mesh (gateway → bridge transfer) | 2.1 | 4.8 | 14.6 | 2.2 | 12.2 | 17.9 |
-| suspend (mesh pause for the connection) | 0.11 | 0.24 | 0.26 | 0.11 | 0.25 | 0.26 |
-| transfer (`FRAME_BEGIN` → `RESULT`, includes the refresh) | 5.1 | 5.3 | 5.5 | 5.1 | 5.3 | 5.4 |
-| of which BLE transfer (transfer − refresh) | 1.1 | 1.2 | 1.3 | 1.1 | 1.2 | 1.3 |
+| wake (layout at the bridge → tag connected) | 11.9 | 26.9 | 29.9 | 12.3 | 28.6 | 43.0 |
+| mesh (gateway → bridge transfer) | 2.1 | 5.4 | 12.7 | 2.3 | 12.6 | 16.8 |
+| suspend (mesh pause for the connection) | 0.11 | 0.24 | 0.26 | 0.11 | 0.24 | 0.27 |
+| transfer (`FRAME_BEGIN` → `RESULT`, includes the refresh) | 5.2 | 5.3 | 5.5 | 5.1 | 5.3 | 5.5 |
+| of which BLE transfer (transfer − refresh) | 1.1 | 1.3 | 1.5 | 1.1 | 1.2 | 1.4 |
 | refresh | 4.0 | 4.2 | 4.2 | 4.0 | 4.2 | 4.2 |
 
-\* u16 saturated: two screens per run waited 65.5 s or more.
-
-`mesh` is about 2 s to a direct bridge and 3.9 s through the relay (per-bridge
-p50 1.9–2.2 s, `bridge-5` 3.9 s); its p99 of 12–18 s is a lost `LAYOUT_COMMIT`
-or `LAYOUT_STATUS` (the 10 s status timeout). Of 174 mesh transfers, 38 (22 %)
+`wake` no longer saturates its u16 (65.5 s) in any run. `mesh` is about 2 s to
+a direct bridge and 3.6–4.3 s through the relay (per-run p50 of the relayed
+`bridge-5`; p95 5.6–15 s against 3.2–3.8 s direct): the relay hop adds about
+2 s as before, and at most three messages per run waited for the relay's
+resume (none timed out). Its p99 of 12–17 s is a lost `LAYOUT_COMMIT` or
+`LAYOUT_STATUS` (the 10 s status timeout). Of 175 mesh transfers, 33 (19 %)
 carried a screen that a newer one superseded at the bridge before a tag saw it.
 
-### 5.3 Advertising windows and the tail
+### 5.3 Advertising windows, scheduling and the tail
 
-| Run | windows with work waiting | served | lost: bridge busy with another tag | lost: connection failed | other |
+| Run | windows with work waiting | served (of them by a quick retry) | lost: bridge busy | lost: connection failed | other |
 |---|---|---|---|---|---|
-| baseline, seed 1 | 161 | 83.9 % | 16 | 9 | 1 (rate limit) |
-| baseline, seed 2 | 145 | 86.9 % | 10 | 9 | |
-| baseline, seed 3 | 176 | 86.4 % | 18 | 6 | |
-| faults, seed 1 | 173 | 75.1 % | 15 | 8 | 20 (session failed: disconnects, power losses) |
+| baseline, seed 1 | 135 | 98.5 % (6) | 0 | 1 | 1 (rate limit) |
+| baseline, seed 2 | 129 | 99.2 % (7) | 1 | 0 | |
+| baseline, seed 3 | 164 | 96.3 % (3) | 1 | 2 | 3 (rate limit) |
+| faults, seed 1 | 152 | 88.8 % (6) | 1 | 1 | 15 (session failed: disconnects, power losses) |
 
-Trials over 60 s, by cause (the first window missed while the layout waited at
-the bridge, or the stage that alone took over 30 s):
+| Run | suspensions (most in a rolling minute) | busiest bridge, per minute of traffic | mesh suspended (busiest bridge) | failed connections | quick retries (connected) | sessions beside another |
+|---|---|---|---|---|---|---|
+| baseline, seed 1 | 151 (6) | 2.0 | 0.4 % | 9 | 8 (7) | 11 |
+| baseline, seed 2 | 140 (6) | 1.5 | 0.3 % | 8 | 8 (8) | 15 |
+| baseline, seed 3 | 178 (6) | 2.0 | 0.5 % | 10 | 7 (5) | 26 |
 
-| Run | missed window: bridge busy | missed window: connection failed | gateway queue + mesh > 30 s | Cremind 5xx burst |
-|---|---|---|---|---|
-| baseline, seeds 1–3 (32 misses of 530) | 23 | 9 | 0 | 0 |
-| faults, seed 1 (23 of 166) | 6 | 1 | 3 | 13 |
+No bridge exceeded 6 suspensions in any rolling minute (the limit is reached in
+bursts; a quick retry counts like any attempt). Trials over 60 s, by cause (the
+first window missed while the layout waited at the bridge, or the stage that
+alone took over 30 s):
 
-Per bridge (baseline, seed 1): 34/36, 35/39, 33/34, 30/31 and 30/30 (the relayed
+| Run | missed window: bridge busy | missed window: connection failed | missed window: rate limit | gateway queue + mesh > 30 s | Cremind 5xx burst |
+|---|---|---|---|---|---|
+| baseline, seeds 1–3 (10 misses of 532) | 0 | 2 | 1 | 7 | 0 |
+| faults, seeds 1–3 (94 of 518) | 0 | 5 | 0 (2 session failures) | 60 | 27 |
+
+The bridge's scheduling is no longer where the baseline's tail comes from: its
+misses are now the gateway's queue and the mesh (seed 2's bursts keep the
+gateway's queue of four full; the companion composes each events page as it
+arrives, §6.5), plus a few failed connections whose retry failed too. Per
+bridge (baseline, seed 1): 39/39, 36/36, 36/36, 30/30 and 28/28 (the relayed
 `bridge-5`) within 60 s. No tag starved: every card was displayed, ended in
-Cremind, or waits in a footer by design, and in 19 of the 20 runs every tag's p95
-stayed within twice the overall p95 (the tool flags a tag above it; the one flag,
-in a reference run, was a tag with two trials, one of which missed two windows:
-112.8 s). The most suspensions of any bridge in any rolling minute was 6, the
-limit.
+Cremind, or waits in a footer by design.
 
 ### 5.4 Faults (seed 1)
 
 | Fault | injected / fired | cards hit: final stage | measured | p50 / max (s) |
 |---|---|---|---|---|
-| chunk loss (5 %) | 37 chunks lost | — | 35 `INCOMPLETE` answers, 37 chunks re-sent, no failed delivery | |
-| lost `LAYOUT_STATUS` | 10 / 10 | — | 20 commits re-sent, 14 answered `DUPLICATE`, no failed delivery | |
-| disconnect mid-transfer | 11 / 11 | 17: displayed 10, superseded 3, cancelled 1, refreshing 3 † | fault → that screen (or a newer one) displayed | 36.4 / 154.0 |
-| power loss during the refresh | 11 / 9 ‡ | 12: displayed 8, superseded 1, refreshing 3 † | fault → that screen (or a newer one) displayed | 62.4 / 123.0 |
-| relay (`bridge-4`) reboot during a transfer | 1 / 1 | 1: displayed | fault → that screen displayed | 29.5 |
-| gateway reboot | 1 / 1 | 2 in flight: displayed | fault → displayed | 9.1 / 61.8 |
-| USB re-enumeration | 1 / 1 | 8 in flight: displayed | fault → displayed | 3.7 / 48.9 |
-| Cremind 5xx, 2 × 45 s | 2 / 2 | 26 queued meanwhile: displayed 20, superseded 6 | queued → displayed | 88.6 / 142.9 |
+| chunk loss (5 %) | 37 chunks lost | — | 37 `INCOMPLETE` answers, 37 chunks re-sent, no failed delivery | |
+| lost `LAYOUT_STATUS` | 10 / 10 | — | 19 commits re-sent, 10 answered `DUPLICATE`, no failed delivery | |
+| disconnect mid-transfer | 11 / 9 ‡ | 14: displayed 11, superseded 3 | fault → that screen (or a newer one) displayed | 36.0 / 91.5 |
+| power loss during the refresh | 11 / 8 ‡ | 8: displayed 6, superseded 2 | fault → that screen (or a newer one) displayed | 62.0 / 93.1 |
+| relay (`bridge-4`) reboot during a transfer | 1 / 1 | 1: displayed | fault → that screen displayed | 25.7 |
+| gateway reboot | 1 / 1 | 2 in flight: displayed | fault → displayed | 9.8 / 60.3 |
+| USB re-enumeration | 1 / 1 | 13 in flight: displayed 11, superseded 2 | fault → displayed | 8.1 / 30.4 |
+| Cremind 5xx, 2 × 45 s | 2 / 2 | 27 queued meanwhile: displayed 20, superseded 7 | queued → displayed | 91.2 / 147.4 |
 
-† A card of the interrupted screen that newer cards then moved into the footer:
-its stage stays `refreshing` in Cremind (stages never go back) while it waits
-there (§6.5). ‡ Two armed power losses found no refresh of their tag left to hit.
+‡ Armed tag faults that found no transfer or refresh of their tag left to hit
+before the traffic ended. A card of an interrupted screen that newer cards then
+move into the footer keeps its stage (`refreshing`) in Cremind while it waits
+there (§6.5).
 
-Over the two 45 s outages Cremind answered 34 requests with 503 (12 receipts,
-10 events, 10 heartbeats, 2 syncs): one request per back-off per loop.
+Over the two 45 s outages Cremind answered 34 requests with 503: one request
+per back-off per loop.
 
 ### 5.5 Invariants
 
 Every invariant of §3.5 held in every run reported here, including the sweep of
-§6.3 and the what-if runs of §6.2: no accepted job lost, one terminal outcome
+§6.3 and every run of the §6.2 study (24 baseline runs of four policies, 12
+faults runs of two): no accepted job lost, one terminal outcome
 per delivery, every displayed frame equal to the reference render (about 135
 revisions re-rendered and 20 panels compared per run), no footer card receipted
 displayed, receipts in order (about 1 130 per run), cancels respected, at most
@@ -307,30 +356,106 @@ in most runs).
 
 ## 6. Findings
 
-### 6.1 The 60 s target sits at the edge
+### 6.1 The 60 s target: from the edge to met
 
-At 5 events per minute with broadcasts and flurries, the simulated baseline
-initiates 90–97 % of trials within 60 s depending on the seed and the run
-(93.5 % pooled over six runs of three seeds). Every late trial missed its tag's first advertising window after the
-layout reached the bridge, and each miss costs a whole wake period (30 s).
-Nothing else contributes in the baseline: Cremind, composition, the gateway and
-the mesh together take 6 s at p50 and 17 s at p95.
+With one tag session per bridge (the scheduling before this change) the
+simulated baseline initiated 90–97 % of trials within 60 s depending on the
+seed and the run (93.5 % pooled over six runs of three seeds; 92.7 % in the
+study below). Every late trial missed its tag's first advertising window after
+the layout reached the bridge, and each miss cost a whole wake period (30 s):
 
-- **Bridge busy (about 70 % of the misses).** A bridge runs one attempt or
-  session at a time and holds it through the refresh (about 5.3 s per BW screen:
+- **Bridge busy (about 70 % of the misses).** The bridge ran one attempt or
+  session at a time and held it through the refresh (about 5.3 s per BW screen:
   handshake, 1.1 s transfer, 4 s refresh), while a tag advertises for only 2 s.
-  A tag's window is lost whenever another tag of the same bridge is being
-  served, which is exactly when broadcasts and flurries give several tags of one
-  bridge work at once. BWR panels (15 s refresh) would make it about three times
-  worse.
+  A tag's window was lost whenever another tag of the same bridge was being
+  served, which is exactly when broadcasts and flurries give several tags of
+  one bridge work at once. BWR panels (15 s refresh) would make it about three
+  times worse.
 - **Connection failed (about 30 %).** A failed attempt (5 % under the competing
-  traffic model) starts the 15 s per-tag back-off, which forfeits the rest of
+  traffic model) started the 15 s per-tag back-off, which forfeited the rest of
   the 2 s window.
 
-### 6.2 What-if: a longer advertising window
+Both are bridge-side rules and cost the battery-powered tag nothing to change
+(§6.2): with two sessions per nRF52840 bridge and a quick retry, the baseline
+initiates 98.1–99.4 % of trials within 60 s pooled per set of three seeds
+(98.8 % over six runs, every run at least 96 %), p95 45.8 s. What remains of
+the tail is the gateway leg (§5.3, §6.5).
 
-`--adv-window-ms` (a what-if only: it changes the simulated tags, not the
-protocol) shows what the advertising window buys:
+### 6.2 The bridge's scheduling (study)
+
+`--sessions` and `--quick-retry` (what-if knobs of the simulator's bridge, now
+defaulting to the firmware's rules) compare four policies, each over seeds
+1–3 at 2 and 5 events per minute (200 trials per run, time scale 10, the
+baseline scenario, pooled per policy and rate):
+
+- **base** — one session per bridge, a failed connection backs off 15 s (the
+  scheduling before);
+- **(a) quick retry** — after `CONNECT_FAILED`, one immediate retry if the
+  same tag's advertisement is seen again within its window (2 s), still
+  counted by the 6-per-minute suspend limit;
+- **(b) two sessions** — while one tag refreshes (its link idle), the bridge
+  may initiate a second tag: one initiation at a time, each in its own mesh
+  suspend window, links streaming at once sharing the connection events;
+- **(c) = (a) + (b)** — adopted: the nRF52840 bridge's firmware and the
+  simulator's default (the nRF52832 bridge, with RAM for one session, runs
+  (a)).
+
+| Policy | events/min | per seed (1 / 2 / 3) | **within 60 s, pooled** | initiation p50 / p95 / p99 (s) | windows served | most suspends in a rolling minute (busiest bridge's rate) | quick retries (connected) | sessions beside another | relay `mesh` p50 (direct) | trials over 60 s, by cause |
+|---|---|---|---|---|---|---|---|---|---|---|
+| base | 2 | 95.5 / 95.7 / 98.9 % | 531 / 549 = 96.7 % | 23.4 / 54.5 / 73.8 | 91–92 % | 5 (1.1/min) | – | – | 3.3–4.3 s (2.0–2.1) | window lost to a busy bridge 8, connection failed 9, gateway + mesh 1 |
+| (a) | 2 | 98.3 / 99.5 / 96.8 % | 539 / 549 = 98.2 % | 23.4 / 44.3 / 65.5 | 95–99 % | 6 (1.0/min) | 26 (25) | – | 3.5–4.1 s (2.0–2.1) | busy 5, gateway + mesh 5 |
+| (b) | 2 | 99.4 / 96.8 / 97.8 % | 538 / 549 = 98.0 % | 24.1 / 47.9 / 73.0 | 94–95 % | 5 (1.1/min) | – | 25 | 3.4–4.0 s (2.0–2.1) | connection failed 10, gateway + mesh 1 |
+| **(c)** | 2 | 100 / 99.5 / 100 % | **550 / 551 = 99.8 %** | 22.3 / 37.4 / 47.5 | 99–100 % | 6 (1.0/min) | 26 (25) | 28 | 3.4–4.0 s (2.0) | gateway + mesh 1 |
+| base | 5 | 95.9 / 88.1 / 94.1 % | 494 / 533 = 92.7 % | 27.1 / 67.2 / 103.0 | 85–88 % | 6 (1.8/min) | – | – | 3.4–4.3 s (2.1) | busy 25, connection failed 8, gateway + mesh 6 |
+| (a) | 5 | 96.4 / 92.8 / 94.0 % | 502 / 532 = 94.4 % | 25.6 / 68.7 / 102.1 | 87–92 % | 6 (1.9/min) | 22 (20) | – | 3.5–4.5 s (2.1–2.2) | busy 26, connection failed 3, rate limit 1 |
+| (b) | 5 | 98.9 / 93.7 / 94.0 % | 506 / 530 = 95.5 % | 26.0 / 58.5 / 73.9 | 93–95 % | 6 (1.9/min) | – | 39 | 3.3–4.4 s (2.1–2.2) | connection failed 12, gateway + mesh 11, busy 1 |
+| **(c)** | 5 | 100 / 98.9 / 99.5 % | **535 / 538 = 99.4 %** | 23.9 / 44.9 / 56.2 | 96–99 % | 6 (2.1/min) | 22 (21) | 52 | 3.8–4.1 s (2.0–2.1) | rate limit 2, gateway + mesh 1 |
+| (c), the final runs of §5 | 5 | 100 / 96.0 / 98.4 % | 522 / 532 = 98.1 % | 24.9 / 47.0 / 86.4 | 96–99 % | 6 (2.0/min) | 23 (20) | 52 | 3.6–4.2 s (2.0–2.2) | gateway + mesh 7, connection failed 2, rate limit 1 |
+
+Each rule removes the misses it targets and nothing else: the quick retry
+removes nearly all connection-failure misses (of 25–30 failed connections per
+set of three runs, 22–26 got their retry inside the window and 20–25 of those
+connected), two sessions remove nearly all bridge-busy ones,
+and only both together clear the target with room at 5 events per minute
+(pooled 99.4 % and 98.1 % in two sets of runs; 98.8 % over the six). At
+5 events per minute alone (a) and (b) reach 94.4 % and 95.5 %: each leaves the
+other half of the tail.
+
+What it costs:
+
+- **The mesh.** The number of suspensions is set by the attempts, not the
+  sessions: every policy stays within the limit of 6 in any rolling minute
+  (the invariant held in all 24 runs) and at about 1–2 per bridge per minute
+  of traffic; the mesh is suspended for 0.2–0.5 % of the time on the busiest
+  bridge under every policy (suspend windows of 0.1–0.3 s). A
+  quick retry is one more attempt (about 8 per run) and counts toward the
+  limit like any other; at 5 events per minute the limit then defers an
+  attempt now and then (`rate_limited`: 0–38 skipped advertisements per run,
+  at most two late trials per set).
+- **The relay hop.** Messages to or through the relay wait while its mesh is
+  suspended: at most 5 per set of three runs did, none timed out, and the
+  relayed bridge's `mesh` time (per-run p50 3.3–4.5 s against 2.0–2.2 s
+  direct) is the same under every policy.
+- **The tag.** Nothing: the tag's advertising window, wake period and
+  handshake are unchanged (the alternative below triples its advertising).
+- **The bridge.** A second session on the nRF52840 costs 9.7 KiB of RAM
+  (147,670 B stay free, bridge-firmware.md §9); the nRF52832 cannot pay it (one
+  session, quick retry only: policy (a), 94.4 % at 5 and 98.2 % at 2 events
+  per minute in an all-nRF52832 topology).
+
+Under faults (the scenario of §3.3, seeds 1–6) the scheduling helps as well:
+845 of 1,037 → 912 of 1,046 trials within 60 s pooled (81.5 % → 87.2 %), the
+wait for the tag's wake at p95 from 30–69 s to 27–30 s per run. Its tail is
+now the two 45 s Cremind outages and the gateway leg: after an outage or the
+gateway reboot a burst of revisions meets the gateway's single
+segmented-send pipeline (a queue of four, `BUSY` beyond), where every lost
+`LAYOUT_COMMIT` or `LAYOUT_STATUS` stalls it 10 s, and how those losses fall
+around the bursts decides a run: seeds 2 and 3 came out about 3 points lower
+than with one session, seeds 1 and 4–6 6 to 16 points higher (§6.5).
+
+**The alternative: a longer advertising window.** `--adv-window-ms` (a
+what-if on the simulated tags, measured with the one-session scheduling)
+bought the same by making the window outlast a BW session:
 
 | Advertising window | seed 1 | seed 2 | seed 3 | pooled | windows served |
 |---|---|---|---|---|---|
@@ -338,17 +463,13 @@ protocol) shows what the advertising window buys:
 | 4 s | | | 96.7 % | | 87 % |
 | 6 s | 99.4 % | 97.2 % | 96.8 % | 97.8 % | 91–92 % |
 
-With 6 s the window outlasts a BW session, the bridge-busy misses nearly vanish
-(p95 initiation 43–53 s), and connection failures are what remains. The cost is
-three times the tag's advertising radio time (24 instead of 8 advertising events
-per wake), to be weighed on hardware (PPK) against the battery budget. Other
-options with the same aim, not simulated: retry a failed connection within the
-same window (an attempt is at most 1 s, the window 2 s) instead of forfeiting
-it; let the bridge release the link after `FRAME_END` and collect the `RESULT`
-at the next wake (the tag already flags a pending result); serve two links at a
-time.
+At three times the tag's advertising radio time (24 instead of 8 advertising
+events per wake), to be weighed on hardware against the battery budget; the
+bridge-side rules reach more (98.8 %) at no cost to the tag. Not simulated:
+letting the bridge release the link after `FRAME_END` and collect the `RESULT`
+at the next wake (the tag already flags a pending result).
 
-### 6.3 Sensitivity (baseline, seed 1 unless named)
+### 6.3 Sensitivity (baseline, seed 1 unless named; the one-session scheduling)
 
 | Variation | within 60 s | initiation p50 / p95 / p99 (s) |
 |---|---|---|
@@ -366,17 +487,22 @@ The time scale does not move the result (host speed is not what limits it), so
 a 2.5-minute run at time scale 10 stands for 25 simulated minutes. Runs of one
 seed differ by 1–3 points (event-loop interleavings differ); seeds differ by up
 to 6. The relay adds about 1.8 s of mesh time per delivery to its bridge's tags
-and made no measurable difference to the fraction.
+and made no measurable difference to the fraction. These runs predate the
+scheduling of §6.2 and are kept for the effects they isolate; the study's
+parallel runs (up to eight at once on a 22-core host) agree with them.
 
 ### 6.4 Faults
 
-The durability and ordering invariants hold through every fault. Recovery costs
-one or two wake periods: a disconnect mid-transfer is redrawn at the next wake
-(p50 36 s); a power loss during the refresh takes two (the next `CHALLENGE`
-reports `DISPLAY_STATE_UNKNOWN`, the companion re-delivers the same revision and
-the tag redraws at the wake after: p50 62 s). A 45 s Cremind outage delays what
-is queued meanwhile by its length plus the back-off. The gateway faults cost
-little: in-flight revisions are re-sent on the new `boot_id`.
+The durability and ordering invariants hold through every fault, under both
+schedulings (twelve faults runs of §6.2). Recovery costs one or two wake
+periods: a disconnect mid-transfer is redrawn at the next wake (p50 36 s); a
+power loss during the refresh takes two (the next `CHALLENGE` reports
+`DISPLAY_STATE_UNKNOWN`, the companion re-delivers the same revision and the
+tag redraws at the wake after: p50 62 s). A 45 s Cremind outage delays what is
+queued meanwhile by its length plus the back-off. The gateway faults cost
+little by themselves (in-flight revisions are re-sent on the new `boot_id`),
+but the burst they and the outages release is what the faults scenario's tail
+is made of (§6.2, §6.5).
 
 ### 6.5 Open items (not changed here)
 
@@ -387,15 +513,26 @@ little: in-flight revisions are re-sent on the new `boot_id`.
   bridge answers it from its history. Consider re-sending a bridge's in-flight
   revisions when it reports a new boot (uptime drop in `HEALTH`/`EVT_BRIDGE_INFO`),
   or a much shorter `result_timeout_s` once the screen was refreshing.
-- **`wake_ms` is u16 milliseconds** and saturates at 65.5 s; a missed window or a
-  tag out of range routinely exceeds it (two screens per run). A u32 or a coarser
-  unit would keep the measurement meaningful.
-- **Wasted mesh transfers.** 22 % of transfers carry a screen superseded at the
-  bridge before a tag sees it: the companion composes as each events page
-  arrives and never cancels a superseded revision still queued at the gateway.
-  `CANCEL_DELIVERY` for a revision superseded while `sent`, or composing a burst
-  once (a short settle delay), would give that time back to the gateway's single
-  segmented-send pipeline; it matters under bursts and through relays.
+- **`wake_ms` is u16 milliseconds** and saturates at 65.5 s; with the scheduling
+  of §6.2 no baseline screen reaches it, but a tag out of range or a failing
+  session still does. A u32 or a coarser unit would keep the measurement
+  meaningful.
+- **The gateway leg is now the tail** (§5.3, §6.2). The gateway sends one
+  segmented transfer at a time with a queue of four; a burst (a flurry, a
+  broadcast, the release after a Cremind outage or a gateway reboot) waits
+  behind it, and every lost `LAYOUT_COMMIT` or `LAYOUT_STATUS` stalls the
+  pipeline for the 10 s status timeout. It decides the remaining baseline
+  misses (7 of 10 over seeds 1–3) and most of the faults scenario's. Levers:
+  the next item; a shorter status timeout for an unsegmented message the
+  bridge answers within milliseconds; sending to a different bridge while one
+  waits for its status.
+- **Wasted mesh transfers.** 15–22 % of transfers carry a screen superseded at
+  the bridge before a tag sees it (19 % in the final seed-1 baseline): the
+  companion composes as each events page arrives and never cancels a
+  superseded revision still queued at the gateway. `CANCEL_DELIVERY` for a
+  revision superseded while `sent`, or composing a burst once (a short settle
+  delay), would give that time back to the gateway's single segmented-send
+  pipeline; it matters under bursts and through relays.
 - **Stages of a card moved into the footer.** A card receipted
   `gateway_received` … `refreshing` as part of a screen that was then superseded
   or interrupted, and pushed into the footer by newer cards, keeps that stage in
@@ -433,8 +570,9 @@ Each fix has a regression test that fails without it.
 The simulator replaces the radio, so these numbers become qualification evidence
 only once the same topology has run on hardware:
 
-1. **Topology.** The gateway DK, five bridges and twenty tags (four per bridge,
-   BW panels; a second run with BWR panels), with `bridge-5` placed out of the
+1. **Topology.** The gateway DK, five nRF52840 bridges (two tag sessions each;
+   a second run with nRF52832 bridges, one session) and twenty tags (four per
+   bridge, BW panels; a third run with BWR panels), with `bridge-5` placed out of the
    gateway's range but within `bridge-4`'s (verified as in
    docs/gateway-firmware.md §13 step 2), the daemon on a PC against a throwaway
    Cremind (`tools/e2e_slice.py` sets one up), an nRF sniffer and a PPK.
@@ -448,16 +586,21 @@ only once the same topology has run on hardware:
 4. **Measure**, from Cremind's delivery records (`stage_times`, `timing`), the
    tables of §5: initiation and end-to-end percentiles, the fraction within 60 s,
    the stage breakdown, wake/mesh/suspend/transfer/refresh per screen; from the
-   bridges' `HEALTH` counters (`sessions_ok`/`sessions_fail`, `connect_failed`,
-   `rate_limited`, `suspend_max_ms`) and the sniffer, the window service rate and
-   its losses (bridge busy versus connection failures), and the relay's added
-   mesh time.
+   bridges' `HEALTH` and INFO counters (`sessions_ok`/`sessions_fail`,
+   `connect_failed`, `quick_retries`, `concurrent_sessions`, `rate_limited`,
+   `suspend_max_ms`) and the sniffer, the window service rate and its losses
+   (bridge busy versus connection failures), and the relay's added mesh time.
 5. **What only hardware can show**: real connection-failure and mesh
    segment-loss rates (the model of §3.2 is an assumption), the radio shared
    between a BLE session and the mesh (mesh latency to a bridge that is
    streaming a frame), relay forwarding under bursts, BWR refresh times, USB
    re-enumeration and bridge boot times, tag RTC drift over hours, and the
-   current cost of a longer advertising window (§6.2) on the PPK.
+   current cost of a longer advertising window (§6.2) on the PPK; and the
+   scheduling of §6.2 on the real controller: a second initiation beside a
+   link whose tag refreshes, two links streaming beside the mesh, and how
+   often a failed connection's retry connects (bridge-firmware.md §11
+   H19–H20; the simulator treats an idle link as free and splits streaming
+   links evenly).
 6. **Faults** as in §3.3, by hand: power-cycle `bridge-4` during a transfer and
    while a result is being retried (the result loss of §6.5), reset the gateway
    and unplug its USB, pull a tag's battery during a refresh, shield a tag during

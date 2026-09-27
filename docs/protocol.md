@@ -384,9 +384,18 @@ creates a central connection, so the bridge runs this state machine (all steps
 in a work-queue item, never in a Bluetooth callback):
 
 1. A validated layout is pending for tag *T* and *T*'s advertisement is seen in
-   the shared scan callback (`bt_le_scan_cb_register`).
+   the shared scan callback (`bt_le_scan_cb_register`). No connection attempt
+   is in progress, *T* has no connection, and a session slot is free (below:
+   concurrent sessions).
 2. Rate limit: at most `BRIDGE_MAX_SUSPENDS_PER_MIN` attempts per minute across
-   all tags, and `BRIDGE_TAG_BACKOFF_MS` per tag after a failure.
+   all tags, every attempt counted, and `BRIDGE_TAG_BACKOFF_MS` per tag after a
+   failure. **Quick retry:** after `CONNECT_FAILED` (the attempt ended without
+   a connection) *T* gets **one** further attempt on an advertisement seen
+   within `TAG_ADV_WINDOW_MS` of the failure — the rest of its advertising
+   window — instead of forfeiting it; if that attempt fails too, the back-off
+   holds. The retry is an attempt like any other (its own suspend window, the
+   rate limit). Other failures (suspend or resume failures, a session that
+   ended in error) back off at once.
 3. Wait for local mesh application sends to finish (or defer the attempt).
    Never initiate while provisioning/configuration of this node is in progress.
 4. `bt_mesh_suspend()`. Failure → no connection is attempted; record
@@ -402,6 +411,23 @@ in a work-queue item, never in a Bluetooth callback):
    transfer. The link then shares radio time with mesh under the Controller's
    scheduler; connection interval 30–50 ms, peripheral latency 0, supervision
    timeout 4 s, and the bridge sends at most 4 records per connection event.
+
+**Concurrent sessions.** A bridge holds up to *N* tag connections at once
+(`CONFIG_CTAG_BRIDGE_SESSIONS`: **2 on the nRF52840 bridge, 1 on the
+nRF52832**, whose RAM does not allow a second session). Connections are
+initiated **one at a time**, each in its own suspend window (steps 3–7: the
+controller never scans and initiates at once, and initiates one connection at
+a time), never two with the same tag, and a further connection is initiated
+**only while every open session's link is idle**: its tag is refreshing after
+`FRAME_END` or a `CMD` and the session awaits the `RESULT` with no record left
+to send. An initiation thus never competes with a frame being streamed, and a
+tag advertising while another tag of the same bridge refreshes (about 4 s for
+a black/white panel, 15 s with red) is served in that window instead of
+waiting a whole wake period. Sessions are independent: each has its own
+records, credits and deadlines (§10), and a session that fails ends alone.
+Links that stream at once (a session's next job beside another session's
+frame) share the radio's connection events. The suspend rate limit (step 2)
+counts every initiation of every slot.
 
 ### 5.3 Fragmentation
 
@@ -657,13 +683,17 @@ These close gaps the sections above leave open. The companion's simulator
   complete within 5 s of the connection, and each frame (from `FRAME_BEGIN` to
   its `RESULT`) within 60 s + 1 s per KiB of plane data + the panel's refresh
   timeout. Expiry ends the session with `TIMEOUT` (a link-level failure).
+  Deadlines belong to a session: with concurrent sessions (§5.2) each one's
+  bounds run from its own connection and its own `FRAME_BEGIN`, and nothing
+  one session receives moves another's.
 - Plane data for a frame is streamed only after the tag has granted a credit
   for **that** `FRAME_BEGIN` record (credits are counted per record, never
   carried over from a previous record or job).
 - Link-level failures (`DISCONNECTED`, `TIMEOUT`,
   `CONNECT_FAILED`, `MESH_SUSPEND_FAILED`, `MESH_RESUME_FAILED`) are retried after
-  the per-tag back-off and never produce a result on their own; the companion's
-  job TTL bounds them.
+  the per-tag back-off (a `CONNECT_FAILED` first gets its one quick retry
+  inside the tag's advertising window, §5.2) and never produce a result on
+  their own; the companion's job TTL bounds them.
 - A successful `CLEAR` resets the bridge's history for that tag to revision 0,
   mirroring the tag, so a later delivery of the previously shown revision is
   drawn again rather than answered from history.

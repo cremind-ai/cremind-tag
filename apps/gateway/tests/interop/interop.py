@@ -302,6 +302,21 @@ async def s_provision(url: str, notes: list[str]) -> None:
         inventory = {i.addr: i for i in await c.get_inventory()}
         assigned = {(a.tag_id, a.epoch) for a in inventory[BRIDGE].assigned}
         check({(0x1111, 1), (0x2222, 1), (0x3333, 2)} <= assigned, f"inventory assigned {assigned}")
+        # The bridge's own count (CAPS_STATUS.assigned) rides in the caps map of EVT_BRIDGE_INFO and the
+        # inventory, beside the gateway's list: here both know the same tags.
+        with c.subscribe(BridgeInfoEvent) as sub:
+            await c.get_inventory()
+            ev = await sub.get(5)
+            while isinstance(ev, BridgeInfoEvent) and ev.info.addr != BRIDGE:
+                ev = await sub.get(5)
+        assert isinstance(ev, BridgeInfoEvent)
+        count = ev.info.caps.assigned_count
+        check(count == len({a.tag_id for a in ev.info.assigned}) and count >= 3,
+              f"caps assigned_count {count}, gateway list {ev.info.assigned}")
+        inventory = {i.addr: i for i in await c.get_inventory()}
+        check(inventory[BRIDGE].caps.assigned_count == count, f"inventory caps {inventory[BRIDGE].caps}")
+        notes.append(f"the bridge reports {count} assigned tags in its caps (the gateway lists "
+                     f"{len(ev.info.assigned)})")
         with c.subscribe(UnprovBeacon) as sub:
             ack = await c.scan_unprov(3, bytes([0xC0]))
             check(ack.status == Status.OK, f"SCAN_UNPROV {ack}")

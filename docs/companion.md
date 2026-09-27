@@ -134,7 +134,7 @@ in the database and resumes at the next start.
 | Loop | Does |
 |---|---|
 | content (per content credential) | `POST sync` at start, every `resync_s` (300 s), after `410 cursor_expired`, a changed `stream_id` or an unknown tag; then `GET events` every `active_poll_s` (2 s) while jobs arrive, doubling to `idle_poll_s` (10 s) when idle |
-| hardware (hardware credential) | `POST inventory` at start and on every hardware change (bridges carry `max_tags` from their CAPS and `assigned`, the gateway's assignments for them, when the gateway has reported them; tags carry `max(epoch, epoch floor)`); `POST heartbeat` every 30 s; long-poll `GET commands` → claim → execute → result |
+| hardware (hardware credential) | `POST inventory` at start and on every hardware change (bridges carry `max_tags` and `assigned` from their CAPS, the bridge's own count of assigned tags — the gateway's caps `assigned_count`, else the gateway's assignments for it — when the gateway has reported them; tags carry `max(epoch, epoch floor)`); `POST heartbeat` every 30 s; long-poll `GET commands` → claim → execute → result |
 | scheduler | expiry; composes changed card sets into revisions; sends due revisions as `DELIVER_LAYOUT` |
 | gateway event handler | `EVT_STAGE`/`EVT_RESULT`/assignment and provisioning results → the queue, committed before the event is ACKed |
 | outbox (per credential) | `accepted`, `receipts`, `previews`, command results, until Cremind confirms |

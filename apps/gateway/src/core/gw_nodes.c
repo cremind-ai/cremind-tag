@@ -756,7 +756,10 @@ static size_t caps_fields(const struct gw_node *n, struct ctag_cbor_field *f)
 	f[2] = GW_F_UINT(CTAG_CBOR_KEY_BOARD, n->caps.board);
 	f[3] = GW_F_UINT(CTAG_CBOR_KEY_FLASH_SIZE, flash > UINT32_MAX ? UINT32_MAX : flash);
 	f[4] = GW_F_UINT(CTAG_CBOR_KEY_MAX_TAGS, n->caps.max_tags);
-	return 5u;
+	/* The bridge's own count (CAPS_STATUS.assigned), beside the gateway's
+	 * assignment list: the companion reports this one as the bridge's use. */
+	f[5] = GW_F_UINT(CTAG_CBOR_KEY_ASSIGNED_COUNT, n->caps.assigned);
+	return GW_CAPS_FIELDS;
 }
 
 static size_t health_counters(const struct gw_node *n, struct ctag_cbor_counter *c)

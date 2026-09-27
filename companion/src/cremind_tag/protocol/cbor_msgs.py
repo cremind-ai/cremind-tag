@@ -75,7 +75,7 @@ KEYS: dict[str, KeySpec] = {
     "wake_ms": _U, "mesh_ms": _U, "transfer_ms": _U, "refresh_ms": _U, "suspend_ms": _U,
     "queue_depth": _U, "max_bridges": _U, "max_tags": _U,
     "uuid_filter": KeySpec(Kind.BSTR, max_size=16), "net_idx": _U16, "app_idx": _U16,
-    "stored_epoch": _U,
+    "stored_epoch": _U, "assigned_count": _U,
 }
 
 # Message fields from the docs of spec serial.message_types; "?" marks an

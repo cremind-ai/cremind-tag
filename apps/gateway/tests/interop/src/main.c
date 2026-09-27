@@ -110,6 +110,9 @@ struct node {
 	bool accepted;
 	bool dropped;
 	bool lost_ok;
+	/* Tags assigned on this bridge (CAPS_STATUS.assigned counts them). */
+	uint32_t tags[8];
+	uint8_t n_tags;
 	struct ctag_layout_asm as;
 	uint8_t buf[CTAG_LAYOUT_HARD_MAX];
 	struct pend pend[N_PEND];
@@ -316,7 +319,17 @@ static void bridge_rx(struct node *n, const struct radio_item *m)
 		struct ctag_mesh_assign_status st = {.tag_id = ctag_get_le32(&m->data[0]),
 						     .epoch = ctag_get_le32(&m->data[4]),
 						     .status = CTAG_STATUS_OK};
+		int k = 0;
 
+		while (k < n->n_tags && n->tags[k] != st.tag_id) {
+			k++;
+		}
+		if (m->op == CTAG_MESH_OP_ASSIGN_SET && k == n->n_tags &&
+		    n->n_tags < ARRAY_SIZE(n->tags)) {
+			n->tags[n->n_tags++] = st.tag_id;
+		} else if (m->op == CTAG_MESH_OP_ASSIGN_DEL && k < n->n_tags) {
+			n->tags[k] = n->tags[--n->n_tags];
+		}
 		(void)ctag_mesh_assign_status_pack(&st, p, sizeof(p));
 		post_mesh(n->addr, CTAG_MESH_OP_ASSIGN_STATUS, p, CTAG_MESH_ASSIGN_STATUS_LEN);
 		break;
@@ -325,7 +338,8 @@ static void bridge_rx(struct node *n, const struct radio_item *m)
 		struct ctag_mesh_caps_status c = {.proto = 1u, .fw_major = 0u, .fw_minor = 1u,
 						  .fw_patch = 0u, .board = CTAG_BOARD_NRF52840_BRIDGE,
 						  .fontpack_id = {0xF0, 1, 2, 3, 4, 5, 6, 7},
-						  .flash_mib = 8u, .max_tags = 20u, .flags = 1u};
+						  .flash_mib = 8u, .max_tags = 20u,
+						  .assigned = n->n_tags, .flags = 1u};
 
 		(void)ctag_mesh_caps_status_pack(&c, p, sizeof(p));
 		post_mesh(n->addr, CTAG_MESH_OP_CAPS_STATUS, p, CTAG_MESH_CAPS_STATUS_LEN);

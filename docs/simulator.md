@@ -95,7 +95,10 @@ run_scenario(scenario(), timeout=60)
 background thread (`with SimulatorThread(cfg) as t: t.gateway_url`), for
 blocking callers and CLI tests. Test hooks: `DeviceEndpoint.drop_responses`
 (lose the next N serial answers), `SimTag.out_of_range`, `SimGateway.pause_deliveries()`,
-`SimBridge.history.clear()` (a replaced bridge that lost its delivery history).
+`SimBridge.history.clear()` (a replaced bridge that lost its delivery history),
+`BridgeSpec(sessions=1, quick_retry=False)` (the scheduling of the simulator
+before the §5.2 concurrent sessions and quick retry; `tools/sim_scale.py
+--sessions/--quick-retry` compares them).
 
 ## What is modelled
 
@@ -118,7 +121,9 @@ outstanding segmented send gateway-wide, 3 retries of a failed send, 150-byte
 chunks, `INCOMPLETE` answered by resending exactly the missing chunks (3 rounds),
 commit re-sent after 10 s without `LAYOUT_STATUS`; results de-duplicated by
 `(bridge, result_seq)` and always acknowledged; `CANCEL_DELIVERY`; `GET_INVENTORY`
-from `CAPS_GET`/`HEALTH_GET` (and `EVT_BRIDGE_INFO`); `EVT_TAG_SEEN`.
+from `CAPS_GET`/`HEALTH_GET` (and `EVT_BRIDGE_INFO`; the caps map carries the
+bridge's `max_tags` and its own count of assigned tags, `assigned_count`, as the
+gateway firmware does); `EVT_TAG_SEEN`.
 
 **Mesh.** Real vendor PDUs; latency grows with the number of lower-transport
 segments; a destination whose mesh is suspended receives the message after it
@@ -133,8 +138,18 @@ and `flags`); the assignment table (`ASSIGN_SET`/`ASSIGN_DEL`, `STALE_EPOCH`,
 board, or `BridgeSpec.max_tags`); result re-sends every `MESH_RESULT_RETRY_MS`
 up to `MESH_RESULT_RETRIES` times; `DELIVERY_RESULT` carries the tag's
 `stored_epoch` and `flags` (bit0 the tag's stored ACK, bit1 escalated, §3.4);
-the §5.2 scheduler (rate limit per rolling minute, per-tag back-off, wait for
-own mesh sends, suspend → connect → resume, `suspend_ms`); the GATT central
+the §5.2 scheduler (rate limit per rolling minute, per-tag back-off with one
+quick retry within `TAG_ADV_WINDOW_MS` after `CONNECT_FAILED`, wait for own
+mesh sends, suspend → connect → resume, `suspend_ms`) with the firmware's
+concurrent sessions: `SimBridge.max_sessions` (`BridgeSpec.sessions`; default
+the board's `CONFIG_CTAG_BRIDGE_SESSIONS`, 2 for the nRF52840 bridge the
+simulator builds, 1 for an nRF52832 board) sessions at once, initiated one at a
+time, a further one only while every open session waits for its tag's
+`RESULT` (the refresh), and sessions streaming at once sharing the connection
+events (each paces at one record batch per *n* intervals);
+`BridgeSpec.quick_retry=False` turns the retry off (counters `quick_retries`,
+`quick_retries_connected`, `quick_retries_failed`, `concurrent_sessions`,
+`max_links`, `suspended_ms`); the GATT central
 side with the real handshake (the transcript binds the CAPS bytes read),
 ≤ 4 records per connection event and the tag's credits; external flash with two
 font-pack slots, the slot directory, `FONT_*` installation and `FLASH_TEST`.

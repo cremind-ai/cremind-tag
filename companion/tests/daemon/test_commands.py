@@ -147,6 +147,31 @@ def test_assign_to_a_full_bridge_fails_bridge_full(make_rig: Any) -> None:
     run_scenario(scenario(), timeout=120)
 
 
+def test_inventory_reports_the_bridges_own_assigned_count(make_rig: Any) -> None:
+    """A bridge's ``assigned`` in the inventory is its own count (``CAPS_STATUS.assigned``, carried in the
+    gateway's caps map as ``assigned_count``), not the gateway's list: here the bridge also holds a tag assigned
+    behind the gateway's back (a restored or moved bridge), which counts against its capacity."""
+    from cremind_tag.sim.bridge import Assignment
+
+    async def scenario() -> None:
+        rig = make_rig(tags=2, bridges=2)
+        stray = 0x0BADCAFE
+        rig.sim.bridges[1].assignments[stray] = Assignment(stray, 1, bytes(16), 0)
+        async with rig:
+            await rig.start()
+            other = rig.bridge_hw(1)
+            await rig.wait(lambda: any(b.get("hw_id") == other and b.get("assigned") == 2
+                                       for inv in rig.fake.inventories for b in inv["bridges"]),
+                           what="the bridge's own count in the inventory")
+            bridges = {b["hw_id"]: b for b in rig.fake.inventories[-1]["bridges"]}
+            assert (bridges[other]["max_tags"], bridges[other]["assigned"]) == (20, 2)
+            assert (bridges[rig.bridge_hw(0)]["max_tags"], bridges[rig.bridge_hw(0)]["assigned"]) == (20, 1)
+            gateway_list = rig.sim.gateway.assigned.get(rig.sim.bridges[1].addr, {})
+            assert stray not in gateway_list and len(gateway_list) == 1
+
+    run_scenario(scenario(), timeout=120)
+
+
 def test_identify_and_refresh(make_rig: Any) -> None:
     async def scenario() -> None:
         async with make_rig() as rig:

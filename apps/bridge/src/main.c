@@ -171,7 +171,10 @@ static void init_fn(struct k_work *work)
 	env.flash_ok = br.flash_ok;
 	dlv_init(&br.dlv, &env);
 	sched_init(&br.sched, &central_sched_ops, NULL);
-	tsess_init(&br.sess, &central_tsess_io, NULL, &br.dlv, &br.fonts, &bridge_sha);
+	for (uint8_t i = 0; i < ARRAY_SIZE(br.sess); i++) {
+		tsess_init(&br.sess[i], &central_tsess_io, central_link_ctx(i), &br.dlv, &br.fonts,
+			   &bridge_sha);
+	}
 
 	err = settings_subsys_init();
 	if (err != 0) {

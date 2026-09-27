@@ -383,7 +383,8 @@ ZTEST(gw_nodes, test_list_nodes_and_inventory)
 {
 	struct ctag_mesh_caps_status caps = {.proto = 1u, .fw_major = 1u, .fw_minor = 2u,
 					     .fw_patch = 13u, .board = 3u, .fontpack_id = {7},
-					     .flash_mib = 8u, .max_tags = 20u, .flags = 1u};
+					     .flash_mib = 8u, .max_tags = 20u, .assigned = 7u,
+					     .flags = 1u};
 	struct ctag_mesh_health_status health = {.uptime_s = 99u, .sessions_ok = 4u};
 	uint8_t p[CTAG_MESH_CAPS_STATUS_LEN];
 	struct ctag_cbor_field f = {.key = CTAG_CBOR_KEY_NODES};
@@ -415,6 +416,23 @@ ZTEST(gw_nodes, test_list_nodes_and_inventory)
 	e = event(CTAG_SERIAL_MSG_EVT_BRIDGE_INFO, 1);
 	zassert_equal(field_u(e, CTAG_CBOR_KEY_ADDR), BRIDGE_A);
 	zassert_true(field_has(e, CTAG_CBOR_KEY_COUNTERS));
+	{
+		/* The bridge's capacity and its own count of assigned tags (CAPS_STATUS),
+		 * whatever the gateway's assignment table holds (nothing yet). */
+		struct ctag_cbor_field ev[2] = {{.key = CTAG_CBOR_KEY_CAPS},
+						{.key = CTAG_CBOR_KEY_ASSIGNED}};
+		struct ctag_cbor_field c[2] = {{.key = CTAG_CBOR_KEY_MAX_TAGS},
+					       {.key = CTAG_CBOR_KEY_ASSIGNED_COUNT}};
+		struct ctag_cbor_str none[1];
+
+		decode(e, ev, 2u);
+		zassert_true(ev[0].present && ev[1].present);
+		zassert_equal(ctag_cbor_decode(ev[0].v.str.ptr, ev[0].v.str.len, c, 2u), 0);
+		zassert_equal(c[0].v.u, 20u);
+		zassert_true(c[1].present, "caps carry the bridge's own count");
+		zassert_equal(c[1].v.u, 7u);
+		zassert_equal(ctag_cbor_maps(&ev[1].v.str, none, 1u), 0, "the gateway holds none");
+	}
 
 	/* Two assignments on BRIDGE_A: the inventory nests them five levels deep. */
 	for (uint32_t t = 1; t <= 2; t++) {
@@ -444,6 +462,17 @@ ZTEST(gw_nodes, test_list_nodes_and_inventory)
 		zassert_equal(ctag_cbor_maps(&it[5].v.str, as, 4u), 2, "two assignments listed");
 		zassert_equal(ctag_cbor_decode(as[1].ptr, as[1].len, a, 2u), 0);
 		zassert_equal(a[0].v.u + a[1].v.u, 0x502u + 2u);
+	}
+	{
+		/* The inventory's caps map carries the bridge's count too. */
+		struct ctag_cbor_field cf = {.key = CTAG_CBOR_KEY_CAPS};
+		struct ctag_cbor_field c = {.key = CTAG_CBOR_KEY_ASSIGNED_COUNT};
+
+		zassert_equal(ctag_cbor_decode(items[0].ptr, items[0].len, &cf, 1u), 0);
+		zassert_true(cf.present);
+		zassert_equal(ctag_cbor_decode(cf.v.str.ptr, cf.v.str.len, &c, 1u), 0);
+		zassert_true(c.present);
+		zassert_equal(c.v.u, 7u, "the bridge's count, not the gateway's two");
 	}
 	zassert_equal(ctag_cbor_decode(items[1].ptr, items[1].len, it, 6u), 0);
 	zassert_false(it[3].present, "no CAPS yet for the unconfigured bridge");

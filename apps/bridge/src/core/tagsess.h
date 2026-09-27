@@ -176,6 +176,10 @@ void tsess_start(struct tsess *s, uint32_t tag_id, uint32_t suspend_ms, uint16_t
 /* End now (link lost, resume failure): jobs stay pending; done() is called. */
 void tsess_abort(struct tsess *s, uint8_t status);
 bool tsess_active(const struct tsess *s);
+/* The session waits for its tag's RESULT (the refresh after FRAME_END or
+ * CMD) with nothing left to send: its link idles (docs/protocol.md 5.2, a
+ * further tag may be initiated). */
+bool tsess_link_idle(const struct tsess *s);
 
 /* ---- Completions and received values ---- */
 void tsess_caps(struct tsess *s, int err, const uint8_t *data, uint16_t len);

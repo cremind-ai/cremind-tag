@@ -78,6 +78,13 @@ bool tsess_active(const struct tsess *s)
 	return s->state != TS_IDLE && s->state != TS_DONE;
 }
 
+static bool rec_busy(const struct tsess *s);
+
+bool tsess_link_idle(const struct tsess *s)
+{
+	return s->state == TS_RESULT && !rec_busy(s) && s->inflight == 0u;
+}
+
 static void close_view(struct tsess *s)
 {
 	fontstore_view_close(s->fonts, &s->view);

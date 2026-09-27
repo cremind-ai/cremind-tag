@@ -487,7 +487,7 @@ class SimGateway:
             info.update(fw=f"{msg.fw_major}.{msg.fw_minor}.{msg.fw_patch}", fontpack_id=msg.fontpack_id,
                         board=msg.board, flash_size=msg.flash_mib * (1 << 20),
                         caps={"board": msg.board, "flash_size": msg.flash_mib * (1 << 20), "max_tags": msg.max_tags,
-                              "flags": msg.flags, "proto": msg.proto})
+                              "assigned_count": msg.assigned, "flags": msg.flags, "proto": msg.proto})
             self._bridge_info_event(src)
         elif isinstance(msg, MeshHealthStatus):
             info = self.bridge_info.setdefault(src, {})

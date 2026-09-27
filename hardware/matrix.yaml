@@ -40,7 +40,7 @@ bridges:
     external_flash: soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only)
     maintenance_link: usb_cdc_acm
     status: buildable
-    notes: apps/bridge links in the exact geometry and passes verify_stack.py (flash 70 % free, 154 KiB RAM free); not flashed yet.
+    notes: apps/bridge links in the exact geometry and passes verify_stack.py (flash 69.7 % free, 144 KiB RAM free with two tag sessions at once); not flashed yet.
   - id: nrf52832_bridge
     board_id: 4
     zephyr_board: nrf52dk/nrf52832
@@ -52,10 +52,10 @@ bridges:
     status: buildable
     notes: >-
       apps/bridge links in the exact geometry, passes verify_stack.py and meets the targets (measured 2026-09-28,
-      NCS v3.4.1): 8,473 B RAM free (target 8,192), flash 44.8 % free. Layouts are assembled in external flash
+      NCS v3.4.1): 8,409 B RAM free (target 8,192), flash 44.5 % free. Layouts are assembled in external flash
       with one shared layout buffer, the maintenance port runs on the main thread with 512-byte frames, and the
       assignment table holds 10 tags (CAPS max_tags 10; the nRF52840 keeps 20), with one cached QR symbol
-      (the nRF52840 keeps four). Stack sizes are estimates until
+      (the nRF52840 keeps four) and one tag session at a time (the nRF52840 holds two). Stack sizes are estimates until
       measured; SPI NOR pins on the nRF52 DK are placeholders; not flashed yet. docs/bridge-firmware.md "Memory".
 
 tags:

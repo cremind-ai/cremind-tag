@@ -1,11 +1,17 @@
 """Simulated scale and fault test: 1 gateway, 5 bridges (one behind a relay), 20 tags, the real daemon.
 
-The fast variant (20 trials per scenario, time scale 20, ~40 s) runs by default and
-checks every invariant; ``CREMIND_TAG_SCALE_FULL=1`` runs the full 200-trial
-measurement at time scale 10 (~5 min), checks every invariant and warns when the
-baseline misses the acceptance target (delivery initiation within 60 s for at least
-95 % of trials): with 2 s advertising windows the simulated baseline sits at the
-target's edge (docs/scale-test.md §6), so a miss is reported, not failed on.
+Both variants gate on the INVARIANTS of docs/scale-test.md §3.5 (no job lost, one outcome per delivery,
+displayed frames equal to the reference render, ...): a violation is a bug whatever the timing.
+
+- The fast variant (20 trials per scenario, time scale 20, ~40 s) runs by default. Latency is asserted only
+  for the baseline, with a bound that ~20 trials can carry: at least ``FAST_FLOOR`` of them initiated within
+  60 s. The full runs measure about 99 % (docs/scale-test.md §5); if the true share were even 95 %, 15 to
+  30 trials would fall below 70 % with probability < 0.001, so a failure is a regression, not noise. The faults
+  scenario asserts no latency: its ~20 trials are dominated by the two injected 45 s Cremind outages.
+- ``CREMIND_TAG_SCALE_FULL=1`` runs the full 200-trial measurement at time scale 10 (~5 min per scenario)
+  and reports its latency without failing on it (a warning when the baseline misses the acceptance
+  target, delivery initiation within 60 s for at least 95 % of trials).
+
 tools/sim_scale.py does the work; docs/scale-test.md describes the method and the results.
 """
 
@@ -13,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 import warnings
@@ -22,10 +29,18 @@ from typing import Any
 import pytest
 
 FULL = os.environ.get("CREMIND_TAG_SCALE_FULL") == "1"
+FAST_FLOOR = 0.70
+"""Fast baseline: the least share of trials initiated within 60 s (see the module docstring)."""
 
 
 def _invariant_failures(report: dict[str, Any]) -> dict[str, Any]:
     return {k: v["examples"][:3] for k, v in report["invariants"].items() if not v["ok"]}
+
+
+def fast_floor_miss_probability(trials: int, share: float, floor: float = FAST_FLOOR) -> float:
+    """P(fewer than ``floor`` of ``trials`` within the target) when each is within it with ``share``."""
+    below = math.ceil(floor * trials)  # a count below this misses the floor
+    return sum(math.comb(trials, k) * share**k * (1 - share) ** (trials - k) for k in range(below))
 
 
 @pytest.mark.slow
@@ -37,18 +52,31 @@ def test_scale(scenario: str, sim_scale: ModuleType, scale_fonts: Any, tmp_path:
     report = sim_scale.run_scale(cfg, scale_fonts)
     print(sim_scale.console_summary(report))
     (tmp_path / "report.json").write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
+    # The gate: every invariant, in every scenario and variant.
     assert not _invariant_failures(report), json.dumps(_invariant_failures(report), default=str)[:2000]
     acceptance = report["acceptance"]
     assert acceptance["population"] >= cfg.trials // 2, acceptance
-    assert acceptance["initiation"]["p50"] is not None and acceptance["initiation"]["p50"] <= cfg.target_s
     if scenario == "faults":
         fired = {k: v["fired"] for k, v in report["faults"].items()}
         for kind in ("bridge_reboot", "gateway_reboot", "usb_replug", "cremind_5xx"):
             assert fired.get(kind), (kind, fired)
-    if FULL and scenario == "baseline" and not acceptance["met"]:
-        warnings.warn(f"baseline: {acceptance['within_target']}/{acceptance['population']} trials initiated within "
-                      f"{cfg.target_s:.0f} s (target {cfg.target_fraction:.0%}); causes: {report['tail']['causes']}",
-                      stacklevel=1)
+    share = acceptance["fraction_within_target"]
+    summary = (f"{scenario}: {acceptance['within_target']}/{acceptance['population']} trials initiated within "
+               f"{cfg.target_s:.0f} s (target {cfg.target_fraction:.0%}); causes: {report['tail']['causes']}")
+    if FULL:
+        if scenario == "baseline" and not acceptance["met"]:
+            warnings.warn(summary, stacklevel=1)  # the full run reports its latency, it does not fail on it
+    elif scenario == "baseline":
+        assert share is not None and share >= FAST_FLOOR, summary
+
+
+def test_fast_floor_is_not_noise() -> None:
+    """The fast baseline's latency floor fails by chance with probability < 0.001 for 15..30 trials even if
+    only 95 % of trials were within 60 s (the full runs measure about 99 %), while a real regression (60 %)
+    fails it most of the time."""
+    for trials in range(15, 31):
+        assert fast_floor_miss_probability(trials, 0.95) < 1e-3, trials
+        assert fast_floor_miss_probability(trials, 0.60) > 0.7, trials
 
 
 # -- the tool's own pieces (fast) ------------------------------------------------------------

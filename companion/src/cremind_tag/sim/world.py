@@ -52,6 +52,8 @@ class BridgeSpec:
     bad_sectors: tuple[int, ...] = ()
     maintenance_port: bool = True
     max_tags: int | None = None  # assignment table size (CAPS max_tags); None: MAX_TAGS_PER_BRIDGE
+    sessions: int | None = None  # tag sessions at once (§5.2); None: the board's (CONFIG_CTAG_BRIDGE_SESSIONS)
+    quick_retry: bool | None = None  # one retry within the tag's window after CONNECT_FAILED; None: the default
 
 
 @dataclass
@@ -166,10 +168,11 @@ class Simulator:
         self.bridges: list[SimBridge] = []
         for index, spec in enumerate(config.bridges):
             rng = rng_stream(seed, "bridge", index)
+            policy: dict[str, Any] = {} if spec.quick_retry is None else {"quick_retry": spec.quick_retry}
             bridge = SimBridge(spec.name or f"bridge-{index + 1}", uuid=rng.randbytes(16), clock=self.clock,
                                mesh=self.mesh, air=self.air, rng=rng, flash_size=spec.flash_size,
                                board=Board.NRF52840_BRIDGE, faults=config.faults.bridge, bad_sectors=spec.bad_sectors,
-                               max_tags=spec.max_tags)
+                               max_tags=spec.max_tags, sessions=spec.sessions, **policy)
             self.bridges.append(bridge)
         self.gateway = SimGateway(clock=self.clock, mesh=self.mesh, rng=rng_stream(seed, "gateway"),
                                   bridges=self.bridges, delivery_queue=config.delivery_queue,

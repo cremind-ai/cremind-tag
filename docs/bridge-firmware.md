@@ -11,8 +11,8 @@ are normative in [protocol.md](protocol.md) (§1.6, §2, §3, §4, §5, §10) an
 
 | Target | Board | Status | Memory |
 |---|---|---|---|
-| `bridge-nrf52840dk` | `nrf52840dk/nrf52840` (+ the DK's 8 MiB MX25R64) | builds, verified, meets targets; not yet run on hardware | [§9](#9-memory) |
-| `bridge-nrf52dk` | `nrf52dk/nrf52832` (+ a placeholder SPI NOR) | builds, verified, meets targets (8,473 B RAM free, 10 tags per bridge, 1 QR slot); not yet run on hardware | [§9](#9-memory) |
+| `bridge-nrf52840dk` | `nrf52840dk/nrf52840` (+ the DK's 8 MiB MX25R64) | builds, verified, meets targets (two tag sessions at once); not yet run on hardware | [§9](#9-memory) |
+| `bridge-nrf52dk` | `nrf52dk/nrf52832` (+ a placeholder SPI NOR) | builds, verified, meets targets (8,409 B RAM free, 10 tags per bridge, 1 QR slot, one tag session); not yet run on hardware | [§9](#9-memory) |
 
 Build: `python tools/build.py bridge-nrf52840dk bridge-nrf52dk` (the companion
 venv's interpreter on Windows: `unset VIRTUAL_ENV; companion/.venv/Scripts/python.exe tools/build.py …`);
@@ -235,27 +235,57 @@ history to revision 0 (§10).
 
 ## 4. Tag connection scheduler (protocol.md §5.2)
 
-`src/core/sched.c`, one attempt or session at a time:
+`src/core/sched.c`: one **initiator** (one connection attempt at a time, each
+in its own mesh suspend window) and `CONFIG_CTAG_BRIDGE_SESSIONS` **links**
+(tag connections: **2 on the nRF52840, 1 on the nRF52832**, protocol.md §5.2
+"Concurrent sessions"):
 
 ```
-IDLE ──advert of T with work pending──▶ checks: node ready (provisioned, configured, not configuring)
-  ▲                                            per-tag back-off (BRIDGE_TAG_BACKOFF_MS after a failure)
-  │                                            ≤ BRIDGE_MAX_SUSPENDS_PER_MIN attempts per rolling minute
-  │         own mesh sends in flight ─▶ WAIT_SENDS: poll 20 ms, ≤ 500 ms, else defer (no back-off)
+IDLE ──advert of T with work pending──▶ checks: T has no link, a link is FREE, every open session's link idles
+  ▲                                            (its tag refreshing: tsess_link_idle), node ready (provisioned,
+  │                                            configured, not configuring), per-tag back-off (BRIDGE_TAG_BACKOFF_MS
+  │                                            after a failure; after CONNECT_FAILED one quick retry within
+  │                                            TAG_ADV_WINDOW_MS), ≤ BRIDGE_MAX_SUSPENDS_PER_MIN attempts per minute
+  │         the link: FREE ─▶ ATTEMPT
+  │         own mesh sends in flight ─▶ WAIT_SENDS: poll 20 ms, ≤ 500 ms, else defer (no back-off, link FREE)
   │         bt_mesh_suspend() ── -EINVAL / -EBUSY ─▶ MESH_SUSPEND_FAILED, back-off, no connection attempt
   │                           ── other error ─▶ MESH_SUSPEND_FAILED, back-off, RECOVERY (mesh state unknown)
-  │         bt_conn_le_create(T, timeout = BRIDGE_CONN_ATTEMPT_MS / 10 ms)
-  │                     ── refused ─▶ resume ─▶ CONNECT_FAILED, back-off
-  │  CONNECTING ──connected(err)──▶ bt_mesh_resume()   (suspend_ms = suspend → resume's return)
+  │         bt_conn_le_create(link, T, timeout = BRIDGE_CONN_ATTEMPT_MS / 10 ms)
+  │                     ── refused ─▶ resume ─▶ CONNECT_FAILED, back-off (+ quick retry)
+  │  CONNECTING ──connected(link, err)──▶ bt_mesh_resume()   (suspend_ms = suspend → resume's return)
   │     │ watchdog 1.5 s ─▶ cancel (bt_conn_disconnect) ─▶ CANCELLING ──connected(err) or 2 s──▶ resume
   │     ▼
-  │  resume ok ── err == 0 ─▶ SESSION: GATT discovery, handshake, transfer (§5)
-  │           └─ failed / cancelled ─▶ CONNECT_FAILED, back-off
-  │  resume error ─▶ disconnect, MESH_RESUME_FAILED, RECOVERY: retry 100, 200, 400, 800, 1000… ms;
+  │  resume ok ── err == 0 ─▶ IDLE; the link SESSION: GATT discovery, handshake, transfer (§5)
+  │           └─ failed / cancelled ─▶ IDLE; CONNECT_FAILED, back-off (+ quick retry), the link FREE
+  │  resume error ─▶ the link disconnected, MESH_RESUME_FAILED, RECOVERY: retry 100, 200, 400, 800, 1000… ms;
   │                  still failing after 5 s ─▶ sys_reboot (mesh reloads from settings)
   │  RECOVERY after an unknown-state suspend: each retry suspends fully, then resumes
-  └── SESSION done ─▶ disconnect ─▶ DISCONNECTING ──disconnected──▶ IDLE
+  └── (per link) SESSION done ─▶ disconnect ─▶ DISCONNECTING ──disconnected (or 10 s)──▶ FREE
 ```
+
+- **Two sessions (nRF52840).** A second tag is initiated only while the first
+  session waits for its tag's `RESULT` with nothing left to send (the panel
+  refresh after `FRAME_END` or a `CMD`, about 4 s for black/white, 15 s with
+  red): the initiation's suspend window and the second handshake and frame
+  then share the radio with a link that carries only empty connection events.
+  Each link has its own connection (`CONFIG_BT_MAX_CONN=2`), GATT state
+  (`central.c` `struct clink`), `struct tsess` with its own records, credits,
+  pacing and deadline timers, and its own disconnect wait; the initiator's
+  and the links' deadlines share one timer, armed for the earliest. A failing
+  session or attempt on one link never touches the other (tested, §10). Both
+  sessions render from the one shared layout buffer (§3): when a session's
+  next job streams beside the other session's frame they take turns in it,
+  each reloading its layout from its record when the other used it
+  (`layout_reloads`).
+- **Quick retry.** `CONNECT_FAILED` (the attempt ended without a connection:
+  refused, timed out in the host, failed to be established, cancelled) marks
+  the tag's back-off entry with one retry, allowed on an advertisement within
+  `TAG_ADV_WINDOW_MS` (2 s) of the failure; the retry is a normal attempt
+  (a suspend window, the rate limit) and a failed retry leaves the plain
+  15 s back-off. Suspend and resume failures and failed sessions back off at
+  once. The flag lives in the back-off entry's padding: no RAM.
+- INFO counts both: `quick_retries` (attempts that were a tag's retry) and
+  `concurrent_sessions` (sessions started beside another one).
 
 - Tags are seen through the **mesh's own passive scan**: `bt_le_scan_cb_register()`
   sees every report (firmware-notes §3); the bridge never starts or stops
@@ -299,7 +329,9 @@ IDLE ──advert of T with work pending──▶ checks: node ready (provisione
 |---|---|
 | attempt 1 s (`BRIDGE_CONN_ATTEMPT_MS`) | the tag advertises every 250 ms for 2 s: ≥ 4 advertising events per attempt, while the mesh pause stays about one second |
 | ≤ 6 attempts per rolling minute | bounds the mesh's suspended share to ~10 % (6 × ~1 s per 60 s) whatever the tags do; the native_sim test measures ≤ 12 % over 5 minutes of failing tags |
-| per-tag back-off 15 s | half a wake period: a failing tag is retried in its next window, at most one attempt per window |
+| per-tag back-off 15 s | half a wake period: a failing tag is retried in its next window |
+| one quick retry within 2 s (`TAG_ADV_WINDOW_MS`) after `CONNECT_FAILED` | a failed attempt ends within ~1 s and the tag advertises every 250 ms for 2 s: the rest of its window is usually still open; without the retry a 5 % connection failure rate forfeited the whole wake period (30 s), about 30 % of the late trials of the scale test (scale-test.md §6.2). At most two attempts per window, both under the rate limit |
+| a second session only while every open link idles | an initiation suspends the mesh and scans for the tag: it must not compete with a frame being streamed, and the refresh (4–15 s) is where a single-session bridge lost windows (about 70 % of the late trials) |
 | wait for own sends ≤ 500 ms | a pending segmented send (a result) is not stalled by the pause; beyond that the attempt is deferred to a later advertisement rather than holding the mesh |
 | watchdog 1.5 s, cancel confirmation 2 s | the host's own create timeout normally reports first; the watchdog only covers a lost report |
 | resume retries ≤ 1 s apart, reboot after 5 s | a stuck scanner restart recovers from settings instead of leaving the relay silent |
@@ -366,7 +398,9 @@ to 3 times). The hardware test plan measures this (§11).
    plane data + 60 s** (the refresh bound; 150 s for a 400×300 BWR frame).
    Expiry ends the session with `TIMEOUT`, a link-level failure (the job
    stays pending). A peer that sends `CREDIT{0}` or never-ending fragments
-   therefore holds the bridge's one session slot for at most 5 s.
+   therefore holds a session slot for at most 5 s. Deadlines are per session
+   (each `struct tsess` has its own step and pace timers): with two sessions
+   neither moves the other's.
 7. **Result timing** in `DELIVERY_RESULT`: `wake_ms` = layout validated →
    connected (restored jobs count from the boot), `suspend_ms` = the §5.2
    pause, `transfer_ms` = the job's `FRAME_BEGIN` → `RESULT` (without the
@@ -534,8 +568,8 @@ The port speaks the §1.1–§1.3 framing (`ctag_frame`) with CBOR maps
   (last 4 op ids).
 - `REBOOT` answers, lets the answer leave the port, then resets.
 - `INFO.counters` include the port's frame counters and the bridge's (mesh,
-  scheduler, session, delivery, flash cache): 59 counters, all reported (up
-  to 64; at most 1,117 bytes framed, below the 1,280/1,536-byte response
+  scheduler, session, delivery, flash cache): 61 counters, all reported (up
+  to 64; at most about 1,160 bytes framed, below the 1,280/1,536-byte response
   buffer — should counters ever outgrow it, the last ones are left out rather
   than INFO failing). The lists are written straight into INFO's array, not
   copied on the maintenance stack.
@@ -551,29 +585,38 @@ storage); RAM after every static allocation including stacks.
 
 | Target | Flash used / region | Headroom (min 15 %) | RAM used / 64·256 KiB | RAM free (target) | verify_stack | Result |
 |---|---|---|---|---|---|---|
-| bridge-nrf52840dk | 304,648 / 1,015,808 B | 70.0 % | 104,770 / 262,144 B | 157,374 B (none) | 16/16 pass | ok |
-| bridge-nrf52dk | 276,080 / 499,712 B | 44.8 % | 57,063 / 65,536 B | **8,473 B (8,192)** | 16/16 pass | ok |
+| bridge-nrf52840dk | 307,960 / 1,015,808 B | 69.7 % | 114,474 / 262,144 B | 147,670 B (none) | 16/16 pass | ok |
+| bridge-nrf52dk | 277,460 / 499,712 B | 44.5 % | 57,127 / 65,536 B | **8,409 B (8,192)** | 16/16 pass | ok |
 
-Static RAM by component (linker map and ELF symbols; the nRF52832 column
-before this change is the `a232ac0` build, 215 B free):
+Static RAM by component (linker map and ELF symbols; the nRF52840 holds two
+tag sessions, the nRF52832 one; the "nRF52832 before" column is the
+`a232ac0` build, 215 B free, and "nRF52840, one session" the build before
+the second session):
 
-| Component | nRF52840 | nRF52832 | nRF52832 before |
-|---|---:|---:|---:|
-| bridge core state (`br`) | 18,200 | 11,064 | 15,776 |
-| — the one shared layout buffer (was: assembly + session buffers) | 4,096 | 4,096 | 8,192 |
-| — rest of the delivery core: jobs, history, results, assignments | 4,528 | 2,744 | 3,288 |
-| — tag session: strip buffer, render work (4 / 1 QR slots), records | 4,524 | 3,068 | 3,032 |
-| — flash read cache, font store, scheduler | 5,044 | 1,148 | 1,264 |
-| maintenance port: frame buffers, rings, SHA context | 15,291 | 3,484 | 5,662 |
-| maintenance thread stack | (main) | (main) | 2,112 |
-| bridge work-queue stack | 4,096 | 3,584 | 3,584 |
-| event queues, mesh queues, GATT cache, sightings | 4,120 | 2,480 | 2,840 |
-| Zephyr controller | 16,269 | 9,439 | 9,439 |
-| Bluetooth host | 14,483 | 9,195 | 9,195 |
-| Bluetooth Mesh | 8,448 | 5,336 | 5,336 |
-| kernel stacks: ISR, system work queue, **main = maintenance**, idle | 8,426 | 7,370 | 6,346 |
-| PSA (nrf_security + Oberon) | 1,772 | 1,856 | 1,856 |
-| other (USB stack on the nRF52840, drivers) | 10,627 | 813 | 813 |
+| Component | nRF52840 | nRF52840, one session | nRF52832 | nRF52832 before |
+|---|---:|---:|---:|---:|
+| bridge core state (`br`) | 22,752 | 18,200 | 11,088 | 15,776 |
+| — the one shared layout buffer (was: assembly + session buffers) | 4,096 | 4,096 | 4,096 | 8,192 |
+| — rest of the delivery core: jobs, history, results, assignments | 4,528 | 4,528 | 2,744 | 3,288 |
+| — tag sessions (`struct tsess` each: strip buffer, render work with 4 / 1 QR slots, records) | 9,040 (2 × 4,520) | 4,524 | 3,068 | 3,032 |
+| — flash read cache, font store, scheduler (with its link table) | 5,088 | 5,044 | 1,180 | 1,264 |
+| maintenance port: frame buffers, rings, SHA context | 15,291 | 15,291 | 3,484 | 5,662 |
+| maintenance thread stack | (main) | (main) | (main) | 2,112 |
+| bridge work-queue stack | 4,096 | 4,096 | 3,584 | 3,584 |
+| event queues, mesh queues, GATT cache, sightings, per-link GATT state (`struct clink`, 336 B each) | 4,393 | 4,120 | 2,520 | 2,840 |
+| Zephyr controller (two connections on the nRF52840) | 17,783 | 16,269 | 9,439 | 9,439 |
+| Bluetooth host (14 ATT/L2CAP/ACL TX buffers, 16 event buffers, two connections on the nRF52840) | 17,848 | 14,483 | 9,195 | 9,195 |
+| Bluetooth Mesh | 8,448 | 8,448 | 5,336 | 5,336 |
+| kernel stacks: ISR, system work queue, **main = maintenance**, idle | 8,426 | 8,426 | 7,370 | 6,346 |
+| PSA (nrf_security + Oberon) | 1,772 | 1,772 | 1,856 | 1,856 |
+| other (USB stack on the nRF52840, drivers) | 10,627 | 10,627 | 813 | 813 |
+
+The second session costs the nRF52840 **9,704 B** (104,770 → 114,474 B):
+its `struct tsess` (4,520 B), its link state (336 B), the scheduler's link
+table, a second controller connection (+1,514 B) and the host's buffers for
+two links' DATA fragments in flight (`CTAG_BRIDGE_SESSIONS` ×
+`CTAG_BRIDGE_ATT_INFLIGHT` = 12 < `BT_ATT_TX_COUNT` = 14; a host assertion
+wants more event than ACL TX buffers: +3,365 B); 147,670 B stay free.
 
 What reached the target on the nRF52832 (7,977 B were missing), measured
 build by build, without giving up a function or a security property:
@@ -586,7 +629,8 @@ build by build, without giving up a function or a security property:
 | **10-tag assignment table** (`CTAG_BRIDGE_MAX_TAGS=10`, reported as `CAPS_STATUS.max_tags`): assignments, history, battery, GATT handle cache, sightings, back-off table | | 57,127 | 8,409 |
 | The review fixes of §4–§5 (session deadlines, per-record credits, the unauthenticated-status count, the liveness watchdog) | yes | 57,255 | 8,281 |
 | A 1,280-byte response buffer (INFO with all 59 counters needs at most 1,117 bytes) | | 56,999 | 8,537 |
-| Protocol v1 finalisation: `DELIVERY_RESULT` with `stored_epoch` and `flags` (+8 B per result slot), the session's `tag_epoch`, the QR memo (16 B); CAPS bound into the transcript at no RAM cost (re-packed from the parsed CAPS); **one QR slot** here (`CONFIG_CTAG_RENDER_QR_SLOTS=1`; the default four would cost 1,224 B more, 7,193 B free: below the target) | yes (4 slots on the nRF52840: +1,408 B) | 57,063 | **8,473** |
+| Protocol v1 finalisation: `DELIVERY_RESULT` with `stored_epoch` and `flags` (+8 B per result slot), the session's `tag_epoch`, the QR memo (16 B); CAPS bound into the transcript at no RAM cost (re-packed from the parsed CAPS); **one QR slot** here (`CONFIG_CTAG_RENDER_QR_SLOTS=1`; the default four would cost 1,224 B more, 7,193 B free: below the target) | yes (4 slots on the nRF52840: +1,408 B) | 57,063 | 8,473 |
+| The scheduling of §4: link slots (`CONFIG_CTAG_BRIDGE_SESSIONS`, **one here**, two on the nRF52840: +9,704 B there), the per-link GATT state grouped in `struct clink` (+40 B of padding), the scheduler's link table and the initiator's deadline (+24 B); the quick retry's flag rides in the back-off entry's padding (0 B) | yes | 57,127 | **8,409** |
 
 The nRF52840 keeps `MAX_TAGS_PER_BRIDGE` = 20 and its 4 KiB frames (and
 gains 5.7 KiB from the shared changes). The 10-tag table was still needed
@@ -600,12 +644,16 @@ filter, no delayable mesh messages, mesh settings on the system work queue,
 8 PSA key slots, a 3.5 KiB work-queue stack and a 2 KiB main (maintenance)
 stack — both **to be measured** with `debug.conf` on hardware (H12) — 16
 jobs and 8 result slots. The controller stays the Zephyr controller
-(`bt-ll-sw-split`). The margin above the target is 281 B (a second QR slot,
-408 B, does not fit): anything added to this SoC's RAM must be paid for.
+(`bt-ll-sw-split`). The margin above the target is 217 B (a second QR slot,
+408 B, or a second tag session, about 9 KiB, does not fit): anything added to
+this SoC's RAM must be paid for.
 
 The shared buffer costs nothing on the air: the commit's extra flash read
 (4 KiB) replaces a RAM copy, and a session reloads its layout (4 KiB from
-the record plus a renderer re-init) only after a commit arrived mid-frame.
+the record plus a renderer re-init) only after a commit arrived mid-frame,
+or — two sessions on the nRF52840 — when the other session's frame took the
+buffer (a session's next job streaming beside the other's frame, rare: the
+second session starts only while the first idles).
 Assembly in flash erases the transfer's 8 KiB slot at `LAYOUT_BEGIN` instead
 of at the commit — the same erase count per delivery (one slot per
 transfer), and a `LAYOUT_BEGIN` that never commits wears one slot of the
@@ -616,18 +664,19 @@ round-robin ring.
 `apps/bridge/tests/core` — ztest on `native_sim` and `native_sim/native/64`
 (twister; the same sources as the firmware core, the flash simulator as a
 32 MiB NOR with 4-byte program units and power-cut injection), in two
-configurations: `ctag.bridge.core` (the nRF52840's sizes) and
-`ctag.bridge.core.nrf52832` (the nRF52832's: 10 tags, 16 jobs, 8 result
-slots, an 800-byte strip, 8 × 64-byte cache lines, 512-byte maintenance
-frames with one credit), so every shared code path runs with both:
+configurations: `ctag.bridge.core` (the nRF52840's sizes, two tag
+sessions) and `ctag.bridge.core.nrf52832` (the nRF52832's: one session, 10
+tags, 16 jobs, 8 result slots, an 800-byte strip, 8 × 64-byte cache lines,
+512-byte maintenance frames with one credit), so every shared code path runs
+with both:
 
 | Suite | Covers |
 |---|---|
 | `bridge_flash` | geometry (DK 8 MiB/1 MiB, production 16 MiB, caps, errors); > 16 MiB address map; directory record layout; A/B activation; **a power cut at every byte of an activation** and before its erase; pending records (odd and maximum length, CRC, consume, torn writes at every stage); **assembly in place** (chunks in any order at their stride, a chunk written twice refused as NOR would be, sealing, a header over other bytes failing the CRC, consumed records still intact); read cache |
 | `bridge_fonts` | install over the FONT_* path in odd chunk sizes, boot validation, a corrupt index at boot, every install error in order, the slot flip, a session view blocking an overwrite (`BUSY`), FLASH_TEST positions and `BUSY` rules |
 | `bridge_delivery` | §3.3 order (NOT_FOUND, INCOMPLETE + bitmap + resend, TOO_LARGE, INVALID, DIGEST_MISMATCH, NOT_ASSIGNED, STALE_EPOCH, FONTPACK_MISMATCH, UNSUPPORTED, missing strike, STALE_REVISION before the pack check); DUPLICATE for a pending, a displayed and an undisplayed revision (and after a reset); **a repeated commit of an accepted transfer answers DUPLICATE** whatever became of its job (pending, cancelled, cleared), after a reset, and not after the next BEGIN; **one result_seq per update_id** (a restarted transfer of an update_id already reported, before and after a reset; repeated TAG_CMD with a pending job, after its result, after RESULT_ACK, after the retries gave up; results-table eviction keeps unacknowledged results); **the transfer assembled in flash** (reverse order, a repeated chunk, no record before the commit, a reset before the commit, a chunk write failure → STORAGE_ERROR); **a power cut at every 4 bytes of the seal** (no job and no accepted transfer after the reset unless the header is complete); **the shared layout buffer** (held, borrowed by another tag's commit and reloaded, moved to a re-delivery's record, a damaged record refused, released by a finished job); **finish order** (history saved and result sent while the record is live; a superseded record consumed before its result); a stored result's `stored_epoch` and `flags` replayed under a new `update_id` after a reset; **accept order** (a seal failure or a full job table changes neither history nor older jobs; a replaceable older layout makes room); SUPERSEDED, in-session jobs untouched, LAYOUT_CANCEL; assignments (idempotent delete, inclusive delete up to epoch 0xFFFFFFFF, epochs, the `max_tags` table, persistence); tag commands and CLEAR resetting the history; pending layouts surviving resets, finished ones not redelivered; ring wear levelling across resets; result retry schedule and RESULT_ACK; result_seq never reused across four resets; node reset |
-| `bridge_sched` | mocked `bt_mesh_suspend/resume` and `bt_conn_le_create`: connection with resume before the session and suspend_ms; **suspend rejected → no connection attempt** (`-EBUSY`, `-EINVAL` touch nothing); **a suspend failing part-way** (scanner stopped, mesh not flagged suspended: RECOVERY suspends fully and resumes; still failing → reboot after 5 s); **liveness** (idle and silent for the limit, a report since, not idle, idle only recently, disabled); `-EALREADY` never leaves the mesh suspended; **every failed attempt resumes** (refused create, host timeout, failed establishment); **cancellation** confirmed, unconfirmed (resume refused while initiating → recovery), and completing mid-cancel; **resume failure → disconnect, recovery with back-off, reboot after 5 s**; **disconnect mid-transfer**; waiting for / deferring on own sends; not while configuring; **20 failing tags for 5 minutes never exceed 6 suspends in any rolling minute, mesh suspended ≤ 12 % of the time** |
-| `bridge_session` | a fake tag built from `ctag_session` (tag role), `ctag_txn` and `ctag_frag` over a timed event queue: end-to-end deliveries (1 plane; 2 planes rotated; QR on a BWR panel) whose RESULT digest equals the fixture frame digest, ≤ 4 records per connection event, a credit for every record, indications before or after the write response, one result_seq per update_id; the tag's duplicate answer (reported with `flags` bit0 and the tag's stored epoch); **disconnect mid-transfer** (no result, job pending, next session restarts at offset 0); RESULT lost at a reset → `DISPLAY_STATE_UNKNOWN` then redrawn; **STALE_EPOCH and AUTH_FAILED as link failures twice, final in the third consecutive session** (the result flagged `RESULT_FLAG_ESCALATED` and carrying the stored epoch of the tag's ERROR), **a relay rewriting `plane_flags` in the CAPS the bridge reads: the tag refuses AUTH, no record or frame ever exists, and the same tag delivers once the relay is gone**, the count restarting after an authenticated session, with another status and with a new epoch; the panel rule; CAPS of another tag; a silent tag timing out after 5 s; CMD CLEAR/SLEEP in arrival order; **another tag's commit mid-frame** (the session reloads its layout, same frame digest) and **a re-delivery of the frame being drawn** (one result, under the adopted update_id); **review probes: CREDIT{0} every 4 s for an hour instead of CHALLENGE (ends INVALID at once); CREDIT{0} forever after AUTH_OK (TIMEOUT in 5 s); a never-ending CTRL fragment stream (TIMEOUT 5 s after the connection); every handshake message 3 s late (TIMEOUT at the 5 s handshake bound); a credit every 4 s (TIMEOUT at the frame bound, 135 s); a CMD then a layout refused at FRAME_BEGIN (2 records sent, no PLANE_DATA on the CMD's credit)**; ASSIGN_DEL during a session that then drops (the job ends CANCELLED) |
+| `bridge_sched` | mocked `bt_mesh_suspend/resume` and `bt_conn_le_create`: connection with resume before the session and suspend_ms; **suspend rejected → no connection attempt** (`-EBUSY`, `-EINVAL` touch nothing); **a suspend failing part-way** (scanner stopped, mesh not flagged suspended: RECOVERY suspends fully and resumes; still failing → reboot after 5 s); **liveness** (idle and silent for the limit, a report since, not idle, idle only recently, disabled); `-EALREADY` never leaves the mesh suspended; **every failed attempt resumes** (refused create, host timeout, failed establishment); **cancellation** confirmed, unconfirmed (resume refused while initiating → recovery), and completing mid-cancel; **resume failure → disconnect, recovery with back-off, reboot after 5 s**; **disconnect mid-transfer**; waiting for / deferring on own sends; not while configuring; **the quick retry** (one retry inside the window after `CONNECT_FAILED`, none after a failed retry, after the window, after a suspend failure or a failed session; a retry counts toward the rate limit); **20 tags waking in 2 s windows, all failing to connect, for 5 minutes never exceed 6 suspends in any rolling minute, mesh suspended ≤ 12 % of the time**; two sessions (`ctag.bridge.core`): **initiations serialised** (nothing starts while one initiates, each its own suspend window and `suspend_ms`), **a second tag only while the first link idles**, never a second link to one tag, a third tag waits for a free link (a disconnecting link is not free), **a failing second link** (connect failure, resume failure and recovery, a dropped session) **never touches the first**, **a tag whose sessions keep failing never starves the other** (served in every wake over 10 rounds), **the rate limit with a session open**, a link's lost disconnected event freed after 10 s while the other session and the initiator's watchdog go on |
+| `bridge_session` | a fake tag built from `ctag_session` (tag role), `ctag_txn` and `ctag_frag` over a timed event queue: end-to-end deliveries (1 plane; 2 planes rotated; QR on a BWR panel) whose RESULT digest equals the fixture frame digest, ≤ 4 records per connection event, a credit for every record, indications before or after the write response, one result_seq per update_id; the tag's duplicate answer (reported with `flags` bit0 and the tag's stored epoch); **disconnect mid-transfer** (no result, job pending, next session restarts at offset 0); RESULT lost at a reset → `DISPLAY_STATE_UNKNOWN` then redrawn; **STALE_EPOCH and AUTH_FAILED as link failures twice, final in the third consecutive session** (the result flagged `RESULT_FLAG_ESCALATED` and carrying the stored epoch of the tag's ERROR), **a relay rewriting `plane_flags` in the CAPS the bridge reads: the tag refuses AUTH, no record or frame ever exists, and the same tag delivers once the relay is gone**, the count restarting after an authenticated session, with another status and with a new epoch; the panel rule; CAPS of another tag; a silent tag timing out after 5 s; CMD CLEAR/SLEEP in arrival order; **another tag's commit mid-frame** (the session reloads its layout, same frame digest) and **a re-delivery of the frame being drawn** (one result, under the adopted update_id); **review probes: CREDIT{0} every 4 s for an hour instead of CHALLENGE (ends INVALID at once); CREDIT{0} forever after AUTH_OK (TIMEOUT in 5 s); a never-ending CTRL fragment stream (TIMEOUT 5 s after the connection); every handshake message 3 s late (TIMEOUT at the 5 s handshake bound); a credit every 4 s (TIMEOUT at the frame bound, 135 s); a CMD then a layout refused at FRAME_BEGIN (2 records sent, no PLANE_DATA on the CMD's credit)**; ASSIGN_DEL during a session that then drops (the job ends CANCELLED); two sessions (`ctag.bridge.core`, two fake tags over one event queue): **side by side** (B connected while A refreshes, both frames the reference frames, each result with its own `suspend_ms`, A never reloads), **deadlines per session** (A's refresh never ends: A times out exactly at its own `RESULT` bound while B delivers; B silent: B times out 5 s after its own connection while A delivers; B drops mid-frame: A untouched), **both streaming at once** (A's CLEAR, then A's frame beside B's two-plane frame: both exact, the shared layout buffer reloaded) |
 | `bridge_maint` | HELLO (caps, credits, exemption, reset), answers held without credit, version mismatch, UNSUPPORTED (unknown, mesh and delivery types), malformed CBOR, CRC errors, the client's install sequence with its chunk size derived from `caps.max_frame`, a frame above `max_frame` dropped and counted, INFO counters (and INFO still answered with every slot filled with long names and 5-byte values), FLASH_TEST idempotency, REBOOT answered first, the streaming COBS writer byte-identical to the library |
 | `bridge_golden` | **every `render.json` scenario rendered from `fontpack_test.ctfp` installed in the store (slot 1, through the cache) reproduces the fixture frame digest and each plane digest strip by strip** |
 
@@ -651,10 +700,13 @@ for v in ctag.bridge.maint_pty ctag.bridge.maint_pty.nrf52832; do
 done
 ```
 
-Result (2026-09-28, protocol v1 finalisation): 316 of 316 test cases pass
-(79 per configuration and platform; the nRF52832 configuration renders with
-one QR slot, `CONFIG_CTAG_RENDER_QR_SLOTS=1`); the interop script passes
-against both builds; `tests/ztest` 456 of 456.
+Result (2026-09-28, two tag sessions and the quick retry): 336 of 336 test
+cases pass (88 per platform in `ctag.bridge.core`, 80 in
+`ctag.bridge.core.nrf52832`, which runs one session and renders with one QR
+slot); the interop script passes against both builds; `tests/ztest` 456 of
+456; the gateway's 122. A mutation check: dropping the "every open link
+idles" rule fails 2 tests, disabling the quick retry 3 (5 over both
+configurations).
 
 ## 11. Hardware test plan
 
@@ -686,6 +738,8 @@ log.
 | H16 | Resets | reset during commit, during a session, during a result retry | pending layouts restored; no duplicate delivery; result_seq continues upward; a repeated commit after the reset answers DUPLICATE |
 | H17 | Spoofed tag | A second DK advertising an assigned tag's id (companion `sim` peer or a test build) answering HELLO with CREDIT{0}, then with ERROR{STALE_EPOCH} | the session ends at once (INVALID), then link failures with back-off; the real tag's jobs end only after 3 consecutive sessions with the same status; other tags keep being served |
 | H18 | Liveness | Debug build that stops the scanner (`bt_le_scan_stop`) behind the mesh's back | the bridge reboots after `CTAG_BRIDGE_LIVENESS_S` idle without reports and serves again |
+| H19 | Two sessions (nRF52840) | Two tags of one bridge with work, the second waking while the first refreshes (a BWR panel makes the window 15 s); sniffer on both links; repeat with the first tag's refresh interrupted by a power loss | the second tag connects during the first one's refresh in its own suspend window (no scan PDUs between its CONNECT_IND and the resume), both deliveries OK, `concurrent_sessions` +1; the first link keeps its connection events through the second initiation (no supervision timeout); mesh relayed meanwhile |
+| H20 | Quick retry | A tag with work at the edge of range (or shielded for the first 300 ms of its window) | one `CONNECT_FAILED`, then a second attempt within the same 2 s window (`quick_retries` +1) that connects; with the tag shielded for the whole window: two attempts, then nothing for 15 s; never more than 6 suspensions in any minute |
 
 ## 12. Differences from the simulator
 
@@ -702,6 +756,8 @@ The firmware follows `sim/bridge.py`; where it differs:
 | `FONT_STATUS` reports a pack only when it passed the boot validation | the directory record | a corrupt active pack is then reinstalled by the companion instead of being skipped as "already active" |
 | `FLASH_TEST` also tests the **last** sector of the inactive slot and treats the pending ring as in use | first sector of the inactive slot, the 16 MiB boundary, the last sector | spec.yaml's `FLASH_TEST` text; the ring holds accepted work |
 | `wake_ms` of a job restored at boot counts from the boot | validation time kept | the validation time is RAM state |
+| A link idles once its session waits for the `RESULT` with no record left to send and no DATA fragment in flight | the session awaits the `RESULT` | the firmware also waits for its last fragments' completions; the simulator hands a record over at once |
+| Two sessions streaming at once take turns in the one layout buffer (reloading from the job's record) | each session holds its frame | RAM (§3); rare, since a second session starts only while the first idles |
 
 ## 13. Flashing and debugging
 
@@ -741,13 +797,23 @@ nrfjprog -f NRF52 --reset
 - Everything in §11: nothing has run on hardware yet (stack depths, the
   actual pause, relay and SAR behaviour during pauses, QSPI/SPI NOR timing,
   USB enumeration, render time).
-- nRF52832: RAM meets the target with 281 B to spare, a 10-tag table and one QR slot
-  (§9); its 3.5 KiB work-queue and 2 KiB main (maintenance) stacks are
+- Two sessions on the Zephyr controller (H19): in the pinned sources
+  `ll_create_connection()` refuses only while the one scan/initiator set is
+  in use or for a peer already connected (Z `controller/ll_sw/ull_central.c`),
+  so a central initiates beside an existing central connection, and
+  `BT_CTLR_SCHED_ADVANCED` (on with `BT_CENTRAL`) places the new connection's
+  events beside the first (`BT_CTLR_CENTRAL_SPACING`, firmware-notes §2); what
+  the first link's connection events cost the second initiation, and two
+  links streaming beside the mesh, are measured on hardware.
+- nRF52832: RAM meets the target with 217 B to spare, a 10-tag table, one QR slot
+  and one tag session (§9); its 3.5 KiB work-queue and 2 KiB main (maintenance) stacks are
   estimates until H12; the SPI NOR pins of `boards/nrf52dk_nrf52832.overlay`
   are placeholders; `BT_BUF_EVT_RX_SIZE=68` assumes no HCI event above 68
   bytes (true for the commands the bridge uses — verify with a debug build).
 - Tag placement by capacity is Cremind's: the companion reports each
-  bridge's `max_tags` (`CAPS_STATUS`) and `assigned` in its inventory, Cremind
+  bridge's `max_tags` and `assigned` (both from its `CAPS_STATUS`, which the
+  gateway forwards in the caps map of `EVT_BRIDGE_INFO` and `GET_INVENTORY`
+  as `max_tags` and `assigned_count`) in its inventory, Cremind
   refuses to claim or assign onto a full bridge, and an `ASSIGN_SET` that still
   meets a full table (`NO_RESOURCES`, e.g. an 11th tag on an nRF52832 bridge)
   fails the `assign_tag` at once with `bridge_full` (companion.md §6) — the

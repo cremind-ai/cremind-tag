@@ -44,7 +44,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| bridge-nrf52840dk | `apps/bridge` | 304,648 / 1,015,808 | 70.0 % (15 %) | 104,770 / 262,144 | 157,374 (none) | pass (edtlib) | ok | 2026-09-27 |
+| bridge-nrf52840dk | `apps/bridge` | 307,960 / 1,015,808 | 69.7 % (15 %) | 114,474 / 262,144 | 147,670 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -91,3 +91,4 @@ Measure with development equipment disconnected, after a power-on reset.
 | 2026-09-28 | buildable | `bridge-nrf52840dk` (`apps/bridge`): 301,272 B flash of 992 KiB (70.3 % free), 109,186 B RAM of 256 KiB; `verify_stack.py` 16/16 pass; 108 native_sim test cases and the companion maintenance client (`apps/bridge/tests/maint_pty/interop.py`) pass. Development geometry: DK MX25R64 (8 MiB) with a 1 MiB working space. |
 | 2026-09-28 | buildable | Layouts assembled in external flash with one shared layout buffer, the maintenance port on the main thread, the §10 session rules (deadlines, per-record credits, unauthenticated statuses) and the review fixes: 303,668 B flash (70.1 % free), 103,362 B RAM (158,782 B free); `verify_stack.py` 16/16 pass; 312 native_sim test cases (both configurations) and the interop pass. `max_tags` stays 20. |
 | 2026-09-28 | buildable | Protocol v1 finalisation: CAPS in the transcript, `DELIVERY_RESULT` with `stored_epoch` and `flags`, escalated unauthenticated statuses, §4.3 render-cost bounds with a four-symbol QR cache (+1,408 B RAM), firmware version from `app_version.h`: 304,648 B flash (70.0 % free), 104,770 B RAM (157,374 B free); `verify_stack.py` 16/16 pass; host tests, 894 twister cases on native_sim, the gateway interop (8/8) and the bridge maintenance interop pass. |
+| 2026-09-28 | buildable | Delivery-initiation scheduling (protocol.md §5.2): **two tag sessions at once** (a second tag initiated while the first refreshes; `CONFIG_CTAG_BRIDGE_SESSIONS=2`, `BT_MAX_CONN=2`, 14 ATT/L2CAP/ACL TX buffers, 16 event buffers) and one quick retry of a failed connection inside the tag's window: 307,960 B flash (69.7 % free, +3,312 B), 114,474 B RAM (+9,704 B; 147,670 B free); `verify_stack.py` 16/16 pass; the build is bit-for-bit reproducible (`tools/repro_check.py`); host tests, 914 twister cases on native_sim (the bridge core's 336 with the two-session scheduler and session tests), the gateway interop (8/8), the bridge maintenance interop, the companion suite and the simulated scale test pass; the simulated topology initiates 98.1–99.8 % of trials within 60 s (scale-test.md §5, §6.2). |

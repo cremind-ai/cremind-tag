@@ -57,6 +57,20 @@ config CTAG_BRIDGE_RESULT_SLOTS
 	default 12
 	range 2 64
 
+config CTAG_BRIDGE_SESSIONS
+	int "Tag sessions at once"
+	default 1
+	range 1 2
+	help
+	  Tag connections the bridge holds at once (docs/protocol.md 5.2).
+	  Connections are initiated one at a time, each in its own mesh
+	  suspend window, and a second one only while the first session's
+	  link idles (its tag refreshing). Each session costs a struct tsess
+	  (strip buffer, render work, records: ~4.5 KiB with four QR slots),
+	  a Bluetooth connection (CONFIG_BT_MAX_CONN >= this) and ATT buffers
+	  for its DATA fragments in flight (this x CTAG_BRIDGE_ATT_INFLIGHT <
+	  CONFIG_BT_ATT_TX_COUNT). 2 on the nRF52840, 1 on the nRF52832.
+
 config CTAG_BRIDGE_ATT_INFLIGHT
 	int "DATA fragments handed to the host at once"
 	default 6

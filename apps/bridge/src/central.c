@@ -1,9 +1,10 @@
 /*
  * BLE central (docs/protocol.md 5): tag advertisements from the mesh's own
  * passive scan (bt_le_scan_cb_register; the bridge never starts or stops
- * scanning), the connection attempt of the 5.2 window, GATT discovery with a
+ * scanning), the connection attempts of the 5.2 window, GATT discovery with a
  * per-tag handle cache, CCC subscriptions, and the Bluetooth side of the
- * scheduler (sched_ops) and of the session (tsess_io).
+ * scheduler (sched_ops) and of the sessions (tsess_io), one link per
+ * concurrent tag session (CONFIG_CTAG_BRIDGE_SESSIONS).
  *
  * Callbacks run in Bluetooth contexts and only post events (bev_post); all
  * state below is owned by the bridge work queue.
@@ -25,6 +26,12 @@
 #include "bridge.h"
 
 LOG_MODULE_REGISTER(bridge_central, LOG_LEVEL_INF);
+
+/* One connection per link; the DATA fragments of every link in flight at once
+ * stay below the ATT buffers, so a write never blocks the work queue. */
+BUILD_ASSERT(CONFIG_BT_MAX_CONN >= SCHED_LINKS, "a connection per tag session");
+BUILD_ASSERT(SCHED_LINKS * CONFIG_CTAG_BRIDGE_ATT_INFLIGHT < CONFIG_BT_ATT_TX_COUNT,
+	     "DATA fragments in flight must stay below the ATT buffers");
 
 #define GATEWAY_ADDR    0x0001
 /* 10: CAPS to AUTH_OK within 5 s of the connection, GATT setup included. */
@@ -65,25 +72,50 @@ enum gatt_phase {
 	GATT_READY,
 };
 
-static struct bt_conn *conn;
+/* One tag connection: its bt_conn, GATT setup and the session's work items. */
+struct clink {
+	struct bt_conn *conn;
+	struct handles cur;
+	uint8_t phase;
+	uint8_t subscribed;
+	uint8_t caps_len;
+	uint32_t tag;
+	uint32_t suspend_ms;
+	uint32_t conn_ms;
+	struct bt_gatt_discover_params disc;
+	struct bt_gatt_subscribe_params sub_ctrl;
+	struct bt_gatt_subscribe_params sub_status;
+	struct bt_gatt_read_params rd;
+	struct bt_gatt_write_params wr;
+	uint8_t caps_buf[24];
+	uint8_t wr_buf[CTAG_ATT_VALUE_MAX];
+	struct k_work_delayable gatt_timeout;
+	struct k_work_delayable sess_step;
+	struct k_work_delayable sess_pace;
+};
+
+static void gatt_timeout_fn(struct k_work *work);
+static void sess_step_fn(struct k_work *work);
+static void sess_pace_fn(struct k_work *work);
+
+#define CLINK_INIT                                                                                 \
+	{                                                                                          \
+		.gatt_timeout = Z_WORK_DELAYABLE_INITIALIZER(gatt_timeout_fn),                     \
+		.sess_step = Z_WORK_DELAYABLE_INITIALIZER(sess_step_fn),                           \
+		.sess_pace = Z_WORK_DELAYABLE_INITIALIZER(sess_pace_fn),                           \
+	}
+
+static struct clink links[SCHED_LINKS] = {
+	CLINK_INIT,
+#if SCHED_LINKS > 1
+	CLINK_INIT,
+#endif
+};
+
 static struct handles cache[CONFIG_CTAG_BRIDGE_MAX_TAGS];
 static uint8_t cache_next;
-static struct handles cur;
-static uint8_t phase;
-static uint8_t subscribed;
-static uint32_t cur_tag;
-static uint32_t cur_suspend_ms;
-static uint32_t cur_conn_ms;
 /* Uptime of the last advertising report of any kind (liveness). */
 static atomic_t heard_ms;
-static struct bt_gatt_discover_params disc;
-static struct bt_gatt_subscribe_params sub_ctrl;
-static struct bt_gatt_subscribe_params sub_status;
-static struct bt_gatt_read_params rd;
-static uint8_t caps_buf[24];
-static uint8_t caps_len;
-static struct bt_gatt_write_params wr;
-static uint8_t wr_buf[CTAG_ATT_VALUE_MAX];
 
 static struct {
 	uint32_t tag_id;
@@ -100,8 +132,38 @@ static struct {
 	uint32_t stray_events;
 } cnt;
 
-static void gatt_timeout_fn(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(gatt_timeout, gatt_timeout_fn);
+static uint8_t index_of(const struct clink *cl)
+{
+	return (uint8_t)(cl - links);
+}
+
+void *central_link_ctx(uint8_t i)
+{
+	return &links[i];
+}
+
+/* The link of a GATT callback's params (they live in its struct clink). */
+static uint8_t link_of_ptr(const void *p)
+{
+	for (uint8_t i = 0; i < SCHED_LINKS; i++) {
+		const uint8_t *base = (const uint8_t *)&links[i];
+
+		if ((const uint8_t *)p >= base && (const uint8_t *)p < base + sizeof(links[i])) {
+			return i;
+		}
+	}
+	return SCHED_NO_LINK;
+}
+
+static uint8_t link_of_conn(const void *c)
+{
+	for (uint8_t i = 0; i < SCHED_LINKS; i++) {
+		if (c != NULL && links[i].conn == c) {
+			return i;
+		}
+	}
+	return SCHED_NO_LINK;
+}
 
 /* ---- Advertisements (5.1) ---- */
 
@@ -222,33 +284,39 @@ BT_CONN_CB_DEFINE(conn_cbs) = {
 
 /* ---- GATT setup: discovery (cached per tag) and subscriptions ---- */
 
-static void gatt_fail(uint8_t status)
+static void invalidate_cache(uint32_t tag)
 {
-	size_t i;
-
-	cnt.gatt_failures++;
-	phase = GATT_IDLE;
-	(void)k_work_cancel_delayable(&gatt_timeout);
-	for (i = 0; i < ARRAY_SIZE(cache); i++) {
-		if (cache[i].tag_id == cur_tag) {
+	for (size_t i = 0; i < ARRAY_SIZE(cache); i++) {
+		if (cache[i].tag_id == tag) {
 			cache[i].valid = false;
 		}
 	}
-	sched_session_done(&br.sched, status);
+}
+
+static void gatt_fail(struct clink *cl, uint8_t status)
+{
+	cnt.gatt_failures++;
+	cl->phase = GATT_IDLE;
+	(void)k_work_cancel_delayable(&cl->gatt_timeout);
+	invalidate_cache(cl->tag);
+	sched_session_done(&br.sched, index_of(cl), status);
 }
 
 static void gatt_timeout_fn(struct k_work *work)
 {
-	ARG_UNUSED(work);
-	if (phase != GATT_IDLE && phase != GATT_READY) {
-		gatt_fail(CTAG_STATUS_TIMEOUT);
+	struct clink *cl = CONTAINER_OF(k_work_delayable_from_work(work), struct clink,
+					gatt_timeout);
+
+	if (cl->phase != GATT_IDLE && cl->phase != GATT_READY) {
+		gatt_fail(cl, CTAG_STATUS_TIMEOUT);
 	}
 }
 
 static uint8_t disc_cb(struct bt_conn *c, const struct bt_gatt_attr *attr,
 		       struct bt_gatt_discover_params *params)
 {
-	struct bev e = {.type = BEV_GATT_STEP};
+	struct clink *cl = CONTAINER_OF(params, struct clink, disc);
+	struct bev e = {.type = BEV_GATT_STEP, .link = index_of(cl)};
 
 	ARG_UNUSED(c);
 	if (attr == NULL) {
@@ -259,8 +327,8 @@ static uint8_t disc_cb(struct bt_conn *c, const struct bt_gatt_attr *attr,
 	case BT_GATT_DISCOVER_PRIMARY: {
 		const struct bt_gatt_service_val *svc = attr->user_data;
 
-		cur.start = attr->handle;
-		cur.end = svc->end_handle;
+		cl->cur.start = attr->handle;
+		cl->cur.end = svc->end_handle;
 		bev_post(&e);
 		return BT_GATT_ITER_STOP;
 	}
@@ -268,13 +336,13 @@ static uint8_t disc_cb(struct bt_conn *c, const struct bt_gatt_attr *attr,
 		const struct bt_gatt_chrc *chrc = attr->user_data;
 
 		if (bt_uuid_cmp(chrc->uuid, &caps_uuid.uuid) == 0) {
-			cur.caps = chrc->value_handle;
+			cl->cur.caps = chrc->value_handle;
 		} else if (bt_uuid_cmp(chrc->uuid, &ctrl_uuid.uuid) == 0) {
-			cur.ctrl = chrc->value_handle;
+			cl->cur.ctrl = chrc->value_handle;
 		} else if (bt_uuid_cmp(chrc->uuid, &data_uuid.uuid) == 0) {
-			cur.data = chrc->value_handle;
+			cl->cur.data = chrc->value_handle;
 		} else if (bt_uuid_cmp(chrc->uuid, &status_uuid.uuid) == 0) {
-			cur.status = chrc->value_handle;
+			cl->cur.status = chrc->value_handle;
 		}
 		return BT_GATT_ITER_CONTINUE;
 	}
@@ -282,38 +350,43 @@ static uint8_t disc_cb(struct bt_conn *c, const struct bt_gatt_attr *attr,
 		/* A CCC belongs to the closest characteristic value before it. */
 		uint16_t h = attr->handle;
 		uint16_t owner = 0;
-		const uint16_t values[] = {cur.caps, cur.ctrl, cur.data, cur.status};
+		const uint16_t values[] = {cl->cur.caps, cl->cur.ctrl, cl->cur.data, cl->cur.status};
 
 		for (size_t i = 0; i < ARRAY_SIZE(values); i++) {
 			if (values[i] < h && values[i] > owner) {
 				owner = values[i];
 			}
 		}
-		if (owner != 0 && owner == cur.ctrl) {
-			cur.ctrl_ccc = h;
-		} else if (owner != 0 && owner == cur.status) {
-			cur.status_ccc = h;
+		if (owner != 0 && owner == cl->cur.ctrl) {
+			cl->cur.ctrl_ccc = h;
+		} else if (owner != 0 && owner == cl->cur.status) {
+			cl->cur.status_ccc = h;
 		}
 		return BT_GATT_ITER_CONTINUE;
 	}
 	}
 }
 
-static int discover(uint8_t type, const struct bt_uuid *uuid, uint16_t start, uint16_t end)
+static int discover(struct clink *cl, uint8_t type, const struct bt_uuid *uuid, uint16_t start,
+		    uint16_t end)
 {
-	memset(&disc, 0, sizeof(disc));
-	disc.uuid = uuid;
-	disc.func = disc_cb;
-	disc.start_handle = start;
-	disc.end_handle = end;
-	disc.type = type;
-	return bt_gatt_discover(conn, &disc);
+	memset(&cl->disc, 0, sizeof(cl->disc));
+	cl->disc.uuid = uuid;
+	cl->disc.func = disc_cb;
+	cl->disc.start_handle = start;
+	cl->disc.end_handle = end;
+	cl->disc.type = type;
+	return bt_gatt_discover(cl->conn, &cl->disc);
 }
 
 static uint8_t value_cb(struct bt_conn *c, struct bt_gatt_subscribe_params *params,
 			const void *data, uint16_t len)
 {
-	struct bev e = {.type = params == &sub_ctrl ? BEV_CTRL_VALUE : BEV_STATUS_VALUE};
+	uint8_t i = link_of_ptr(params);
+	struct bev e = {.type = (i != SCHED_NO_LINK && params == &links[i].sub_ctrl)
+					? BEV_CTRL_VALUE
+					: BEV_STATUS_VALUE,
+			.link = i};
 
 	ARG_UNUSED(c);
 	if (data == NULL) {
@@ -331,14 +404,14 @@ static uint8_t value_cb(struct bt_conn *c, struct bt_gatt_subscribe_params *para
 
 static void subscribe_cb(struct bt_conn *c, uint8_t err, struct bt_gatt_subscribe_params *params)
 {
-	struct bev e = {.type = BEV_GATT_STEP, .err = err, .flags = 1};
+	struct bev e = {.type = BEV_GATT_STEP, .err = err, .flags = 1, .link = link_of_ptr(params)};
 
 	ARG_UNUSED(c);
-	ARG_UNUSED(params);
 	bev_post(&e);
 }
 
-static int subscribe(struct bt_gatt_subscribe_params *p, uint16_t value, uint16_t ccc, uint16_t v)
+static int subscribe(struct clink *cl, struct bt_gatt_subscribe_params *p, uint16_t value,
+		     uint16_t ccc, uint16_t v)
 {
 	memset(p, 0, sizeof(*p));
 	p->notify = value_cb;
@@ -346,85 +419,87 @@ static int subscribe(struct bt_gatt_subscribe_params *p, uint16_t value, uint16_
 	p->value_handle = value;
 	p->ccc_handle = ccc;
 	p->value = v;
-	return bt_gatt_subscribe(conn, p);
+	return bt_gatt_subscribe(cl->conn, p);
 }
 
-static void start_subscriptions(void)
+static void start_subscriptions(struct clink *cl)
 {
-	phase = GATT_SUBSCRIBE;
-	subscribed = 0;
-	if (subscribe(&sub_ctrl, cur.ctrl, cur.ctrl_ccc, BT_GATT_CCC_INDICATE) != 0 ||
-	    subscribe(&sub_status, cur.status, cur.status_ccc, BT_GATT_CCC_NOTIFY) != 0) {
-		gatt_fail(CTAG_STATUS_INVALID);
+	cl->phase = GATT_SUBSCRIBE;
+	cl->subscribed = 0;
+	if (subscribe(cl, &cl->sub_ctrl, cl->cur.ctrl, cl->cur.ctrl_ccc, BT_GATT_CCC_INDICATE) != 0 ||
+	    subscribe(cl, &cl->sub_status, cl->cur.status, cl->cur.status_ccc,
+		      BT_GATT_CCC_NOTIFY) != 0) {
+		gatt_fail(cl, CTAG_STATUS_INVALID);
 	}
 }
 
-static void session_ready(void)
+static void session_ready(struct clink *cl)
 {
 	struct bt_conn_info info;
 	uint16_t pace = 50;
 
-	phase = GATT_READY;
-	(void)k_work_cancel_delayable(&gatt_timeout);
-	if (bt_conn_get_info(conn, &info) == 0 && info.le.interval_us >= 1000u) {
+	cl->phase = GATT_READY;
+	(void)k_work_cancel_delayable(&cl->gatt_timeout);
+	if (bt_conn_get_info(cl->conn, &info) == 0 && info.le.interval_us >= 1000u) {
 		pace = (uint16_t)(info.le.interval_us / 1000u);
 	}
-	tsess_start(&br.sess, cur_tag, cur_suspend_ms, pace, cur_conn_ms);
+	tsess_start(&br.sess[index_of(cl)], cl->tag, cl->suspend_ms, pace, cl->conn_ms);
 }
 
-static void gatt_step(const struct bev *e)
+static void gatt_step(struct clink *cl, const struct bev *e)
 {
 	size_t i;
 
-	if (conn == NULL || phase == GATT_IDLE || phase == GATT_READY) {
+	if (cl->conn == NULL || cl->phase == GATT_IDLE || cl->phase == GATT_READY) {
 		cnt.stray_events++;
 		return;
 	}
-	switch (phase) {
+	switch (cl->phase) {
 	case GATT_PRIMARY:
-		if (cur.start == 0u) {
-			gatt_fail(CTAG_STATUS_NOT_FOUND); /* no tag service */
-		} else if (discover(BT_GATT_DISCOVER_CHARACTERISTIC, NULL, cur.start + 1u,
-				    cur.end) != 0) {
-			gatt_fail(CTAG_STATUS_INVALID);
+		if (cl->cur.start == 0u) {
+			gatt_fail(cl, CTAG_STATUS_NOT_FOUND); /* no tag service */
+		} else if (discover(cl, BT_GATT_DISCOVER_CHARACTERISTIC, NULL, cl->cur.start + 1u,
+				    cl->cur.end) != 0) {
+			gatt_fail(cl, CTAG_STATUS_INVALID);
 		} else {
-			phase = GATT_CHRC;
+			cl->phase = GATT_CHRC;
 		}
 		break;
 	case GATT_CHRC:
-		if (cur.caps == 0u || cur.ctrl == 0u || cur.data == 0u || cur.status == 0u ||
-		    discover(BT_GATT_DISCOVER_DESCRIPTOR, BT_UUID_GATT_CCC, cur.start + 1u,
-			     cur.end) != 0) {
-			gatt_fail(CTAG_STATUS_INVALID);
+		if (cl->cur.caps == 0u || cl->cur.ctrl == 0u || cl->cur.data == 0u ||
+		    cl->cur.status == 0u ||
+		    discover(cl, BT_GATT_DISCOVER_DESCRIPTOR, BT_UUID_GATT_CCC, cl->cur.start + 1u,
+			     cl->cur.end) != 0) {
+			gatt_fail(cl, CTAG_STATUS_INVALID);
 		} else {
-			phase = GATT_CCC;
+			cl->phase = GATT_CCC;
 		}
 		break;
 	case GATT_CCC:
-		if (cur.ctrl_ccc == 0u || cur.status_ccc == 0u) {
-			gatt_fail(CTAG_STATUS_INVALID);
+		if (cl->cur.ctrl_ccc == 0u || cl->cur.status_ccc == 0u) {
+			gatt_fail(cl, CTAG_STATUS_INVALID);
 			break;
 		}
-		cur.valid = true;
-		for (i = 0; i < ARRAY_SIZE(cache) && cache[i].tag_id != cur_tag; i++) {
+		cl->cur.valid = true;
+		for (i = 0; i < ARRAY_SIZE(cache) && cache[i].tag_id != cl->tag; i++) {
 		}
 		if (i == ARRAY_SIZE(cache)) {
 			i = cache_next;
 			cache_next = (uint8_t)((cache_next + 1u) % ARRAY_SIZE(cache));
 		}
-		cache[i] = cur;
-		start_subscriptions();
+		cache[i] = cl->cur;
+		start_subscriptions(cl);
 		break;
 	case GATT_SUBSCRIBE:
 		if (e->flags != 1u) {
 			break;
 		}
 		if (e->err != 0) {
-			gatt_fail(CTAG_STATUS_INVALID);
+			gatt_fail(cl, CTAG_STATUS_INVALID);
 			break;
 		}
-		if (++subscribed == 2u) {
-			session_ready();
+		if (++cl->subscribed == 2u) {
+			session_ready(cl);
 		}
 		break;
 	default:
@@ -432,26 +507,26 @@ static void gatt_step(const struct bev *e)
 	}
 }
 
-static void gatt_setup(void)
+static void gatt_setup(struct clink *cl)
 {
 	size_t i;
 
-	memset(&cur, 0, sizeof(cur));
-	cur.tag_id = cur_tag;
-	(void)k_work_reschedule_for_queue(&bwq, &gatt_timeout, K_MSEC(GATT_SETUP_MS));
+	memset(&cl->cur, 0, sizeof(cl->cur));
+	cl->cur.tag_id = cl->tag;
+	(void)k_work_reschedule_for_queue(&bwq, &cl->gatt_timeout, K_MSEC(GATT_SETUP_MS));
 	for (i = 0; i < ARRAY_SIZE(cache); i++) {
-		if (cache[i].valid && cache[i].tag_id == cur_tag) {
+		if (cache[i].valid && cache[i].tag_id == cl->tag) {
 			cnt.cache_hits++;
-			cur = cache[i];
-			start_subscriptions();
+			cl->cur = cache[i];
+			start_subscriptions(cl);
 			return;
 		}
 	}
 	cnt.discoveries++;
-	phase = GATT_PRIMARY;
-	if (discover(BT_GATT_DISCOVER_PRIMARY, &svc_uuid.uuid, BT_ATT_FIRST_ATTRIBUTE_HANDLE,
+	cl->phase = GATT_PRIMARY;
+	if (discover(cl, BT_GATT_DISCOVER_PRIMARY, &svc_uuid.uuid, BT_ATT_FIRST_ATTRIBUTE_HANDLE,
 		     BT_ATT_LAST_ATTRIBUTE_HANDLE) != 0) {
-		gatt_fail(CTAG_STATUS_INVALID);
+		gatt_fail(cl, CTAG_STATUS_INVALID);
 	}
 }
 
@@ -459,52 +534,57 @@ static void gatt_setup(void)
 
 void central_event(const struct bev *e)
 {
-	switch (e->type) {
-	case BEV_ADVERT:
+	uint8_t i;
+	struct clink *cl;
+	struct tsess *ts;
+
+	if (e->type == BEV_ADVERT) {
 		on_advert(e);
-		break;
+		return;
+	}
+	i = (e->type == BEV_CONNECTED || e->type == BEV_DISCONNECTED) ? link_of_conn(e->ptr)
+									: e->link;
+	if (i >= SCHED_LINKS) {
+		cnt.stray_events++;
+		return;
+	}
+	cl = &links[i];
+	ts = &br.sess[i];
+	switch (e->type) {
 	case BEV_CONNECTED:
-		if (e->ptr != conn || conn == NULL) {
-			cnt.stray_events++;
-			break;
-		}
 		if (e->err != 0) {
-			bt_conn_unref(conn); /* the attempt failed or was cancelled */
-			conn = NULL;
+			bt_conn_unref(cl->conn); /* the attempt failed or was cancelled */
+			cl->conn = NULL;
 		}
-		sched_connected(&br.sched, (uint8_t)e->err);
+		sched_connected(&br.sched, i, (uint8_t)e->err);
 		break;
 	case BEV_DISCONNECTED:
-		if (e->ptr != conn || conn == NULL) {
-			cnt.stray_events++;
-			break;
-		}
-		bt_conn_unref(conn);
-		conn = NULL;
-		sched_disconnected(&br.sched); /* ends a session or GATT setup in progress */
-		phase = GATT_IDLE;
-		(void)k_work_cancel_delayable(&gatt_timeout);
+		bt_conn_unref(cl->conn);
+		cl->conn = NULL;
+		sched_disconnected(&br.sched, i); /* ends a session or GATT setup in progress */
+		cl->phase = GATT_IDLE;
+		(void)k_work_cancel_delayable(&cl->gatt_timeout);
 		break;
 	case BEV_GATT_STEP:
-		gatt_step(e);
+		gatt_step(cl, e);
 		break;
 	case BEV_CAPS:
-		tsess_caps(&br.sess, e->err, e->data, e->len);
+		tsess_caps(ts, e->err, e->data, e->len);
 		break;
 	case BEV_CTRL_WRITTEN:
-		tsess_ctrl_written(&br.sess, e->err);
+		tsess_ctrl_written(ts, e->err);
 		break;
 	case BEV_DATA_SENT:
-		tsess_data_sent(&br.sess);
+		tsess_data_sent(ts);
 		break;
 	case BEV_CTRL_VALUE:
 	case BEV_STATUS_VALUE:
 		if (e->err != 0) {
-			tsess_abort(&br.sess, CTAG_STATUS_INVALID);
+			tsess_abort(ts, CTAG_STATUS_INVALID);
 		} else if (e->type == BEV_CTRL_VALUE) {
-			tsess_ctrl_value(&br.sess, e->data, e->len);
+			tsess_ctrl_value(ts, e->data, e->len);
 		} else {
-			tsess_status_value(&br.sess, e->data, e->len);
+			tsess_status_value(ts, e->data, e->len);
 		}
 		break;
 	default:
@@ -540,6 +620,12 @@ static bool op_busy(void *ctx)
 	return mesh_busy();
 }
 
+static bool op_link_idle(void *ctx, uint8_t link)
+{
+	ARG_UNUSED(ctx);
+	return links[link].phase == GATT_READY && tsess_link_idle(&br.sess[link]);
+}
+
 static int op_suspend(void *ctx)
 {
 	int err = bt_mesh_suspend();
@@ -562,51 +648,58 @@ static int op_resume(void *ctx)
 	return err;
 }
 
-static int op_create(void *ctx, const struct sched_peer *peer, uint32_t timeout_ms)
+static int op_create(void *ctx, uint8_t link, const struct sched_peer *peer, uint32_t timeout_ms)
 {
 	struct bt_conn_le_create_param cp = BT_CONN_LE_CREATE_PARAM_INIT(
 		BT_CONN_LE_OPT_NONE, BT_GAP_SCAN_FAST_WINDOW, BT_GAP_SCAN_FAST_WINDOW);
 	struct bt_le_conn_param lp = BT_LE_CONN_PARAM_INIT(CONN_INT_MIN, CONN_INT_MAX, 0,
 							   CONN_TIMEOUT);
 	bt_addr_le_t addr = {.type = peer->type};
+	struct clink *cl = &links[link];
 
 	ARG_UNUSED(ctx);
 	memcpy(addr.a.val, peer->a, sizeof(addr.a.val));
 	cp.timeout = (uint16_t)(timeout_ms / 10u); /* 10 ms units */
-	if (conn != NULL) {
-		bt_conn_unref(conn);
-		conn = NULL;
+	if (cl->conn != NULL) {
+		bt_conn_unref(cl->conn);
+		cl->conn = NULL;
 	}
-	return bt_conn_le_create(&addr, &cp, &lp, &conn);
+	return bt_conn_le_create(&addr, &cp, &lp, &cl->conn);
 }
 
-static int op_disconnect(void *ctx)
+static int op_disconnect(void *ctx, uint8_t link)
 {
+	struct clink *cl = &links[link];
+
 	ARG_UNUSED(ctx);
 	/* On an attempt still initiating this is the cancellation (connected()
 	 * then reports it with an error). */
-	return conn != NULL ? bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN)
-			    : -ENOTCONN;
+	return cl->conn != NULL ? bt_conn_disconnect(cl->conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN)
+				: -ENOTCONN;
 }
 
-static void op_start(void *ctx, uint32_t tag_id, uint32_t suspend_ms)
+static void op_start(void *ctx, uint8_t link, uint32_t tag_id, uint32_t suspend_ms)
 {
+	struct clink *cl = &links[link];
+
 	ARG_UNUSED(ctx);
-	cur_tag = tag_id;
-	cur_suspend_ms = suspend_ms;
-	cur_conn_ms = k_uptime_get_32(); /* connected; the mesh has just resumed */
-	gatt_setup();
+	cl->tag = tag_id;
+	cl->suspend_ms = suspend_ms;
+	cl->conn_ms = k_uptime_get_32(); /* connected; the mesh has just resumed */
+	gatt_setup(cl);
 }
 
-static void op_abort(void *ctx, uint8_t status)
+static void op_abort(void *ctx, uint8_t link, uint8_t status)
 {
+	struct clink *cl = &links[link];
+
 	ARG_UNUSED(ctx);
-	if (tsess_active(&br.sess)) {
-		tsess_abort(&br.sess, status);
-	} else if (phase != GATT_IDLE && phase != GATT_READY) {
-		phase = GATT_IDLE;
-		(void)k_work_cancel_delayable(&gatt_timeout);
-		sched_session_done(&br.sched, status);
+	if (tsess_active(&br.sess[link])) {
+		tsess_abort(&br.sess[link], status);
+	} else if (cl->phase != GATT_IDLE && cl->phase != GATT_READY) {
+		cl->phase = GATT_IDLE;
+		(void)k_work_cancel_delayable(&cl->gatt_timeout);
+		sched_session_done(&br.sched, link, status);
 	}
 }
 
@@ -637,6 +730,7 @@ const struct sched_ops central_sched_ops = {
 	.node_ready = op_ready,
 	.has_work = op_work,
 	.mesh_busy = op_busy,
+	.link_idle = op_link_idle,
 	.mesh_suspend = op_suspend,
 	.mesh_resume = op_resume,
 	.conn_create = op_create,
@@ -649,103 +743,103 @@ const struct sched_ops central_sched_ops = {
 	.reboot = op_reboot,
 };
 
-/* ---- tsess_io: GATT operations of the session ---- */
+/* ---- tsess_io: GATT operations of a session (ctx = its struct clink) ---- */
 
 static void sess_step_fn(struct k_work *work)
 {
-	ARG_UNUSED(work);
-	tsess_timeout(&br.sess, TSESS_T_STEP);
+	struct clink *cl = CONTAINER_OF(k_work_delayable_from_work(work), struct clink, sess_step);
+
+	tsess_timeout(&br.sess[index_of(cl)], TSESS_T_STEP);
 }
 
 static void sess_pace_fn(struct k_work *work)
 {
-	ARG_UNUSED(work);
-	tsess_timeout(&br.sess, TSESS_T_PACE);
-}
+	struct clink *cl = CONTAINER_OF(k_work_delayable_from_work(work), struct clink, sess_pace);
 
-static K_WORK_DELAYABLE_DEFINE(sess_step, sess_step_fn);
-static K_WORK_DELAYABLE_DEFINE(sess_pace, sess_pace_fn);
+	tsess_timeout(&br.sess[index_of(cl)], TSESS_T_PACE);
+}
 
 static uint8_t read_cb(struct bt_conn *c, uint8_t err, struct bt_gatt_read_params *params,
 		       const void *data, uint16_t len)
 {
-	struct bev e = {.type = BEV_CAPS, .err = err};
+	struct clink *cl = CONTAINER_OF(params, struct clink, rd);
+	struct bev e = {.type = BEV_CAPS, .err = err, .link = index_of(cl)};
 
 	ARG_UNUSED(c);
-	ARG_UNUSED(params);
 	if (err == 0 && data != NULL) {
-		uint16_t n = MIN(len, (uint16_t)(sizeof(caps_buf) - caps_len));
+		uint16_t n = MIN(len, (uint16_t)(sizeof(cl->caps_buf) - cl->caps_len));
 
-		memcpy(&caps_buf[caps_len], data, n);
-		caps_len = (uint8_t)(caps_len + n);
+		memcpy(&cl->caps_buf[cl->caps_len], data, n);
+		cl->caps_len = (uint8_t)(cl->caps_len + n);
 		return BT_GATT_ITER_CONTINUE;
 	}
-	e.len = caps_len;
-	memcpy(e.data, caps_buf, caps_len);
+	e.len = cl->caps_len;
+	memcpy(e.data, cl->caps_buf, cl->caps_len);
 	bev_post(&e); /* complete (data == NULL) or failed */
 	return BT_GATT_ITER_STOP;
 }
 
 static int io_read_caps(void *ctx)
 {
-	ARG_UNUSED(ctx);
-	caps_len = 0;
-	memset(&rd, 0, sizeof(rd));
-	rd.func = read_cb;
-	rd.handle_count = 1;
-	rd.single.handle = cur.caps;
-	rd.single.offset = 0;
-	return conn != NULL ? bt_gatt_read(conn, &rd) : -ENOTCONN;
+	struct clink *cl = ctx;
+
+	cl->caps_len = 0;
+	memset(&cl->rd, 0, sizeof(cl->rd));
+	cl->rd.func = read_cb;
+	cl->rd.handle_count = 1;
+	cl->rd.single.handle = cl->cur.caps;
+	cl->rd.single.offset = 0;
+	return cl->conn != NULL ? bt_gatt_read(cl->conn, &cl->rd) : -ENOTCONN;
 }
 
 static void write_cb(struct bt_conn *c, uint8_t err, struct bt_gatt_write_params *params)
 {
-	struct bev e = {.type = BEV_CTRL_WRITTEN, .err = err};
+	struct bev e = {.type = BEV_CTRL_WRITTEN, .err = err, .link = link_of_ptr(params)};
 
 	ARG_UNUSED(c);
-	ARG_UNUSED(params);
 	bev_post(&e);
 }
 
 static int io_write_ctrl(void *ctx, const uint8_t *val, uint16_t len)
 {
-	ARG_UNUSED(ctx);
-	if (conn == NULL || len > sizeof(wr_buf)) {
+	struct clink *cl = ctx;
+
+	if (cl->conn == NULL || len > sizeof(cl->wr_buf)) {
 		return -ENOTCONN;
 	}
-	memcpy(wr_buf, val, len);
-	memset(&wr, 0, sizeof(wr));
-	wr.func = write_cb;
-	wr.handle = cur.ctrl;
-	wr.data = wr_buf;
-	wr.length = len;
-	return bt_gatt_write(conn, &wr);
+	memcpy(cl->wr_buf, val, len);
+	memset(&cl->wr, 0, sizeof(cl->wr));
+	cl->wr.func = write_cb;
+	cl->wr.handle = cl->cur.ctrl;
+	cl->wr.data = cl->wr_buf;
+	cl->wr.length = len;
+	return bt_gatt_write(cl->conn, &cl->wr);
 }
 
 static void data_sent_cb(struct bt_conn *c, void *user_data)
 {
-	struct bev e = {.type = BEV_DATA_SENT};
+	struct bev e = {.type = BEV_DATA_SENT, .link = index_of(user_data)};
 
 	ARG_UNUSED(c);
-	ARG_UNUSED(user_data);
 	bev_post(&e);
 }
 
 static int io_write_data(void *ctx, const uint8_t *val, uint16_t len)
 {
-	ARG_UNUSED(ctx);
-	if (conn == NULL) {
+	struct clink *cl = ctx;
+
+	if (cl->conn == NULL) {
 		return -ENOTCONN;
 	}
-	return bt_gatt_write_without_response_cb(conn, cur.data, val, len, false, data_sent_cb,
-						 NULL);
+	return bt_gatt_write_without_response_cb(cl->conn, cl->cur.data, val, len, false,
+						 data_sent_cb, cl);
 }
 
 static void io_timer(void *ctx, uint8_t which, uint32_t ms)
 {
-	struct k_work_delayable *w = which == TSESS_T_STEP ? &sess_step : &sess_pace;
+	struct clink *cl = ctx;
+	struct k_work_delayable *w = which == TSESS_T_STEP ? &cl->sess_step : &cl->sess_pace;
 
-	ARG_UNUSED(ctx);
 	if (ms == TSESS_TIMER_OFF) {
 		(void)k_work_cancel_delayable(w);
 	} else {
@@ -755,19 +849,14 @@ static void io_timer(void *ctx, uint8_t which, uint32_t ms)
 
 static void io_done(void *ctx, uint8_t status)
 {
-	size_t i;
+	struct clink *cl = ctx;
 
-	ARG_UNUSED(ctx);
-	phase = GATT_IDLE;
+	cl->phase = GATT_IDLE;
 	if (status == CTAG_STATUS_INVALID || status == CTAG_STATUS_TIMEOUT) {
-		for (i = 0; i < ARRAY_SIZE(cache); i++) {
-			if (cache[i].tag_id == cur_tag) {
-				cache[i].valid = false; /* rediscover next time */
-			}
-		}
+		invalidate_cache(cl->tag); /* rediscover next time */
 	}
-	LOG_INF("session with %08x ended: %u", cur_tag, status);
-	sched_session_done(&br.sched, status);
+	LOG_INF("session with %08x ended: %u", cl->tag, status);
+	sched_session_done(&br.sched, index_of(cl), status);
 }
 
 static uint32_t io_now(void *ctx)
@@ -821,9 +910,18 @@ int central_init(void)
 size_t central_counters(struct ctag_cbor_counter *items, size_t max)
 {
 	const struct sched_counters *s = &br.sched.c;
-	const struct tsess_counters *t = &br.sess.c;
+	struct tsess_counters t = {0};
 	size_t n = 0u;
 
+	for (size_t i = 0; i < ARRAY_SIZE(br.sess); i++) {
+		const struct tsess_counters *c = &br.sess[i].c;
+
+		t.records_tx += c->records_tx;
+		t.frames += c->frames;
+		t.render_ms_max = MAX(t.render_ms_max, c->render_ms_max);
+		t.layout_reloads += c->layout_reloads;
+		t.unauth_statuses += c->unauth_statuses;
+	}
 	BRIDGE_COUNTER("adverts", cnt.adverts);
 	BRIDGE_COUNTER("tag_seen", cnt.tag_seen);
 	BRIDGE_COUNTER("gatt_discoveries", cnt.discoveries);
@@ -835,16 +933,18 @@ size_t central_counters(struct ctag_cbor_counter *items, size_t max)
 	BRIDGE_COUNTER("suspend_max_ms", s->suspend_max_ms);
 	BRIDGE_COUNTER("resume_fail", s->resume_fail);
 	BRIDGE_COUNTER("connect_failed", s->connect_failed);
+	BRIDGE_COUNTER("quick_retries", s->quick_retries);
 	BRIDGE_COUNTER("cancels", s->cancels);
 	BRIDGE_COUNTER("deferred", s->deferred);
 	BRIDGE_COUNTER("rate_limited", s->rate_limited);
 	BRIDGE_COUNTER("backoff_skips", s->backoff_skips);
 	BRIDGE_COUNTER("sessions_ok", s->sessions_ok);
 	BRIDGE_COUNTER("sessions_fail", s->sessions_fail);
-	BRIDGE_COUNTER("records_tx", t->records_tx);
-	BRIDGE_COUNTER("frames", t->frames);
-	BRIDGE_COUNTER("render_ms_max", t->render_ms_max);
-	BRIDGE_COUNTER("layout_reloads", t->layout_reloads);
-	BRIDGE_COUNTER("unauth_statuses", t->unauth_statuses);
+	BRIDGE_COUNTER("concurrent_sessions", s->concurrent_sessions);
+	BRIDGE_COUNTER("records_tx", t.records_tx);
+	BRIDGE_COUNTER("frames", t.frames);
+	BRIDGE_COUNTER("render_ms_max", t.render_ms_max);
+	BRIDGE_COUNTER("layout_reloads", t.layout_reloads);
+	BRIDGE_COUNTER("unauth_statuses", t.unauth_statuses);
 	return n;
 }

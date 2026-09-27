@@ -119,6 +119,10 @@ class ScaleConfig:
     http_latency_ms: float = 40.0
     adv_window_ms: float | None = None
     """What-if: the tags' advertising window (``None``: the protocol's ``TAG_ADV_WINDOW_MS``, 2 s)."""
+    sessions: int | None = None
+    """What-if: tag sessions per bridge at once (``None``: the simulator's default, the nRF52840 bridge's)."""
+    quick_retry: bool | None = None
+    """What-if: one retry within the tag's window after ``CONNECT_FAILED`` (``None``: the simulator's default)."""
     chunk_loss: float = 0.05
     """Faults scenario: access-layer LAYOUT_CHUNK loss probability (the simulator's ``chunk-loss``)."""
     warmup_s: float = 60.0
@@ -536,6 +540,11 @@ class World:
                                time_scale=cfg.time_scale)
         self.sim = self.rig.sim
         self.fake = self.rig.fake
+        for bridge in self.sim.bridges:  # the scheduling policy (docs/scale-test.md §6.2)
+            if cfg.sessions is not None:
+                bridge.max_sessions = cfg.sessions
+            if cfg.quick_retry is not None:
+                bridge.quick_retry = cfg.quick_retry
         self.loop = asyncio.get_running_loop()
         self.t0 = self.loop.time()
         self.wall0 = time.time()
@@ -565,6 +574,7 @@ class World:
         self.attempts: list[tuple[float, float, str, int, str]] = []  # (start, end, bridge, tag, outcome)
         self.windows: list[tuple[float, int, str, bool, bool]] = []  # (start, tag, bridge, backoff, rate limited)
         self.window_records: list[tuple[float, int, str]] = []  # (start, tag, outcome), filled by windows()
+        self.decisions: dict[int, list[tuple[float, str]]] = defaultdict(list)  # tag -> (t, why no attempt)
         for bridge in self.sim.bridges:
             self._observe_bridge(bridge)
         for index in range(cfg.tags):
@@ -631,16 +641,25 @@ class World:
         attempt = bridge._attempt
         keys = ("sessions_ok", "sessions_fail", "connect_failed", "suspend_fail", "resume_fail", "deferred")
 
-        async def on_attempt(tag_id: int) -> None:
+        async def on_attempt(tag_id: int, **kwargs: Any) -> None:
             before = [bridge.counters[k] for k in keys]
             started = world.now()
             try:
-                await attempt(tag_id)
+                await attempt(tag_id, **kwargs)
             finally:
                 changed = [k for k, b in zip(keys, before, strict=True) if bridge.counters[k] > b]
                 world.attempts.append((started, world.now(), bridge.name, tag_id, changed[0] if changed else "other"))
 
         bridge._attempt = on_attempt
+        decide = bridge._advert_decision
+
+        def on_decision(tag_id: int, now: float) -> str | None:
+            reason = decide(tag_id, now)
+            if reason not in (None, "no_work", "quick_retry"):
+                world.decisions[tag_id].append((world.now(), reason))
+            return reason
+
+        bridge._advert_decision = on_decision
 
     def _observe_tag(self, tag: Any, bridge: Any) -> None:
         """Every advertising window in which the tag had work waiting at its bridge (see :func:`windows`)."""
@@ -1172,6 +1191,37 @@ def analyze(world: World, acts: list[Act], live: dict[str, Any], db: dict[str, A
     overall_p95 = acceptance["initiation"]["p95"] or 0.0
     starved = [i for i, v in per_tag.items() if v["trials"] and (v["p95"] or 0) > max(target, 2 * overall_p95)]
 
+    # -- the bridges' scheduling (the policy of docs/scale-test.md §6.2) and the relay hop ------------
+    live_bridges = live.get("bridges", {})
+    traffic_min = max(1e-9, (world.traffic_end - world.traffic_start) / 60.0)
+    in_traffic = {name: sum(1 for t in times if world.traffic_start * 1000.0 <= t <= world.traffic_end * 1000.0)
+                  for name, times in world.suspends.items()}
+    scheduler = {
+        "sessions": world.sim.bridges[0].max_sessions, "quick_retry": world.sim.bridges[0].quick_retry,
+        **{k: sum(int(b.get(k, 0)) for b in live_bridges.values())
+           for k in ("suspend_count", "connect_failed", "quick_retries", "quick_retries_connected",
+                     "quick_retries_failed", "concurrent_attempts", "concurrent_sessions", "rate_limited",
+                     "backoff_skips", "deferred", "sessions_ok", "sessions_fail")},
+        "max_links": max((int(b.get("max_links", 0)) for b in live_bridges.values()), default=0),
+        "suspends_per_min_per_bridge": {name: n / traffic_min for name, n in in_traffic.items()},
+        "max_suspends_per_rolling_min": max((max_in_window(t, 60000.0) for t in world.suspends.values()), default=0),
+        "mesh_suspended_fraction": {name: int(b.get("suspended_ms", 0)) / max(1e-9, end_t * 1000.0)
+                                    for name, b in live_bridges.items()},
+    }
+    relayed_rows = [r for r in shown_revisions if world.bridge_of.get(tag_index.get(r["tag_id"])) in world.relayed]
+    direct_rows = [r for r in shown_revisions if world.bridge_of.get(tag_index.get(r["tag_id"])) not in world.relayed]
+    overlay = live.get("overlay", {})
+    relay = {
+        "mesh_s_relayed": summary(r["timing"].get("mesh_ms", 0) / 1000.0 for r in relayed_rows),
+        "mesh_s_direct": summary(r["timing"].get("mesh_ms", 0) / 1000.0 for r in direct_rows),
+        "gateway_to_bridge_s_relayed": summary(r["stages"]["bridge_received"] - r["stages"]["gateway_received"]
+                                               for r in population if r["relayed"]
+                                               and {"gateway_received", "bridge_received"} <= r["stages"].keys()),
+        "messages_relayed": overlay.get("relayed", 0),
+        "waited_for_relay_resume": overlay.get("relay_waited_for_resume", 0),
+        "relay_suspend_timeouts": overlay.get("relay_suspend_timeouts", 0),
+    }
+
     # -- faults ------------------------------------------------------------------------------------
     fault_rows = []
     for f in world.faults:  # (FaultAct.detail carries the bridges a relay's reboot cut off)
@@ -1353,7 +1403,7 @@ def analyze(world: World, acts: list[Act], live: dict[str, Any], db: dict[str, A
         "acceptance": acceptance, "breakdown": breakdown, "compose_s": summary(composed_values),
         "tag_side": tag_side, "tag_side_saturated_u16": saturated, "windows": window_summary, "groups": groups,
         "tail": {"causes": dict(tail.most_common()), "trials": tail_rows}, "per_tag": per_tag,
-        "per_bridge": per_bridge, "starved_tags": starved,
+        "per_bridge": per_bridge, "starved_tags": starved, "scheduler": scheduler, "relay": relay,
         "faults": fault_summary, "fault_events": fault_rows, "cancels": world.cancels,
         "invariants": invariants, "load": load, "live": {k: v for k, v in live.items() if k != "panels"},
         "outbox_left": db["outbox"], "errors": world.errors.records[:20],
@@ -1388,10 +1438,13 @@ def _detail(row: dict[str, Any], rev_by_key: dict[tuple[int, int], dict[str, Any
 
 def windows(world: World) -> dict[str, Any]:
     """Advertising windows of tags with work waiting at their bridge, by what became of them: ``served`` (a
-    session), ``session_failed``, ``connect_failed``, ... (an attempt that failed), ``backoff`` (the tag's
-    back-off after a failure), ``bridge_busy`` (a session with another tag overlapped the window: one session
-    per bridge at a time), ``rate_limited``, ``not_attempted`` (anything else: bridge off the mesh, deferred)."""
+    session, possibly after a quick retry), ``session_failed``, ``connect_failed``, ... (the attempts in the
+    window failed), ``backoff`` (the tag's back-off after a failure), ``bridge_busy`` (the bridge could not
+    start an attempt: another initiation in progress, every session slot taken, or a session streaming;
+    with one session per bridge any session with another tag), ``rate_limited``, ``not_attempted``
+    (anything else: bridge off the mesh, deferred)."""
     import cremind_tag.sim.tag as sim_tag
+    from cremind_tag.sim.bridge import BUSY_REASONS
 
     adv_s = sim_tag.TAG_ADV_WINDOW_MS / 1000.0
     by_tag: dict[int, list[tuple[float, float, str, int, str]]] = defaultdict(list)
@@ -1402,15 +1455,20 @@ def windows(world: World) -> dict[str, Any]:
     outcomes: Counter[str] = Counter()
     per_bridge: dict[str, Counter[str]] = defaultdict(Counter)
     records: list[tuple[float, int, str]] = []
+    served_by_retry = 0
     for started, tag, bridge, backoff, limited in world.windows:
         own = [a for a in by_tag[tag] if started - 0.05 <= a[0] <= started + adv_s + 0.3]
+        reasons = {r for t, r in world.decisions.get(tag, ()) if started - 0.05 <= t <= started + adv_s + 0.05}
         if own:
-            outcome = "served" if own[0][4] == "sessions_ok" else own[0][4].removesuffix("s")
+            ok = [a for a in own if a[4] == "sessions_ok"]
+            outcome = "served" if ok else own[0][4].removesuffix("s")
+            served_by_retry += bool(ok) and ok[0] is not own[0]
         elif backoff:
             outcome = "backoff"
-        elif any(a[3] != tag and a[0] < started + adv_s and a[1] > started for a in by_bridge[bridge]):
+        elif reasons & BUSY_REASONS or any(a[3] != tag and a[0] < started + adv_s and a[1] > started
+                                           for a in by_bridge[bridge] if not reasons):
             outcome = "bridge_busy"
-        elif limited:
+        elif limited or "rate_limited" in reasons:
             outcome = "rate_limited"
         else:
             outcome = "not_attempted"
@@ -1420,7 +1478,8 @@ def windows(world: World) -> dict[str, Any]:
     world.window_records = records
     total = sum(outcomes.values())
     return {"with_work": total, "served_fraction": outcomes["served"] / total if total else None,
-            "outcomes": dict(outcomes.most_common()), "by_bridge": {b: dict(c) for b, c in sorted(per_bridge.items())},
+            "outcomes": dict(outcomes.most_common()), "served_after_quick_retry": served_by_retry,
+            "by_bridge": {b: dict(c) for b, c in sorted(per_bridge.items())},
             "attempts": dict(Counter(a[4] for a in world.attempts))}
 
 
@@ -1583,6 +1642,18 @@ def markdown(reports: list[dict[str, Any]]) -> str:
             out.append("Trials over the target, by cause: "
                        + ", ".join(f"{k} {v}" for k, v in rep["tail"]["causes"].items()) + ".")
             out.append("")
+        sc, relay = rep["scheduler"], rep["relay"]
+        out.append(f"Bridge scheduling: {sc['sessions']} session(s) per bridge, quick retry "
+                   f"{'on' if sc['quick_retry'] else 'off'}; {sc['suspend_count']} suspensions (at most "
+                   f"{sc['max_suspends_per_rolling_min']} in a rolling minute, "
+                   f"{_f(max(sc['suspends_per_min_per_bridge'].values(), default=0.0), 2)}/min on the busiest bridge "
+                   f"during the traffic), {sc['connect_failed']} failed connections, {sc['quick_retries']} quick "
+                   f"retries ({sc['quick_retries_connected']} connected), {sc['concurrent_sessions']} sessions "
+                   f"alongside another; relay hop: mesh p50/p95 {_f(relay['mesh_s_relayed']['p50'], 2)}/"
+                   f"{_f(relay['mesh_s_relayed']['p95'], 2)} s relayed, {_f(relay['mesh_s_direct']['p50'], 2)}/"
+                   f"{_f(relay['mesh_s_direct']['p95'], 2)} s direct; {relay['waited_for_relay_resume']} messages "
+                   f"waited for the relay's resume ({relay['relay_suspend_timeouts']} timed out).")
+        out.append("")
         out.append("| Bridge | relayed | trials | within target | p50 | p95 | max | mesh_ms p50 | max suspends/min |")
         out.append("|---|---|---|---|---|---|---|---|---|")
         for b in rep["per_bridge"].values():
@@ -1648,6 +1719,13 @@ def console_summary(rep: dict[str, Any]) -> str:
              f"wall={rep['real_s'] / 60:.1f}min",
              f"[{rep['config']['scenario']}] invariants: "
              f"{'all hold' if not inv_bad else 'VIOLATED: ' + ', '.join(inv_bad)}"]
+    sc = rep.get("scheduler")
+    if sc:
+        w = rep["windows"]
+        lines.append(f"[{rep['config']['scenario']}] sessions={sc['sessions']} quick_retry={sc['quick_retry']} "
+                     f"windows served={_f((w['served_fraction'] or 0) * 100)}% {w['outcomes']} "
+                     f"max suspends/min={sc['max_suspends_per_rolling_min']} quick retries={sc['quick_retries']} "
+                     f"concurrent sessions={sc['concurrent_sessions']} tail={rep['tail']['causes']}")
     return "\n".join(lines)
 
 
@@ -1661,6 +1739,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--competing", type=float, default=1.0, help="competing-traffic level (0 = off)")
     parser.add_argument("--relayed", type=int, default=1, help="bridges behind a relay (the last N)")
     parser.add_argument("--adv-window-ms", type=float, help="what-if: the tags' advertising window (default 2000)")
+    parser.add_argument("--sessions", type=int, help="what-if: tag sessions per bridge at once (default: the "
+                        "simulator's, the nRF52840 bridge's)")
+    parser.add_argument("--quick-retry", action=argparse.BooleanOptionalAction, default=None,
+                        help="what-if: one retry within the tag's window after a failed connection (default: the "
+                        "simulator's)")
     parser.add_argument("--json", type=Path, help="write the full report(s) here")
     parser.add_argument("--markdown", type=Path, help="write the result tables here")
     parser.add_argument("--daemon-log", type=Path, help="write the daemon's and simulator's INFO log here")
@@ -1681,7 +1764,7 @@ def main(argv: list[str] | None = None) -> int:
         work = args.keep / scenario if args.keep else None
         cfg = ScaleConfig(trials=args.trials, scenario=scenario, seed=args.seed, time_scale=args.time_scale,
                           event_rate_per_min=args.rate, competing_level=args.competing, relayed_bridges=args.relayed,
-                          adv_window_ms=args.adv_window_ms,
+                          adv_window_ms=args.adv_window_ms, sessions=args.sessions, quick_retry=args.quick_retry,
                           work_dir=work, keep_work_dir=bool(args.keep),
                           daemon_log=(args.daemon_log.with_name(f"{args.daemon_log.stem}-{scenario}{args.daemon_log.suffix}")
                                       if args.daemon_log else None))

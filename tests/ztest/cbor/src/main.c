@@ -177,7 +177,7 @@ ZTEST(ctag_cbor, test_encode_rejects)
 	};
 	const struct ctag_cbor_field bad[][1] = {
 		{{.key = CTAG_CBOR_KEY_STATUS, .kind = CTAG_CBOR_BSTR}},
-		{{.key = CTAG_CBOR_KEY_STORED_EPOCH + 1, .kind = CTAG_CBOR_UINT}}, /* unknown */
+		{{.key = CTAG_CBOR_KEY_ASSIGNED_COUNT + 1, .kind = CTAG_CBOR_UINT}}, /* unknown */
 		{{.key = CTAG_CBOR_KEY_ADDR, .kind = CTAG_CBOR_UINT, .v.u = 0x10000}},
 		{{.key = CTAG_CBOR_KEY_STATUS, .kind = CTAG_CBOR_UINT, .v.u = 0x100000000ull}},
 		{{.key = CTAG_CBOR_KEY_RSSI, .kind = CTAG_CBOR_INT, .v.i = INT32_MIN - 1ll}},
@@ -269,7 +269,8 @@ ZTEST(ctag_cbor, test_decode_strictness)
 	zassert_false(f[0].present || f[1].present);
 	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_CAPS), CTAG_CBOR_MAP);
 	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_STORED_EPOCH), CTAG_CBOR_UINT);
-	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_STORED_EPOCH + 1), 0);
+	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_ASSIGNED_COUNT), CTAG_CBOR_UINT);
+	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_ASSIGNED_COUNT + 1), 0);
 }
 
 /* ---- Work bounds: nested maps were once re-scanned for every later key ---- */

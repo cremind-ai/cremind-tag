@@ -65,7 +65,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| gateway-nrf52dk | `apps/gateway` | 198,764 / 499,712 | 60.2 % (15 %) | 60,848 / 65,536 | 4,688 (none) | pass (edtlib) | ok | 2026-09-27 |
+| gateway-nrf52dk | `apps/gateway` | 198,800 / 499,712 | 60.2 % (15 %) | 60,912 / 65,536 | 4,624 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -109,3 +109,4 @@ Measure with development equipment disconnected, after a power-on reset.
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
 | 2026-09-28 | buildable | `gateway-nrf52dk` builds (flash 198,668 B = 39.8 % of the 488 KiB code partition, RAM 60,720 B of 64 KiB: 4,816 B free), `verify_stack.py` 16/16; stack sizes unmeasured (resource qualification above). |
 | 2026-09-28 | buildable | Protocol v1 finalisation: `EVT_RESULT` carries `flags` and `stored_epoch` (retained slots of 104 B, 16 of them: +128 B). `gateway-nrf52dk`: flash 198,764 B (60.2 % free), RAM 60,848 B of 64 KiB (**4,688 B free**); `verify_stack.py` 16/16; host tests, 894 twister cases on native_sim, the gateway interop (8/8) and the bridge maintenance interop pass; stack sizes still unmeasured (resource qualification above). |
+| 2026-09-28 | buildable | The caps map of `EVT_BRIDGE_INFO` and `GET_INVENTORY` carries the bridge's own count of assigned tags (`assigned_count`, `CAPS_STATUS.assigned`). `gateway-nrf52dk`: flash 198,800 B (60.2 % free, +36 B), RAM 60,912 B of 64 KiB (**4,624 B free**, −64 B: one more field per node in the encoder workspace); `verify_stack.py` 16/16; host tests, 914 twister cases on native_sim, the gateway interop (8/8) and the bridge maintenance interop pass. |

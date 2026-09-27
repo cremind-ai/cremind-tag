@@ -50,8 +50,10 @@ deliveries move to the new epoch.
 
 `max_tags` (optional, 1..255) is the bridge's assignment-table capacity from its
 `CAPS_STATUS` (20 on an nRF52840 bridge, 10 on an nRF52832) and `assigned`
-(optional, 0..255) the assignments the gateway holds for it; both are left out
-while the gateway has not reported the bridge. Cremind keeps them in the
+(optional, 0..255) the tags assigned on it: the bridge's own count from its
+`CAPS_STATUS` (the gateway's `caps.assigned_count`), or the assignments the
+gateway holds for it when the gateway does not report that count; both are
+left out while the gateway has not reported the bridge. Cremind keeps them in the
 bridge's `info` (a missing or bad value keeps the last good one) and refuses to
 claim or assign a tag onto a bridge that is full.
 → `{"devices": [...device rows...], "assignments": [{"tag_id", "owner_profile", "bridge_hw_id", "epoch", "rotation"}]}`

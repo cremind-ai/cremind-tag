@@ -583,11 +583,15 @@ class CommandExecutor:
 
 
 def bridge_capacity(info: BridgeInfo) -> dict[str, int | None]:
-    """``max_tags`` (the bridge's ``CAPS_STATUS``, as the gateway caches it) and ``assigned`` (the
-    assignments the gateway holds for that bridge) of one ``GET_INVENTORY`` item."""
+    """``max_tags`` and ``assigned`` of one ``GET_INVENTORY`` item or ``EVT_BRIDGE_INFO``: both from the
+    bridge's ``CAPS_STATUS`` as the gateway caches it (its caps map's ``max_tags`` and ``assigned_count``);
+    ``assigned`` falls back to the assignments the gateway holds for the bridge when the caps lack the count
+    (an older gateway), which misses tags assigned to the bridge behind the gateway's back."""
     max_tags = info.caps.max_tags
     valid = isinstance(max_tags, int) and 1 <= max_tags <= 255
-    return {"max_tags": max_tags if valid else None, "assigned": min(len(info.assigned), 255)}
+    count = info.caps.assigned_count
+    assigned = count if isinstance(count, int) and 0 <= count <= 255 else min(len(info.assigned), 255)
+    return {"max_tags": max_tags if valid else None, "assigned": assigned}
 
 def _status(value: int) -> Status | int:
     try:

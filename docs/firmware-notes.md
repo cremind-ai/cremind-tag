@@ -103,6 +103,15 @@ build.
   `BT_HCI_ERR_CMD_DISALLOWED`; the host fails first: `host/conn.c:4052-4055`
   `bt_conn_le_create()` → `-EAGAIN`; `host/scan.c:503-506` scan start while
   initiating → `-EPERM` (so `bt_mesh_resume()` fails until initiation ends).
+- A second central connection: `ll_create_connection()` otherwise refuses only
+  a peer that is already connected (`BT_HCI_ERR_CONN_ALREADY_EXISTS`), so with
+  `BT_MAX_CONN=2` the bridge initiates beside an open connection (one
+  initiation at a time: the scan/initiator set is single); with
+  `BT_CTLR_SCHED_ADVANCED` the new central's events are placed beside the
+  existing ones (`BT_CTLR_CENTRAL_SPACING`, 0 = the computed reservation).
+  The nRF52840 bridge holds two tag sessions this way (bridge-firmware §4).
+- `BT_BUF_EVT_RX_COUNT` must exceed `BT_BUF_ACL_TX_COUNT` (a host build
+  assertion): the nRF52840 bridge's 14 ACL TX buffers need 16 event buffers.
 
 ## 3. Mesh
 

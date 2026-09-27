@@ -148,9 +148,11 @@ static atomic_t configured_at; /* uptime (ms) of provisioning; 0 = provisioned b
 static void node_reset_fn(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	/* A running session ends first: its job is about to be forgotten. */
-	if (tsess_active(&br.sess)) {
-		tsess_abort(&br.sess, CTAG_STATUS_CANCELLED);
+	/* Running sessions end first: their jobs are about to be forgotten. */
+	for (size_t i = 0; i < ARRAY_SIZE(br.sess); i++) {
+		if (tsess_active(&br.sess[i])) {
+			tsess_abort(&br.sess[i], CTAG_STATUS_CANCELLED);
+		}
 	}
 	dlv_reset(&br.dlv);
 	(void)bt_mesh_prov_enable(BT_MESH_PROV_ADV);

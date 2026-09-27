@@ -231,6 +231,7 @@ serial:
     net_idx: 60
     app_idx: 61
     stored_epoch: 62  # uint32 the tag's stored epoch as last reported by the tag (0 = unknown)
+    assigned_count: 63  # uint in a bridge's caps map: the tags assigned on the bridge itself (CAPS_STATUS.assigned)
   message_types:
     # --- requests (host -> device); the device answers with RESPONSE + {status, ...}
     HELLO:           {value: 0x01, dir: h2d, doc: "{proto, name} -> {status, proto, fw, build, boot_id, caps:{max_frame, credits, max_bridges, max_tags, role}}"}
@@ -267,7 +268,7 @@ serial:
     EVT_ASSIGN_RESULT:   {value: 0x85, dir: d2h, doc: "{seq, op_id, bridge, tag_id, epoch, status}"}
     EVT_STAGE:           {value: 0x86, dir: d2h, doc: "{update_id, tag_id, revision, stage} best effort, not retained"}
     EVT_RESULT:          {value: 0x87, dir: d2h, doc: "{seq, update_id, bridge, tag_id, epoch, revision, status, digest(8), battery_mv, timing, flags, stored_epoch} (flags and stored_epoch as in mesh DELIVERY_RESULT)"}
-    EVT_BRIDGE_INFO:     {value: 0x88, dir: d2h, doc: "{addr, fw, fontpack_id, caps, assigned, counters}"}
+    EVT_BRIDGE_INFO:     {value: 0x88, dir: d2h, doc: "{addr, fw, fontpack_id, caps:{board, flash_size, max_tags, assigned_count, flags, proto}, assigned, counters}"}
     EVT_TAG_SEEN:        {value: 0x89, dir: d2h, doc: "{bridge, tag_id, rssi, battery_mv, flags} rate-limited sighting"}
 
 # Mesh / GATT tag command ids (TAG_COMMAND.cmd, mesh TAG_CMD.cmd, GATT CMD record).

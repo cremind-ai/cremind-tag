@@ -6,7 +6,7 @@ import cbor2
 import pytest
 
 from cremind_tag.gateway import Ack, OpIdGenerator, ResultEvent, SessionStarted, StageEvent, UnknownEvent
-from cremind_tag.gateway.events import parse_event
+from cremind_tag.gateway.events import BridgeInfoEvent, parse_event
 from cremind_tag.gateway.results import BridgeInfo, FlashTestResult, HelloInfo, to_status
 from cremind_tag.protocol import cbor_msgs
 from cremind_tag.protocol.ids import (
@@ -119,7 +119,29 @@ def test_bridge_info_and_flash_results() -> None:
     info = BridgeInfo.from_map({"addr": 2, "fw": "0.1.0", "fontpack_id": bytes(8), "caps": {"board": 3},
                                 "assigned": [{"tag_id": 5, "epoch": 2}], "counters": {"sessions_ok": 1}})
     assert info.assigned[0].tag_id == 5 and info.caps.board == 3
+    assert info.caps.assigned_count is None
     result = FlashTestResult.from_fields({"status": 0, "flash_size": 1, "items": [{"offset": 0, "status": 0}]})
     assert result.ok
     failing = FlashTestResult.from_fields({"status": 0, "items": [{"offset": 0, "status": 22}]})
     assert not failing.ok
+
+
+def test_bridge_capacity_prefers_the_bridges_own_count() -> None:
+    """EVT_BRIDGE_INFO / GET_INVENTORY caps carry the bridge's CAPS_STATUS.assigned as ``assigned_count``: the
+    inventory reports it (the bridge may hold tags the gateway does not list); the gateway's own list is the
+    fallback for a gateway that does not send it."""
+    from cremind_tag.daemon.commands import bridge_capacity
+
+    item = {"addr": 2, "fw": "0.1.0", "fontpack_id": bytes(8), "assigned": [{"tag_id": 5, "epoch": 2}],
+            "counters": {}, "caps": {"board": 3, "flash_size": 8 << 20, "max_tags": 10, "assigned_count": 7,
+                                     "flags": 1, "proto": 1}}
+    info = BridgeInfo.from_map(item)
+    assert info.caps.assigned_count == 7
+    assert bridge_capacity(info) == {"max_tags": 10, "assigned": 7}
+    event = parse_event(SerialMsg.EVT_BRIDGE_INFO, cbor_msgs.encode_event(SerialMsg.EVT_BRIDGE_INFO, item), 1)
+    assert isinstance(event, BridgeInfoEvent)
+    assert bridge_capacity(event.info) == {"max_tags": 10, "assigned": 7}
+    older = BridgeInfo.from_map({**item, "caps": {"board": 3, "max_tags": 10}})
+    assert bridge_capacity(older) == {"max_tags": 10, "assigned": 1}
+    bad = BridgeInfo.from_map({**item, "caps": {"max_tags": 0, "assigned_count": 300}})
+    assert bridge_capacity(bad) == {"max_tags": None, "assigned": 1}

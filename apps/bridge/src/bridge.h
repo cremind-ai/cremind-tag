@@ -50,7 +50,7 @@ struct bridge {
 	struct fontstore fonts;
 	struct dlv dlv;
 	struct sched sched;
-	struct tsess sess;
+	struct tsess sess[SCHED_LINKS]; /* one per link (CONFIG_CTAG_BRIDGE_SESSIONS) */
 	bool flash_ok;
 	uint32_t boot_id;
 };
@@ -81,6 +81,7 @@ struct bev {
 	uint32_t tag_id;
 	void *ptr; /* the bt_conn of connected / disconnected */
 	bt_addr_le_t addr;
+	uint8_t link; /* the link a GATT event belongs to (connected/disconnected: by ptr) */
 	uint8_t data[24];
 };
 
@@ -102,6 +103,8 @@ void mesh_rx_drain(void);
 int central_init(void);
 extern const struct sched_ops central_sched_ops;
 extern const struct tsess_io central_tsess_io;
+/* The tsess_io context of link i (br.sess[i]). */
+void *central_link_ctx(uint8_t i);
 size_t central_counters(struct ctag_cbor_counter *items, size_t max);
 
 /* main.c */

@@ -301,11 +301,14 @@ struct gw_tag_seen {
 	int64_t last;
 };
 
+/* A bridge's caps map: flags, proto, board, flash_size, max_tags, assigned_count. */
+#define GW_CAPS_FIELDS 6u
+
 /* Encoder workspace for LIST_NODES, GET_INVENTORY and EVT_BRIDGE_INFO (one
  * encoding at a time; kept off the thread stack). */
 struct gw_scratch {
 	struct ctag_cbor_field item[GW_NODES][12];
-	struct ctag_cbor_field caps[GW_NODES][5];
+	struct ctag_cbor_field caps[GW_NODES][GW_CAPS_FIELDS];
 	struct ctag_cbor_counter health[GW_NODES][8];
 	struct ctag_cbor_map items[GW_NODES];
 	struct ctag_cbor_field as_f[CONFIG_CTAG_GW_ASSIGN_MAX][2];

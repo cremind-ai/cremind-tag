@@ -13,11 +13,17 @@ strikes. A validated layout replaces an older pending one for the tag (reported
 
 Tag side (§5.2): when an advertisement of a tag with pending work is seen, the
 scheduler applies the rate limit (``BRIDGE_MAX_SUSPENDS_PER_MIN`` per rolling
-minute) and per-tag back-off (``BRIDGE_TAG_BACKOFF_MS`` after a failure), waits
-for its own mesh sends, suspends the mesh (injectable failure:
-``MESH_SUSPEND_FAILED``), connects within ``BRIDGE_CONN_ATTEMPT_MS``, resumes the
-mesh (injectable failure: ``MESH_RESUME_FAILED`` + recovery, reboot after 5 s)
-and measures ``suspend_ms``. The session renders the frame with the reference
+minute) and per-tag back-off (``BRIDGE_TAG_BACKOFF_MS`` after a failure; after
+``CONNECT_FAILED`` one quick retry on an advertisement within
+``TAG_ADV_WINDOW_MS``), waits for its own mesh sends, suspends the mesh
+(injectable failure: ``MESH_SUSPEND_FAILED``), connects within
+``BRIDGE_CONN_ATTEMPT_MS``, resumes the mesh (injectable failure:
+``MESH_RESUME_FAILED`` + recovery, reboot after 5 s) and measures ``suspend_ms``.
+Up to ``max_sessions`` tag sessions run at once (``CONFIG_CTAG_BRIDGE_SESSIONS``:
+2 on the nRF52840, 1 on the nRF52832): initiations one at a time, each in its
+own suspend window, a further one only while every open session's link idles
+(its tag refreshing), and links streaming at once share the radio's connection
+events. The session renders the frame with the reference
 renderer from the active font pack and the tag's CAPS (so its digest is the one a
 real bridge computes), then runs the real handshake and records, at most 4
 records per connection event, respecting the tag's credits. After
@@ -69,6 +75,7 @@ from ..protocol.ids import (
     RESULT_FLAG_DUPLICATE,
     RESULT_FLAG_ESCALATED,
     SERIAL_MAX_FRAME,
+    TAG_ADV_WINDOW_MS,
     TAG_CTRL_MSG_MAX,
     TAG_PLANE_DATA_MAX,
     TAG_RECORD_WIRE_MAX,
@@ -140,7 +147,12 @@ FINAL_TAG_ERRORS = frozenset({Status.AUTH_FAILED, Status.STALE_EPOCH, Status.VER
 UNAUTH_REPEATS = 3
 """Consecutive sessions ending with the same unauthenticated status before it ends the jobs (§10)."""
 NRF52832_MAX_TAGS = 10  # CONFIG_CTAG_BRIDGE_MAX_TAGS on the nRF52832 bridge (apps/bridge/socs/nrf52832.conf)
+NRF52840_SESSIONS = 2  # CONFIG_CTAG_BRIDGE_SESSIONS on the nRF52840 bridge (apps/bridge/socs/nrf52840.conf)
+NRF52832_SESSIONS = 1  # ... and on the nRF52832 bridge (apps/bridge/socs/nrf52832.conf)
 U16 = 0xFFFF
+
+BUSY_REASONS = frozenset({"busy_initiating", "busy_sessions", "busy_streaming"})
+"""Why an advertisement of a tag with work found the bridge unable to start an attempt (``_advert_decision``)."""
 
 
 @dataclass
@@ -211,7 +223,8 @@ class SimBridge:
 
     def __init__(self, name: str, *, uuid: bytes, clock: SimClock, mesh: MeshNetwork, air: Air, rng: random.Random,
                  flash_size: int = 64 * MIB, board: int = Board.NRF52840_BRIDGE, faults: BridgeFaults | None = None,
-                 bad_sectors: tuple[int, ...] = (), max_tags: int | None = None) -> None:
+                 bad_sectors: tuple[int, ...] = (), max_tags: int | None = None, sessions: int | None = None,
+                 quick_retry: bool = True) -> None:
         self.name = name
         self.uuid = uuid
         self.clock = clock
@@ -222,6 +235,15 @@ class SimBridge:
         if max_tags is None:
             max_tags = NRF52832_MAX_TAGS if board == Board.NRF52832_BRIDGE else MAX_TAGS_PER_BRIDGE
         self.max_tags = max_tags  # CAPS_STATUS max_tags; a full table answers ASSIGN_SET NO_RESOURCES
+        if sessions is None:
+            sessions = NRF52832_SESSIONS if board == Board.NRF52832_BRIDGE else NRF52840_SESSIONS
+        # §5.2: tag sessions at once (CONFIG_CTAG_BRIDGE_SESSIONS). A second one is initiated only while every
+        # open session's link is idle (its tag refreshing); initiations are one at a time, each in its own
+        # mesh suspend window.
+        self.max_sessions = max(1, sessions)
+        # §5.2: after CONNECT_FAILED, one retry on an advertisement seen within TAG_ADV_WINDOW_MS of the
+        # failure (the tag's current window) instead of the whole back-off.
+        self.quick_retry = quick_retry
         self.faults = faults or BridgeFaults()
         self.flash = SimFlash(flash_size, bad_sectors)
         self.fonts = FontStore(self.flash)
@@ -247,8 +269,12 @@ class SimBridge:
         self._sending = 0
         self._suspend_times: deque[float] = deque()
         self._backoff_until: dict[int, float] = {}
+        self._quick_retry_until: dict[int, float] = {}  # one retry allowed before then (after CONNECT_FAILED)
         self._tag_seen_at: dict[int, float] = {}
-        self._session_task: asyncio.Task[None] | None = None
+        # Tag -> its attempt (initiation, then the session): at most max_sessions; one initiating at a time.
+        self._links: dict[int, asyncio.Task[None]] = {}
+        self._initiating: int | None = None
+        self._sessions: dict[int, _BridgeSession] = {}
         self._tasks = TaskSet(f"bridge {name}")
         self._flash_tests: dict[int, dict[str, Any]] = {}
         self.maint = DeviceEndpoint(f"bridge {name} maint", self._maint, supported=(
@@ -294,8 +320,14 @@ class SimBridge:
         self._tasks.cancel_others()
         self.maint.drop_connection()
         self.maint.new_boot()
-        if self._session_task is not None:
-            self._session_task.cancel()
+        current = asyncio.current_task()
+        for task in list(self._links.values()):
+            if task is not current:
+                task.cancel()
+        self._links.clear()
+        self._sessions.clear()
+        self._initiating = None
+        self._quick_retry_until.clear()
         self._xfer = None
         self._last_xfer = None
         self.fonts.abort()
@@ -392,7 +424,7 @@ class SimBridge:
 
     def caps_status(self) -> MeshCapsStatus:
         pack_id = self.fontpack_id
-        flags = (1 if pack_id is not None else 0) | (2 if self._session_task is not None else 0)
+        flags = (1 if pack_id is not None else 0) | (2 if self._links else 0)
         return MeshCapsStatus(PROTO_VERSION, *FW, self.board, pack_id or bytes(8), min(self.flash.size // MIB, U16),
                               self.max_tags, len(self.assignments), flags)
 
@@ -629,21 +661,61 @@ class SimBridge:
             self._tag_seen_at[tag_id] = now
             self._send_later(MeshTagSeen(tag_id, max(-128, min(127, rssi)), self.tag_battery.get(tag_id, 0),
                                          advert.flags))
-        if not self.jobs.get(tag_id) or self._session_task is not None or tag_id not in self.assignments:
-            return
+        reason = self._advert_decision(tag_id, now)
+        if reason is None or reason == "quick_retry":
+            retry = reason == "quick_retry"
+            if self._links:
+                self.counters["concurrent_attempts"] += 1  # initiated while another session runs
+            self._initiating = tag_id
+            self._links[tag_id] = self._tasks.spawn(self._attempt(tag_id, retry=retry), f"attempt {tag_id:08X}")
+            self.counters["max_links"] = max(self.counters["max_links"], len(self._links))
+
+    def _advert_decision(self, tag_id: int, now: float) -> str | None:
+        """Whether an advertisement of ``tag_id`` starts an attempt (§5.2 steps 1-2): ``None`` or
+        ``"quick_retry"`` when it does, else why not (``BUSY_REASONS``, ``"backoff"``, ``"rate_limited"``, ...).
+
+        Sessions: at most ``max_sessions``, never two with one tag, one initiation at a time, and a second
+        session is initiated only while every open session's link is idle (its tag refreshing)."""
+        if not self.jobs.get(tag_id) or tag_id not in self.assignments:
+            return "no_work"
+        if tag_id in self._links:
+            return "connected"
+        if self._initiating is not None:
+            return "busy_initiating"
+        if len(self._links) >= self.max_sessions:
+            return "busy_sessions"
+        if any(not s.link_idle for s in self._sessions.values()) or len(self._sessions) < len(self._links):
+            return "busy_streaming"  # a session not yet started (or streaming) keeps the link busy
+        retry = False
         if now < self._backoff_until.get(tag_id, 0.0):
-            self.counters["backoff_skips"] += 1
-            return
+            if now < self._quick_retry_until.get(tag_id, 0.0):
+                retry = True  # the one retry after CONNECT_FAILED, still inside the tag's window
+            else:
+                self.counters["backoff_skips"] += 1
+                return "backoff"
         while self._suspend_times and now - self._suspend_times[0] >= 60000.0:
             self._suspend_times.popleft()
         if len(self._suspend_times) >= BRIDGE_MAX_SUSPENDS_PER_MIN:
             self.counters["rate_limited"] += 1
-            return
-        self._session_task = self._tasks.spawn(self._attempt(tag_id), f"attempt {tag_id:08X}")
+            return "rate_limited"
+        if retry:
+            self._quick_retry_until.pop(tag_id, None)
+            self.counters["quick_retries"] += 1
+            return "quick_retry"
+        return None
 
-    def _backoff(self, tag_id: int, status: Status) -> None:
+    def _backoff(self, tag_id: int, status: Status, *, retry_allowed: bool = False) -> None:
         self.last_status = status
-        self._backoff_until[tag_id] = self.clock.now_ms() + BRIDGE_TAG_BACKOFF_MS
+        now = self.clock.now_ms()
+        self._backoff_until[tag_id] = now + BRIDGE_TAG_BACKOFF_MS
+        if retry_allowed and self.quick_retry:
+            self._quick_retry_until[tag_id] = now + TAG_ADV_WINDOW_MS
+        else:
+            self._quick_retry_until.pop(tag_id, None)
+
+    def link_streaming(self) -> int:
+        """Sessions sending records now (they share the bridge's radio time)."""
+        return sum(1 for s in self._sessions.values() if s.job is not None and not s.link_idle)
 
     def _suspend_fails(self) -> bool:
         if self.faults.suspend_fail_next > 0:
@@ -651,7 +723,9 @@ class SimBridge:
             return True
         return self.faults.suspend_fail > 0 and self.rng.random() < self.faults.suspend_fail
 
-    async def _attempt(self, tag_id: int) -> None:
+    async def _attempt(self, tag_id: int, *, retry: bool = False) -> None:
+        """One initiation (§5.2 steps 3-7) and, when it connects, the session (step 8)."""
+        me = asyncio.current_task()
         try:
             if self._sending:  # step 3: let our own mesh sends finish, or defer to a later advertisement
                 deadline = self.clock.now_ms() + 500.0
@@ -677,6 +751,9 @@ class SimBridge:
             resumed = await self._resume()  # step 6
             suspend_ms = int(self.clock.now_ms() - started)
             self.counters["suspend_max_ms"] = max(self.counters["suspend_max_ms"], suspend_ms)
+            self.counters["suspended_ms"] += suspend_ms
+            if self._initiating == tag_id:
+                self._initiating = None  # the next initiation may start
             if not resumed:
                 if link is not None:
                     link.disconnect("bridge mesh resume failed")
@@ -684,11 +761,19 @@ class SimBridge:
                 return
             if link is None:
                 self.counters["connect_failed"] += 1
-                self._backoff(tag_id, Status.CONNECT_FAILED)
+                if retry:
+                    self.counters["quick_retries_failed"] += 1
+                self._backoff(tag_id, Status.CONNECT_FAILED, retry_allowed=not retry)
                 return
+            if retry:
+                self.counters["quick_retries_connected"] += 1
             await self._session(link, tag_id, suspend_ms)  # step 8
         finally:
-            self._session_task = None
+            if self._links.get(tag_id) is me:
+                del self._links[tag_id]
+                self._sessions.pop(tag_id, None)
+                if self._initiating == tag_id:
+                    self._initiating = None
 
     async def _resume(self) -> bool:
         if self.faults.resume_fail_next <= 0:
@@ -715,10 +800,14 @@ class SimBridge:
 
     async def _session(self, link: GattLink, tag_id: int, suspend_ms: int) -> None:
         session = _BridgeSession(self, link, tag_id, suspend_ms)
+        self._sessions[tag_id] = session
+        if len(self._sessions) > 1:
+            self.counters["concurrent_sessions"] += 1
         try:
             await session.run()
             self.counters["sessions_ok"] += 1
             self.last_status = Status.OK
+            self._quick_retry_until.pop(tag_id, None)
         except _SessionEnd:
             self.counters["sessions_ok" if session.status == Status.OK else "sessions_fail"] += 1
             if session.status != Status.OK:
@@ -842,6 +931,7 @@ class _BridgeSession:
         self.job: Job | None = None
         self.epoch = 0
         self.tag_epoch = 0  # the tag's stored epoch (CHALLENGE / ERROR; after AUTH_OK at least `epoch`)
+        self.link_idle = False  # waiting for the tag's RESULT (its refresh): another tag may be initiated
         self.pacer = Pacer(bridge.clock)
 
     @property
@@ -863,7 +953,8 @@ class _BridgeSession:
         self.records_in_event += 1
         if self.records_in_event >= RECORDS_PER_EVENT:  # at most 4 records per connection event
             self.records_in_event = 0
-            await self.pacer.sleep_ms(CONN_INTERVAL_MS)
+            # Links streaming at once share the radio: each gets every n-th connection interval's worth.
+            await self.pacer.sleep_ms(CONN_INTERVAL_MS * max(1, self.bridge.link_streaming()))
 
     async def pump(self, timeout_ms: float) -> RecResult | None:
         """Handle one incoming ATT value; returns a RESULT once one is complete."""
@@ -909,11 +1000,16 @@ class _BridgeSession:
         return None
 
     async def wait_result(self, timeout_ms: float) -> RecResult:
+        """The tag's RESULT after FRAME_END or CMD: the link idles meanwhile (the refresh)."""
         deadline = self.clock.now_ms() + timeout_ms
-        while True:
-            result = await self.pump(max(1.0, deadline - self.clock.now_ms()))
-            if result is not None:
-                return result
+        self.link_idle = True
+        try:
+            while True:
+                result = await self.pump(max(1.0, deadline - self.clock.now_ms()))
+                if result is not None:
+                    return result
+        finally:
+            self.link_idle = False
 
     def ctrl_error(self, message: bytes) -> None:
         """A tag ``ERROR{status, stored_epoch}``: note the stored epoch, then :meth:`tag_error`."""

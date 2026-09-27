@@ -84,6 +84,8 @@ class Caps:
     role: NodeRole | int | None = None
     board: int | None = None
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    assigned_count: int | None = None
+    """A bridge's caps only: the tags assigned on the bridge itself (its ``CAPS_STATUS.assigned``)."""
 
     @classmethod
     def from_map(cls, caps: Mapping[str, Any] | None) -> Caps:
@@ -95,7 +97,7 @@ class Caps:
             except ValueError:
                 pass
         return cls(caps.get("max_frame"), caps.get("credits"), caps.get("max_bridges"), caps.get("max_tags"),
-                   role, caps.get("board"), dict(caps))
+                   role, caps.get("board"), dict(caps), caps.get("assigned_count"))
 
 
 @dataclass(frozen=True, slots=True)
