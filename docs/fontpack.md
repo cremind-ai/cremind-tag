@@ -88,9 +88,12 @@ builds; CI compares the pack id of two builds).
 
 ### Validation (bridge, at install and at boot)
 
-Header magic/version/size/CRC; every table inside `total`; strike records sorted
-and pointing inside the pack; index CRCs; every non-empty `bitmap_off +
-bytes(w,h)` inside the bitmap area. At install the bridge additionally checks
+Header magic/version/size/CRC; every table inside `total`; face records sorted
+by face id, their name and scripts strings NUL-terminated valid UTF-8 inside the
+string table; strike records sorted, each naming an existing face and pointing
+inside the pack; index CRCs; every non-empty `bitmap_off + bytes(w,h)` inside
+the bitmap area (`companion/src/cremind_tag/fontpack/format.py` is the
+reference validator). At install the bridge additionally checks
 `content_hash` (SHA-256 of bytes `[128, total)`, which reads the whole pack).
 
 ## 3. External flash layout (bridge)

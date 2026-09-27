@@ -42,8 +42,8 @@ Every frame is COBS-encoded and terminated by a single `0x00`. The decoded frame
   still being received (the receiver resynchronises on the next `0x00`).
 - A frame with a bad CRC, a bad `length`, or an unknown `version` is dropped and
   counted (`crc_errors`, `len_errors`, `version_errors`), checked in this order:
-  decoded size ≥ 12 (`len_errors`), CRC over all but the last 4 bytes, `length`
-  = decoded size − 12, `version`. A request with an unknown `type` gets a
+  decoded size ≥ 12 and ≤ `SERIAL_MAX_FRAME` (`len_errors`), CRC over all but
+  the last 4 bytes, `length` = decoded size − 12, `version`. A request with an unknown `type` gets a
   `RESPONSE` with `{status: UNSUPPORTED}`.
 - Empty payload (`length = 0`) is allowed for requests with no arguments.
 - CBOR: definite-length maps/arrays/strings only, integers in the shortest form,
@@ -179,12 +179,17 @@ layouts in `spec.yaml` (`mesh.opcodes`).
 |---|---|
 | A transfer with this `xfer_id` exists | `NOT_FOUND` |
 | All chunks present | `INCOMPLETE` (+ `missing`) |
-| Concatenated length = `total_len` ≤ `LAYOUT_HARD_MAX` | `TOO_LARGE` / `INVALID` |
+| `total_len` (and the concatenated length) ≤ `LAYOUT_HARD_MAX` | `TOO_LARGE` |
+| Concatenated length = `total_len`, every chunk but the last exactly `LAYOUT_CHUNK_DATA_MAX` | `INVALID` |
 | `SHA-256(layout)[0:16]` = `digest` | `DIGEST_MISMATCH` |
 | Tag is assigned to this bridge with exactly this `epoch` | `NOT_ASSIGNED` / `STALE_EPOCH` |
 | `revision` > last accepted revision for the tag (same revision + same digest → `DUPLICATE`, the stored result is re-sent) | `STALE_REVISION` |
 | `fontpack_id` = active font pack id | `FONTPACK_MISMATCH` |
 | Layout parses and passes §4.3 bounds; every referenced strike exists | `INVALID` / `FONTPACK_MISMATCH` |
+
+A `LAYOUT_CHUNK` whose `index` ≥ `chunk_count` (or ≥ 32, the width of the
+`missing` bitmap) is ignored. A `LAYOUT_BEGIN` repeating the current `xfer_id`
+restarts that transfer.
 
 On success: `LAYOUT_STATUS OK`, the layout replaces any older pending layout for
 that tag (the older one is reported `SUPERSEDED` via `DELIVERY_RESULT`), and the
@@ -397,6 +402,10 @@ k_b2t ‖ k_t2b = HKDF-SHA256(IKM = K_epoch, salt = th, info = "cremind-tag/v1/s
 
 - The companion derives `K_epoch` from the tag secret and sends it to the
   assigned bridge (`ASSIGN_SET`); bridges never see `tag_secret`.
+- The tag checks `HELLO` in this order and answers `ERROR` with the first
+  failure: malformed → `INVALID`; `tag_id` not its own → `NOT_FOUND`; `proto`
+  unsupported → `VERSION_MISMATCH`; `epoch < stored_epoch` → `STALE_EPOCH`. A
+  malformed `AUTH` is `AUTH_FAILED`.
 - The tag rejects `epoch < stored_epoch` (`ERROR STALE_EPOCH`). An
   `epoch > stored_epoch` is persisted only after `AUTH` verifies; from then on
   older epochs (and bridges holding their keys) are refused.
@@ -461,8 +470,13 @@ RECEIVING ─▶ VALIDATED ─▶ REFRESH_INTENT persisted ─▶ REFRESHING ─
           ─▶ DISPLAYED result persisted ─▶ RESULT(ACK) sent
 ```
 
-Persistent record (one NVS entry, written atomically): `tag_id, epoch,
-revision, update_id, digest[32], status, state ∈ {DISPLAYED, REFRESH_INTENT}`.
+Persistent record (one NVS entry, written atomically), 60 bytes little-endian:
+`version u8 (= 1)`, `state u8` (0 = `DISPLAYED`, 1 = `REFRESH_INTENT`),
+`status u8`, `reserved u8`, `tag_id u32`, `epoch u32`, `revision u32`,
+`update_id u64`, `digest[32]`, `crc32 u32` over the previous 56 bytes. A record
+with a wrong length, version, state or CRC is treated as corrupt (the tag
+behaves as if it had no record and reports `STORAGE_ERROR` in its next
+`CHALLENGE.last_status`).
 
 - `REFRESH_INTENT` (with the new `(epoch, revision, update_id, digest)`) is
   written **before** `commit_refresh()`.

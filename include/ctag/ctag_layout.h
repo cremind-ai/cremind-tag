@@ -16,8 +16,7 @@
 extern "C" {
 #endif
 
-#define CTAG_LAYOUT_MAX_SIDE  2048u
-#define CTAG_LAYOUT_ICON_FACE 0u
+#define CTAG_LAYOUT_ICON_FACE CTAG_ICON_FACE_ID
 
 /* One command of a layout; var points into the layout bytes. */
 struct ctag_layout_command {

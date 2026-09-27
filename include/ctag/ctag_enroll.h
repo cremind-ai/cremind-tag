@@ -14,8 +14,6 @@
 extern "C" {
 #endif
 
-#define CTAG_ENROLLMENT_VERSION 1u
-
 /*
  * Parse and verify a blob read from memory (e.g. (const uint8_t *)
  * &NRF_UICR->CUSTOMER[0]): length, magic, CRC-32 over bytes [0, 44), version.

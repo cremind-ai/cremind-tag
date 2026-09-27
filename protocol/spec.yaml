@@ -45,6 +45,13 @@ constants:
   LAYOUT_MAX_CHUNKS:        {value: 28,    doc: "ceil(LAYOUT_HARD_MAX / LAYOUT_CHUNK_DATA_MAX)"}
   LAYOUT_DIGEST_LEN:        {value: 16,    doc: "Layout digest = SHA-256(layout bytes) truncated to 16 bytes"}
   LAYOUT_QR_MAX_TEXT:       {value: 96,    doc: "Maximum QR payload bytes (short token-free https link)"}
+  LAYOUT_MAX_SIDE:          {value: 2048,  doc: "Maximum layout width/height in pixels (§4.3)"}
+  QR_MIN_VERSION:           {value: 1,     doc: "Nayuki encodeText minVersion (§4.4)"}
+  QR_MAX_VERSION:           {value: 10,    doc: "Nayuki encodeText maxVersion (§4.4)"}
+  ICON_FACE_ID:             {value: 0,     doc: "Font-pack face id of the icon face (glyph id = icon id)"}
+  ENROLLMENT_VERSION:       {value: 1,     doc: "Version byte of the UICR enrollment blob (§9)"}
+  TAG_TXN_RECORD_LEN:       {value: 60,    doc: "Persisted tag display record length (§6)"}
+  TAG_TXN_RECORD_VERSION:   {value: 1,     doc: "Persisted tag display record version (§6)"}
   FONTPACK_ID_LEN:          {value: 8,     doc: "Font-pack id = first 8 bytes of the pack content SHA-256"}
   FRAME_DIGEST_LEN:         {value: 32,    doc: "Frame digest = SHA-256 over plane 0 bytes then plane 1 bytes"}
   MAX_BRIDGES:              {value: 5,     doc: "Bridges per gateway (qualified topology)"}
