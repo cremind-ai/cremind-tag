@@ -1,0 +1,19 @@
+identifier: laowu_bwr/nrf51822
+name: Laowu 4.2-inch BWR (nRF51802 as nRF51822 QFAA)
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+ram: 16
+flash: 256
+supported:
+  - ble
+  - gpio
+  - nvs
+  - spi
+  - watchdog
+testing:
+  ignore_tags:
+    - net
+vendor: cremind

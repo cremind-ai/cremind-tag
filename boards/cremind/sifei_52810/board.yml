@@ -1,0 +1,6 @@
+board:
+  name: sifei_52810
+  full_name: Sifei nRF52810 e-paper tag
+  vendor: cremind
+  socs:
+    - name: nrf52810

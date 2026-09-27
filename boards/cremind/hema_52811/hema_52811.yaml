@@ -1,0 +1,18 @@
+identifier: hema_52811/nrf52811
+name: Hema/Alibaba nRF52811 tag
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+ram: 24
+flash: 192
+supported:
+  - ble
+  - gpio
+  - nvs
+  - watchdog
+testing:
+  ignore_tags:
+    - net
+vendor: cremind

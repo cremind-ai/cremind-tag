@@ -1,0 +1,23 @@
+Archive member included to satisfy reference by file (symbol)
+
+/ncs/nrfxlib/softdevice_controller/lib/nrf52/soft-float/libsoftdevice_controller_peripheral.a(sdc_hci.o)
+                              modules/nrf/subsys/bluetooth/controller/lib..__nrf__subsys__bluetooth__controller.a(hci_driver.c.obj) (sdc_hci_cmd_put)
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+FLASH            0x00000000         0x00080000         xr
+RAM              0x20000000         0x00010000         xw
+IDT_LIST         0xffff7fff         0x00008000         xw
+*default*        0x00000000         0xffffffff
+
+Linker script and memory map
+
+LOAD /ncs/nrfxlib/mpsl/lib/nrf52/soft-float/libmpsl.a
+LOAD /ncs/nrfxlib/softdevice_controller/lib/nrf52/soft-float/libsoftdevice_controller_peripheral.a
+ .text.sdc_hci_cmd_le_set_adv_enable
+                0x00012000       0x40 /ncs/nrfxlib/softdevice_controller/lib/nrf52/soft-float/libsoftdevice_controller_peripheral.a(sdc_hci.o)
+                0x00012000                sdc_hci_cmd_le_set_adv_enable
+ .text.mpsl_init
+                0x00014000       0x80 /ncs/nrfxlib/mpsl/lib/nrf52/soft-float/libmpsl.a(mpsl_init.o)
+                0x00014000                mpsl_init

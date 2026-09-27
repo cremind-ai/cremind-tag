@@ -1,0 +1,136 @@
+# Firmware build matrix for tools/build.py and tools/verify_stack.py
+# (docs/building.md).
+#
+# Every target builds with `west build --no-sysbuild` and
+# `-DZEPHYR_EXTRA_MODULES=<repository>`, which provides boards/, dts/ and lib/.
+#
+# socs: exact memory geometry in bytes. verify_stack.py requires the devicetree
+#   flash/SRAM nodes to have exactly these sizes, the linked RAM region to equal
+#   `ram`, and the FLASH region to end inside `flash`.
+#
+# targets.<name>:
+#   app            application directory, relative to the repository root
+#   board          Zephyr board target (HWMv2 qualifiers)
+#   soc            key into `socs`
+#   role           gateway | bridge | tag (selects role-specific checks)
+#   hardware       id in hardware/matrix.yaml (null for development-only targets)
+#   snippets       bt-ll-sw-split on every nRF52 target and NEVER on nRF51
+#                  (docs/firmware-notes.md correction 1); build.py enforces both.
+#   extra_conf     .conf fragments relative to the app, passed as EXTRA_CONF_FILE
+#   extra_overlay  overlays relative to the app, passed as EXTRA_DTC_OVERLAY_FILE
+#                  Per-SoC and per-board fragments normally need neither: Zephyr
+#                  merges <app>/socs/<soc>.conf|.overlay and
+#                  <app>/boards/<board>.conf|.overlay automatically.
+#   resources      flash_headroom_pct: minimum free share of the FLASH region
+#                  ram_free_min: minimum bytes of RAM left after every static
+#                  allocation including stacks (null = no target set yet)
+
+socs:
+  nrf51822_qfaa: {series: nrf51, flash: 262144, ram: 16384}
+  nrf51822_qfab: {series: nrf51, flash: 131072, ram: 16384}
+  nrf52810_qfaa: {series: nrf52, flash: 196608, ram: 24576}
+  nrf52811_qfaa: {series: nrf52, flash: 196608, ram: 24576}
+  nrf52832_qfaa: {series: nrf52, flash: 524288, ram: 65536}
+  nrf52840_qiaa: {series: nrf52, flash: 1048576, ram: 262144}
+
+targets:
+  gateway-nrf52840dk:
+    app: apps/gateway
+    board: nrf52840dk/nrf52840
+    soc: nrf52840_qiaa
+    role: gateway
+    hardware: nrf52840_gateway
+    snippets: [bt-ll-sw-split]
+    extra_conf: []
+    extra_overlay: []
+    resources: {flash_headroom_pct: 15, ram_free_min: null}
+
+  gateway-nrf52dk:
+    app: apps/gateway
+    board: nrf52dk/nrf52832
+    soc: nrf52832_qfaa
+    role: gateway
+    hardware: nrf52832_gateway
+    snippets: [bt-ll-sw-split]
+    extra_conf: []
+    extra_overlay: []
+    # RAM target pending resource qualification (CDB + provisioner).
+    resources: {flash_headroom_pct: 15, ram_free_min: null}
+
+  bridge-nrf52840dk:
+    app: apps/bridge
+    board: nrf52840dk/nrf52840
+    soc: nrf52840_qiaa
+    role: bridge
+    hardware: nrf52840_bridge
+    snippets: [bt-ll-sw-split]
+    extra_conf: []
+    extra_overlay: []
+    resources: {flash_headroom_pct: 15, ram_free_min: null}
+
+  bridge-nrf52dk:
+    app: apps/bridge
+    board: nrf52dk/nrf52832
+    soc: nrf52832_qfaa
+    role: bridge
+    hardware: nrf52832_bridge
+    snippets: [bt-ll-sw-split]
+    extra_conf: []
+    extra_overlay: []
+    resources: {flash_headroom_pct: 15, ram_free_min: 8192}
+
+  tag-laowu-bw:
+    app: apps/tag
+    board: laowu_bw/nrf51822
+    soc: nrf51822_qfab
+    role: tag
+    hardware: laowu_bw
+    snippets: []
+    extra_conf: []
+    extra_overlay: []
+    resources: {flash_headroom_pct: 15, ram_free_min: 2048}
+
+  tag-laowu-bwr:
+    app: apps/tag
+    board: laowu_bwr/nrf51822
+    soc: nrf51822_qfaa
+    role: tag
+    hardware: laowu_bwr
+    snippets: []
+    extra_conf: []
+    extra_overlay: []
+    resources: {flash_headroom_pct: 15, ram_free_min: 2048}
+
+  tag-sifei-52810:
+    app: apps/tag
+    board: sifei_52810/nrf52810
+    soc: nrf52810_qfaa
+    role: tag
+    hardware: sifei_52810
+    snippets: [bt-ll-sw-split]
+    extra_conf: []
+    extra_overlay: []
+    resources: {flash_headroom_pct: 15, ram_free_min: 3072}
+
+  tag-hema-52811:
+    app: apps/tag
+    board: hema_52811/nrf52811
+    soc: nrf52811_qfaa
+    role: tag
+    hardware: hema_52811
+    snippets: [bt-ll-sw-split]
+    extra_conf: []
+    extra_overlay: []
+    resources: {flash_headroom_pct: 15, ram_free_min: 3072}
+
+  tag-nrf52dk:
+    app: apps/tag
+    board: nrf52dk/nrf52832
+    soc: nrf52832_qfaa
+    role: tag
+    hardware: null
+    snippets: [bt-ll-sw-split]
+    extra_conf: []
+    extra_overlay: []
+    # Development tag (protocol board id NRF52DK_TAG = 20); no resource target.
+    resources: {flash_headroom_pct: 15, ram_free_min: null}

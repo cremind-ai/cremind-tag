@@ -1,0 +1,18 @@
+identifier: sifei_52810/nrf52810
+name: Sifei nRF52810 tag
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+ram: 24
+flash: 192
+supported:
+  - ble
+  - gpio
+  - nvs
+  - watchdog
+testing:
+  ignore_tags:
+    - net
+vendor: cremind

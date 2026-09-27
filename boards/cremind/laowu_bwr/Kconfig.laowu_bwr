@@ -1,0 +1,8 @@
+# Copyright (c) 2026 Cremind
+# SPDX-License-Identifier: MIT
+
+# The board carries an nRF51802, which is not a Zephyr SoC; it is modelled as
+# the nRF51822 QFAA with the same 256 KiB / 16 KiB geometry
+# (docs/firmware-notes.md section 6).
+config BOARD_LAOWU_BWR
+	select SOC_NRF51822_QFAA

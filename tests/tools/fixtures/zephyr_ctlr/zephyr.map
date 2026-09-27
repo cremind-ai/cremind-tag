@@ -1,0 +1,32 @@
+Archive member included to satisfy reference by file (symbol)
+
+zephyr/subsys/bluetooth/controller/libsubsys__bluetooth__controller.a(ll_sys_init.c.obj)
+                              zephyr/subsys/bluetooth/host/libsubsys__bluetooth__host.a(hci_core.c.obj) (bt_hci_driver_register)
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+FLASH            0x00000000         0x0001f000         xr
+RAM              0x20000000         0x00004000         xw
+IDT_LIST         0xffff7fff         0x00008000         xw
+*default*        0x00000000         0xffffffff
+
+Linker script and memory map
+
+LOAD zephyr/subsys/bluetooth/controller/libsubsys__bluetooth__controller.a
+LOAD zephyr/drivers/entropy/libdrivers__entropy.a
+ .text.lll_init
+                0x0000cfc8       0x5c zephyr/subsys/bluetooth/controller/libsubsys__bluetooth__controller.a(lll.c.obj)
+                0x0000cfc8                lll_init
+ .text.ticker_init
+                0x00006de4       0x88 zephyr/subsys/bluetooth/controller/libsubsys__bluetooth__controller.a(ticker.c.obj)
+                0x00006de4                ticker_init
+ .text.radio_isr_set
+                0x0000e680       0x28 zephyr/subsys/bluetooth/controller/libsubsys__bluetooth__controller.a(radio.c.obj)
+                0x0000e680                radio_isr_set
+ .text.ll_adv_enable
+                0x0000936c      0x1f4 zephyr/subsys/bluetooth/controller/libsubsys__bluetooth__controller.a(ull_adv.c.obj)
+                0x0000936c                ll_adv_enable
+ .text.bt_hci_entropy_get
+                0x0000a000       0x10 zephyr/drivers/entropy/libdrivers__entropy.a(entropy_bt_hci.c.obj)
+                0x0000a000                bt_hci_entropy_get

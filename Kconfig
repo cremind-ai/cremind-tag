@@ -1,0 +1,8 @@
+# Zephyr module Kconfig entry point (zephyr/module.yml: build.kconfig).
+
+menu "Cremind Tag"
+
+# orsource: relative to this file, optional until the firmware libraries land.
+orsource "lib/Kconfig"
+
+endmenu

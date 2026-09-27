@@ -73,8 +73,19 @@ selects `MPSL`).
 
 Traps: anchor the MPSL check to `^CONFIG_MPSL=y$` (integer `CONFIG_MPSL_*`
 symbols such as `CONFIG_MPSL_WORK_STACK_SIZE` still appear with the Zephyr
+controller), and match `CONFIG_SOC_FLASH_NRF_RADIO_SYNC_MPSL=y` exactly
+(`…_SYNC_MPSL_TIMESLOT_SESSION_COUNT=0` also appears with the Zephyr
 controller). Do not reject every `bt-hci` compatible — `nrf_common.dtsi:35` has an
-unrelated `zephyr,bt-hci-entropy` node.
+unrelated `zephyr,bt-hci-entropy` node. Map symbol checks must ignore the
+"Discarded input sections" block of `zephyr.map`.
+
+**Re-configuration trap (no sysbuild):** re-running CMake on an existing build
+directory (new `-D` arguments or an edited `.conf`) aborts with "malformed
+string literal … MBEDTLS_CONFIG_FILE": nrf_security caches `CONFIG_*_CONFIG_FILE`
+(N `subsys/nrf_security/configs/config_extra.cmake.in:22-24`) and Zephyr's
+`kconfig.cmake` reads every cached `CONFIG_*` back as an assignment.
+`tools/build.py` passes `-UCONFIG_*`; manual builds need the same or a pristine
+build.
 
 ## 2. Controller scheduling (Z `subsys/bluetooth/controller/Kconfig.ll_sw_split`)
 

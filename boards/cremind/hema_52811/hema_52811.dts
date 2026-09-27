@@ -1,0 +1,106 @@
+/*
+ * Copyright (c) 2026 Cremind
+ * SPDX-License-Identifier: MIT
+ *
+ * Hema/Alibaba nRF52811 e-paper tag: nRF52811 QFAA (192 KiB flash, 24 KiB
+ * SRAM). Display mapping, panel model and wake sources are UNVERIFIED: the
+ * panel node below uses placeholder pins (see hema_52811-pinctrl.dtsi) and
+ * panel-id 255.
+ */
+
+/dts-v1/;
+#include <nordic/nrf52811_qfaa.dtsi>
+#include "hema_52811-pinctrl.dtsi"
+
+/ {
+	model = "Hema/Alibaba nRF52811 e-paper tag";
+	compatible = "cremind,hema-52811";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &code_partition;
+		/* Zephyr controller on every target (docs/architecture.md). */
+		zephyr,bt-hci = &bt_hci_controller;
+		cremind,tag-board = &tag_board;
+		cremind,panel = &epd;
+	};
+
+	tag_board: tag-board {
+		compatible = "cremind,tag-board";
+		board-id = <19>;
+		/* Wake sources unverified: none described. */
+	};
+
+	aliases {
+		watchdog0 = &wdt0;
+	};
+};
+
+&bt_hci_sdc {
+	status = "disabled";
+};
+
+&bt_hci_controller {
+	status = "okay";
+};
+
+&gpiote {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+/*
+ * Deferred init: the SPI driver is linked but never applies its pinctrl state
+ * or configures cs-gpios at boot, so no placeholder pin is touched.
+ */
+&spi0 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	zephyr,deferred-init;
+	cs-gpios = <&gpio0 HEMA_PLACEHOLDER_CS GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&spi0_default>;
+	pinctrl-1 = <&spi0_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	/* PLACEHOLDER panel: firmware must refuse to drive panel-id 255. */
+	epd: epd@0 {
+		compatible = "cremind,uc8176";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(4)>;
+		dc-gpios = <&gpio0 HEMA_PLACEHOLDER_DC GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio0 HEMA_PLACEHOLDER_RST GPIO_ACTIVE_LOW>;
+		busy-gpios = <&gpio0 HEMA_PLACEHOLDER_BUSY GPIO_ACTIVE_HIGH>;
+		/* Placeholder geometry: the largest documented UC8176 panel. */
+		width = <400>;
+		height = <300>;
+		planes = <2>;
+		plane-flags = <0x03>;
+		refresh-timeout-ms = <30000>;
+		panel-id = <255>;	/* UNVERIFIED */
+	};
+};
+
+&flash0 {
+	partitions {
+		ranges;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		code_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "code";
+			reg = <0x00000000 0x0002e000>;
+		};
+
+		/* NVS: 2 x 4 KiB pages at the end of flash (docs/firmware-notes.md section 9). */
+		storage_partition: partition@2e000 {
+			compatible = "zephyr,mapped-partition";
+			label = "storage";
+			reg = <0x0002e000 0x00002000>;
+		};
+	};
+};

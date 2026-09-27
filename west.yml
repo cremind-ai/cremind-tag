@@ -1,0 +1,25 @@
+# Optional west manifest for a T2 ("application as manifest repository")
+# workspace:
+#
+#   west init -m <this repository URL> --mr main cremind-tag-ws
+#   cd cremind-tag-ws && west update --narrow -o=--depth=1
+#
+# The pinned SDK is nRF Connect SDK v3.4.1 (sdk-zephyr ncs-v3.4.1). The Docker
+# workflow in docs/building.md does not need this file: it mounts the repository
+# into a prepared NCS workspace and passes -DZEPHYR_EXTRA_MODULES instead.
+manifest:
+  version: "0.13"
+
+  self:
+    path: cremind-tag
+
+  remotes:
+    - name: ncs
+      url-base: https://github.com/nrfconnect
+
+  projects:
+    - name: sdk-nrf
+      remote: ncs
+      path: nrf
+      revision: v3.4.1
+      import: true

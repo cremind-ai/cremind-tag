@@ -1,0 +1,129 @@
+/*
+ * Copyright (c) 2026 Cremind
+ * SPDX-License-Identifier: MIT
+ *
+ * Laowu 4.2-inch black/white/red e-paper tag: nRF51802 modelled as nRF51822
+ * QFAA (256 KiB flash, 16 KiB SRAM), UltraChip UC8176 400x300 two-plane panel.
+ * Pins from hardware/matrix.yaml (source: EPD-nRF5 docs/devices.md hardware
+ * documentation). Nothing here has been verified on a physical sample yet
+ * (docs/hardware/verification.md).
+ */
+
+/dts-v1/;
+#include <nordic/nrf51822_qfaa.dtsi>
+#include "laowu_bwr-pinctrl.dtsi"
+
+/ {
+	model = "Laowu 4.2-inch black/white/red e-paper tag (nRF51802)";
+	compatible = "cremind,laowu-bwr";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &code_partition;
+		/* Only takes effect when a debug overlay enables uart0. */
+		zephyr,console = &uart0;
+		cremind,tag-board = &tag_board;
+		cremind,panel = &epd;
+	};
+
+	tag_board: tag-board {
+		compatible = "cremind,tag-board";
+		board-id = <17>;
+		/* Wake source and polarity unverified: firmware must not rely on it. */
+		wake-gpios = <&gpio0 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+	};
+
+	/* Three LEDs documented on P0.03/04/05; drive polarity unverified. */
+	leds {
+		compatible = "gpio-leds";
+
+		led0: led_0 {
+			gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+			label = "LED 0 (P0.03)";
+		};
+
+		led1: led_1 {
+			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+			label = "LED 1 (P0.04)";
+		};
+
+		led2: led_2 {
+			gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+			label = "LED 2 (P0.05)";
+		};
+	};
+
+	aliases {
+		led0 = &led0;
+		led1 = &led1;
+		led2 = &led2;
+		watchdog0 = &wdt0;
+	};
+};
+
+&gpiote {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+/* Debug TX pad only (P0.08). Enable in an overlay for bring-up. */
+&uart0 {
+	status = "disabled";
+	current-speed = <115200>;
+	disable-rx;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-1 = <&uart0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&spi0 {
+	compatible = "nordic,nrf-spi";
+	status = "okay";
+	cs-gpios = <&gpio0 12 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&spi0_default>;
+	pinctrl-1 = <&spi0_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	epd: epd@0 {
+		compatible = "cremind,uc8176";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(4)>;
+		dc-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+		bs-gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
+		width = <400>;
+		height = <300>;
+		planes = <2>;
+		/* Plane polarity to be confirmed during panel verification. */
+		plane-flags = <0x03>;
+		/* Upper bound until measured during qualification (red refresh is slow). */
+		refresh-timeout-ms = <30000>;
+		panel-id = <2>;	/* UC8176_420_BWR */
+	};
+};
+
+&flash0 {
+	partitions {
+		ranges;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		code_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "code";
+			reg = <0x00000000 0x0003f000>;
+		};
+
+		/* NVS: 4 x 1 KiB pages at the end of flash (docs/firmware-notes.md section 9). */
+		storage_partition: partition@3f000 {
+			compatible = "zephyr,mapped-partition";
+			label = "storage";
+			reg = <0x0003f000 0x00001000>;
+		};
+	};
+};

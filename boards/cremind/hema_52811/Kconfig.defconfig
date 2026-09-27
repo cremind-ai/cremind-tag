@@ -1,0 +1,11 @@
+# Copyright (c) 2026 Cremind
+# SPDX-License-Identifier: MIT
+
+if BOARD_HEMA_52811
+
+# Link into /chosen/zephyr,code-partition so the linker refuses an image that
+# would grow into the NVS storage partition at the end of flash.
+config USE_DT_CODE_PARTITION
+	default y
+
+endif # BOARD_HEMA_52811

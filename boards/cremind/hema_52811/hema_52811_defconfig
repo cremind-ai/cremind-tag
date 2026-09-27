@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+
+CONFIG_GPIO=y
+CONFIG_SPI=y
+
+# No 32.768 kHz crystal is verified on this board: calibrated RC oscillator.
+# MAX_SKIP=0 calibrates every period without the temperature sensor
+# (docs/firmware-notes.md section 6 and correction 5).
+CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y
+CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION=y
+CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_MAX_SKIP=0
+
+# No UART console (no debug pad is documented for this board).
+CONFIG_SERIAL=n
+CONFIG_CONSOLE=n
+CONFIG_UART_CONSOLE=n

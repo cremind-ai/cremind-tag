@@ -1,0 +1,2 @@
+# Devicetree vendor prefixes used by this Zephyr module (merged with Zephyr's list).
+cremind	Cremind

@@ -1,0 +1,6 @@
+board:
+  name: laowu_bwr
+  full_name: Laowu 4.2-inch black/white/red e-paper tag
+  vendor: cremind
+  socs:
+    - name: nrf51822

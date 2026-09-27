@@ -1,0 +1,6 @@
+board:
+  name: hema_52811
+  full_name: Hema/Alibaba nRF52811 e-paper tag
+  vendor: cremind
+  socs:
+    - name: nrf52811

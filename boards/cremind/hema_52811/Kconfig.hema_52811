@@ -1,0 +1,5 @@
+# Copyright (c) 2026 Cremind
+# SPDX-License-Identifier: MIT
+
+config BOARD_HEMA_52811
+	select SOC_NRF52811_QFAA

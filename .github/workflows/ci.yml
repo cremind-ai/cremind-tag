@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NCS_REVISION: v3.4.1
+  # Same paths as the local Docker workflow (docs/building.md).
+  NCS_DIR: /ncs
+  CTAG_BUILD_ROOT: /build
+
+jobs:
+  companion:
+    name: Companion + tools (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Sync companion environment
+        run: uv sync --project companion
+      - name: Companion tests
+        working-directory: companion
+        run: uv run pytest -q
+      - name: Tool tests (build matrix, verify_stack, board files)
+        run: uv run --project companion pytest tests/tools -q
+      - name: Generated protocol bindings are current
+        run: |
+          if [ -f tools/codegen.py ]; then
+            uv run --project companion python tools/codegen.py --check
+          else
+            echo "tools/codegen.py not present yet; skipping"
+          fi
+
+  host-c:
+    name: Host C tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure, build and run
+        run: |
+          if [ ! -f tests/host/CMakeLists.txt ]; then
+            echo "tests/host not present yet; skipping"
+            exit 0
+          fi
+          cmake -S tests/host -B tests/host/build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build tests/host/build --parallel
+          ctest --test-dir tests/host/build --output-on-failure
+
+  ncs-workspace:
+    name: NCS workspace cache
+    runs-on: ubuntu-latest
+    container: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: /ncs
+          key: ncs-${{ env.NCS_REVISION }}-narrow-depth1-v1
+          lookup-only: true
+      - name: West init + update
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          west init -m https://github.com/nrfconnect/sdk-nrf --mr "$NCS_REVISION" "$NCS_DIR"
+          cd "$NCS_DIR"
+          west update --narrow -o=--depth=1
+
+  firmware:
+    name: Firmware build matrix
+    needs: ncs-workspace
+    runs-on: ubuntu-latest
+    container: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache/restore@v4
+        with:
+          path: /ncs
+          key: ncs-${{ env.NCS_REVISION }}-narrow-depth1-v1
+          fail-on-cache-miss: true
+      - name: Trust the checkout (container uid differs)
+        run: git config --global --add safe.directory '*'
+      - name: Build, verify controller stack, check resources
+        # Warnings are not errors: every image warns about the experimental
+        # BT_LL_SW_SPLIT symbol (docs/firmware-notes.md correction 2).
+        run: |
+          set +e
+          python3 tools/build.py --in-container --all
+          rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "::warning::Some targets were skipped because their app does not exist yet"
+            rc=0
+          fi
+          exit "$rc"
+      - name: Memory report to job summary
+        if: always()
+        run: |
+          if [ -f build/memory-report.md ]; then
+            cat build/memory-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No firmware target was built." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firmware
+          if-no-files-found: ignore
+          include-hidden-files: true
+          path: |
+            build/memory-report.md
+            build/memory-report.json
+            build/*/zephyr.hex
+            build/*/zephyr.elf
+            build/*/zephyr.map
+            build/*/.config
+            build/*/zephyr.dts
+            build/*/verify.json
+            build/*/build.log
+
+  twister:
+    name: Twister (native_sim)
+    needs: ncs-workspace
+    runs-on: ubuntu-latest
+    container: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check for ztest suites
+        id: present
+        run: |
+          if [ -d tests/ztest ]; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "tests/ztest not present yet; skipping"; fi
+      - uses: actions/cache/restore@v4
+        if: steps.present.outputs.run == 'true'
+        with:
+          path: /ncs
+          key: ncs-${{ env.NCS_REVISION }}-narrow-depth1-v1
+          fail-on-cache-miss: true
+      - name: Run twister
+        if: steps.present.outputs.run == 'true'
+        run: |
+          git config --global --add safe.directory '*'
+          # native_sim needs make, which the toolchain image lacks (firmware-notes correction 10).
+          apt-get update && apt-get install -y --no-install-recommends make
+          cd "$NCS_DIR"
+          west twister -T "$GITHUB_WORKSPACE/tests/ztest" -p native_sim -p native_sim/native/64 \
+            -x "ZEPHYR_EXTRA_MODULES=$GITHUB_WORKSPACE" \
+            --outdir "$CTAG_BUILD_ROOT/twister-out" --inline-logs -v
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.present.outputs.run == 'true'
+        with:
+          name: twister
+          if-no-files-found: ignore
+          path: |
+            ${{ env.CTAG_BUILD_ROOT }}/twister-out/twister.json
+            ${{ env.CTAG_BUILD_ROOT }}/twister-out/twister_report.xml

@@ -54,7 +54,7 @@ bridges:
 tags:
   - id: laowu_bw
     board_id: 16
-    zephyr_board: laowu_bw/nrf51822/qfab
+    zephyr_board: laowu_bw/nrf51822
     name: Laowu 4.2-inch black/white
     mcu: nRF51822
     soc_variant: QFAB
@@ -73,7 +73,7 @@ tags:
     status: documented
   - id: laowu_bwr
     board_id: 17
-    zephyr_board: laowu_bwr/nrf51822/qfaa
+    zephyr_board: laowu_bwr/nrf51822
     name: Laowu 4.2-inch black/white/red
     mcu: nRF51802
     soc_variant: QFAA-compatible (256 KiB / 16 KiB)

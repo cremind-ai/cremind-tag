@@ -1,0 +1,98 @@
+# Copyright (c) 2026 Cremind
+# SPDX-License-Identifier: MIT
+
+title: UltraChip UC8176 e-paper panel driven by the Cremind Tag firmware
+
+description: |
+  An UltraChip UC8176 e-paper controller on a Cremind tag board. The panel is
+  driven by the Cremind Tag panel library (not the Zephyr display API): writes
+  stage image planes into controller RAM and only an explicit commit refreshes
+  (docs/protocol.md section 6).
+
+  Panel identity and safety contract:
+
+  - panel-id is the protocol panel id (protocol/spec.yaml `panels`), reported in
+    the tag CAPS. panel-id 255 (UNVERIFIED) marks placeholder pins: the firmware
+    must never initialise the SPI bus nor configure or drive any panel pin, and
+    it must refuse every frame. Boards with placeholder pins also mark their SPI
+    bus `zephyr,deferred-init` so that no driver touches those pins at boot.
+  - panel-verified is set only after the pin mapping, polarity, panel model and
+    planes were checked on a physical sample (docs/hardware/verification.md).
+    A board with a real panel-id but panel-verified absent carries documented
+    but not yet physically verified pins; it may be driven for bring-up.
+
+  BUSY: describe busy-gpios with GPIO_ACTIVE_HIGH (plus any pull flag). The
+  firmware reads the raw pin level and interprets it with busy-active-high, so
+  polarity is expressed in exactly one place. The UC8176 BUSY_N output is low
+  while the controller is busy, so busy-active-high is normally absent.
+
+compatible: "cremind,uc8176"
+
+include: [spi-device.yaml]
+
+properties:
+  dc-gpios:
+    type: phandle-array
+    required: true
+    description: Data/command select. Physical high selects data.
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: Controller reset (RST_N, active low).
+
+  busy-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Controller BUSY output, read as a raw level; see busy-active-high.
+
+  bs-gpios:
+    type: phandle-array
+    description: |
+      Optional bus-select (BS1) line routed to the MCU. The firmware drives it
+      physically low to select the 4-wire SPI interface before reset.
+
+  width:
+    type: int
+    required: true
+    description: Native panel width in pixels (source direction).
+
+  height:
+    type: int
+    required: true
+    description: Native panel height in pixels (gate direction).
+
+  planes:
+    type: int
+    required: true
+    enum: [1, 2]
+    description: Image planes; 1 = black/white, 2 = black/white + red.
+
+  plane-flags:
+    type: int
+    default: 0
+    description: |
+      Bit meaning of the planes as reported in CAPS (protocol/spec.yaml
+      tag_caps.plane_flags): bit0 set = a 1 bit in plane 0 is white;
+      bit1 set = a 1 bit in plane 1 is red.
+
+  busy-active-high:
+    type: boolean
+    description: A high BUSY level means busy. Absent = low means busy (UC8176).
+
+  refresh-timeout-ms:
+    type: int
+    required: true
+    description: |
+      Upper bound for BUSY to release after a refresh command. Exceeding it
+      yields REFRESH_TIMEOUT.
+
+  panel-id:
+    type: int
+    required: true
+    description: Protocol panel id (protocol/spec.yaml `panels`); 255 = UNVERIFIED.
+
+  panel-verified:
+    type: boolean
+    description: Pins, polarity, panel model and planes verified on hardware.
