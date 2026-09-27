@@ -1,9 +1,12 @@
 # Building the firmware
 
 All firmware builds with the pinned nRF Connect SDK **v3.4.1** toolchain image
-(`ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1`, sdk-zephyr `ncs-v3.4.1`) through
+(`ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1`, run by digest:
+`ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418`;
+sdk-nrf `v3.4.1` = `b20f8619ba9a`, sdk-zephyr `ncs-v3.4.1`) through
 [`tools/build.py`](../tools/build.py). The same script runs in CI, so a local
-build and a CI build are the same command line.
+build and a CI build are the same command line — and give byte-identical
+images ([releasing.md → Reproducibility](releasing.md#reproducibility)).
 
 ## Prerequisites
 
@@ -53,6 +56,8 @@ on Linux).
 | `--app DIR` | build another app directory (repository-relative) with each target's board, snippets and checks — e.g. a board bring-up app |
 | `--allow-resource-miss` | report resource-target misses without failing |
 | `--in-container` | already inside the NCS image (CI); `--ncs-dir`/`$NCS_DIR` and `--build-root`/`$CTAG_BUILD_ROOT` locate the workspace and build directories |
+| `--out-root DIR` | write artifacts and reports under `DIR` (repository-relative) instead of `build/` (used by `tools/repro_check.py`) |
+| `--skip-workspace-check` | skip `west compare` (the sdk-nrf commit is still checked); recorded in metadata.json, refused by `tools/release.py` |
 | `--setup` | create or update the workspace volume |
 | `--shell` | open a shell in the toolchain container |
 
@@ -62,16 +67,28 @@ Exit status: `0` everything built, verified and within its resource targets;
 
 ### What one target build does
 
-1. `west build --no-sysbuild -p auto -d /build/<target> -b <board> [-S bt-ll-sw-split] <app> -- -DZEPHYR_EXTRA_MODULES=/work -UCONFIG_* [-DEXTRA_CONF_FILE=…] [-DEXTRA_DTC_OVERLAY_FILE=…]`
-   (full log in `build/<target>/build.log`). `-UCONFIG_*` works around an NCS
-   v3.4.1 trap, see [Troubleshooting](#troubleshooting).
-2. Copies `zephyr.hex`, `zephyr.elf`, `zephyr.map`, `.config`, `zephyr.dts`,
-   `devicetree_generated.h`, `edt.pickle` to `build/<target>/` (gitignored).
+0. Once per run: checks the workspace — `nrf` at the pinned sdk-nrf commit and
+   a clean `west compare` — and stops with the fix if not
+   ([releasing.md → Pins](releasing.md#pins)).
+1. `west build --no-sysbuild -p auto -d /build/<target> -b <board> [-S bt-ll-sw-split] <app> -- -DZEPHYR_EXTRA_MODULES=/work -UCONFIG_* [-DEXTRA_CONF_FILE=…] [-DEXTRA_DTC_OVERLAY_FILE=…] -DEXTRA_CPPFLAGS=<prefix maps> -DEXTRA_LDFLAGS=<prefix maps> -DBUILD_VERSION=<sdk-zephyr commit>`
+   with `SOURCE_DATE_EPOCH` = the commit time (full log in
+   `build/<target>/build.log`). `-UCONFIG_*` works around an NCS v3.4.1 trap,
+   see [Troubleshooting](#troubleshooting); the rest makes the image
+   independent of paths and clones
+   ([releasing.md → Reproducibility](releasing.md#reproducibility)).
+2. Copies `zephyr.hex`, `zephyr.bin`, `zephyr.elf`, `zephyr.map`, `.config`,
+   `zephyr.dts`, `devicetree_generated.h`, `edt.pickle` to `build/<target>/`
+   (gitignored).
 3. Runs [`tools/verify_stack.py`](../tools/verify_stack.py) on them
    (`build/<target>/verify.json`).
 4. Measures flash and RAM from `zephyr.elf` against the linker regions and the
    target's resource limits, then merges the result into
    `build/memory-report.json` and `build/memory-report.md`.
+5. Writes `build/<target>/metadata.json`: git commit and dirty flag, VERSION
+   (and whether the app's copy matches), NCS commits, toolchain image and
+   compiler, the command, Kconfig/devicetree digests, the verification result,
+   memory and every artifact's SHA-256
+   ([releasing.md → Build metadata](releasing.md#build-metadata)).
 
 ### Running Docker by hand
 
@@ -82,9 +99,12 @@ are rewritten into Windows paths (`build.py` sets it for you):
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v ncs-v3.4.1:/ncs -v ctag-build:/build \
   -v "$(pwd):/work" \
-  ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1 \
+  ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418 \
   -c 'cd /ncs && west build --no-sysbuild -d /build/tag-laowu-bw -b laowu_bw/nrf51822 /work/apps/tag -- -DZEPHYR_EXTRA_MODULES=/work'
 ```
+
+(A hand-made build like this one lacks the reproducibility flags and
+metadata.json; use `tools/build.py` for anything you publish.)
 
 (On Windows use the drive path form, e.g. `-v "C:/path/to/cremind-tag:/work"`.)
 The image's entrypoint is `bash -c`; its environment is set up by
@@ -224,6 +244,13 @@ Docker Desktop on Windows cannot pass USB devices to containers, so flash from
 the host with the artifacts in `build/<target>/`. Connect SWDIO, SWCLK, GND and
 VTref (and power the tag from its battery or a bench supply).
 
+Gateways and bridges: `cremind-tag firmware flash --target <target> --hex
+build/<target>/zephyr.hex [--dry-run]` checks the image against its
+`metadata.json` first and erases only the pages it covers; tags:
+`cremind-tag tag enroll --firmware`
+([releasing.md → First release](releasing.md#first-release-j-link-and-flashing)).
+By hand:
+
 J-Link Commander (any OS):
 
 ```bash
@@ -257,7 +284,7 @@ including the enrollment blob in `UICR.CUSTOMER[0..11]`. `--sectorerase` and
   ```bash
   docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -e ACCEPT_JLINK_LICENSE=1 \
     -v ncs-v3.4.1:/ncs -v ctag-build:/build -v "$(pwd):/work" \
-    ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1 \
+    ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418 \
     -c 'sh /jlink/install.sh && cd /ncs && west flash -d /build/tag-laowu-bw --runner jlink'
   ```
 
@@ -297,4 +324,6 @@ firmware matrix in the toolchain container with a cached west workspace
 (`python3 tools/build.py --in-container --all`; artifacts and the memory report
 are uploaded, the report is added to the job summary), and twister on
 `native_sim` for `tests/ztest`. Targets whose app does not exist yet are skipped
-with a warning.
+with a warning. [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+runs all of it for a `vX.Y.Z` tag, then builds, checks and packages the release
+([releasing.md](releasing.md)).

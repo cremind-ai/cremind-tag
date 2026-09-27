@@ -24,6 +24,10 @@
 #   resources      flash_headroom_pct: minimum free share of the FLASH region
 #                  ram_free_min: minimum bytes of RAM left after every static
 #                  allocation including stacks (null = no target set yet)
+#   release        true = publish this target although its board is not
+#                  `qualified` in hardware/matrix.yaml (docs/releasing.md).
+#                  Qualified boards are always published, `blocked` and
+#                  `documented` ones never; the manifest records the status.
 
 socs:
   nrf51822_qfaa: {series: nrf51, flash: 262144, ram: 16384}
@@ -44,6 +48,7 @@ targets:
     extra_conf: []
     extra_overlay: []
     resources: {flash_headroom_pct: 15, ram_free_min: null}
+    release: true
 
   gateway-nrf52dk:
     app: apps/gateway
@@ -56,6 +61,7 @@ targets:
     extra_overlay: []
     # RAM target pending resource qualification (CDB + provisioner).
     resources: {flash_headroom_pct: 15, ram_free_min: null}
+    release: true
 
   bridge-nrf52840dk:
     app: apps/bridge
@@ -67,6 +73,7 @@ targets:
     extra_conf: []
     extra_overlay: []
     resources: {flash_headroom_pct: 15, ram_free_min: null}
+    release: true
 
   bridge-nrf52dk:
     app: apps/bridge
@@ -78,6 +85,7 @@ targets:
     extra_conf: []
     extra_overlay: []
     resources: {flash_headroom_pct: 15, ram_free_min: 8192}
+    release: true
 
   tag-laowu-bw:
     app: apps/tag
@@ -89,6 +97,7 @@ targets:
     extra_conf: []
     extra_overlay: []
     resources: {flash_headroom_pct: 15, ram_free_min: 2048}
+    release: true
 
   tag-laowu-bwr:
     app: apps/tag
@@ -100,6 +109,7 @@ targets:
     extra_conf: []
     extra_overlay: []
     resources: {flash_headroom_pct: 15, ram_free_min: 2048}
+    release: true
 
   tag-sifei-52810:
     app: apps/tag
@@ -111,6 +121,7 @@ targets:
     extra_conf: []
     extra_overlay: []
     resources: {flash_headroom_pct: 15, ram_free_min: 3072}
+    release: false  # placeholder panel pins (panel id 255): nothing to show yet
 
   tag-hema-52811:
     app: apps/tag
@@ -122,6 +133,7 @@ targets:
     extra_conf: []
     extra_overlay: []
     resources: {flash_headroom_pct: 15, ram_free_min: 3072}
+    release: false  # placeholder panel pins (panel id 255): nothing to show yet
 
   tag-nrf52dk:
     app: apps/tag
@@ -134,3 +146,4 @@ targets:
     extra_overlay: []
     # Development tag (protocol board id NRF52DK_TAG = 20); no resource target.
     resources: {flash_headroom_pct: 15, ram_free_min: null}
+    release: true  # development tag on an nRF52 DK (no hardware entry)

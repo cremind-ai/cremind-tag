@@ -7,7 +7,21 @@ registers them. Keep heavy imports inside command bodies so `--help` stays fast.
 import typer
 
 from cremind_tag import __version__
-from cremind_tag.cli import bridge, connect, daemon, diag, doctor, fonts, gateway, mesh, preview, queue, sim, tag
+from cremind_tag.cli import (
+    bridge,
+    connect,
+    daemon,
+    diag,
+    doctor,
+    firmware,
+    fonts,
+    gateway,
+    mesh,
+    preview,
+    queue,
+    sim,
+    tag,
+)
 
 app = typer.Typer(
     name="cremind-tag",
@@ -19,6 +33,7 @@ app.add_typer(connect.app, name="connect")
 app.add_typer(daemon.app, name="daemon")
 app.add_typer(diag.app, name="diag")
 app.add_typer(doctor.app, name="doctor")
+app.add_typer(firmware.app, name="firmware")
 app.add_typer(fonts.app, name="fonts")
 app.add_typer(gateway.app, name="gateway")
 app.add_typer(mesh.app, name="mesh")

@@ -21,7 +21,7 @@ Start here: [architecture](docs/architecture.md) ·
 [protocols](docs/protocol.md) · [security](docs/security.md) ·
 [font packs](docs/fontpack.md) · [connector API](docs/connector-api.md) ·
 [hardware matrix](docs/hardware/matrix.md) · [building](docs/building.md) ·
-[companion](docs/companion.md).
+[companion](docs/companion.md) · [releasing](docs/releasing.md).
 
 ## Status
 

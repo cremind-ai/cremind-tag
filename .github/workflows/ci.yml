@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The release workflow runs these gates first (.github/workflows/release.yml).
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -15,6 +17,10 @@ env:
   # Same paths as the local Docker workflow (docs/building.md).
   NCS_DIR: /ncs
   CTAG_BUILD_ROOT: /build
+  # The toolchain image, pinned by digest: the same string as IMAGE in
+  # tools/build.py and every `container:` below (tests/tools checks all three;
+  # `container:` cannot read env). build.py records it in metadata.json.
+  CTAG_TOOLCHAIN_IMAGE: ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418
 
 jobs:
   companion:
@@ -30,8 +36,10 @@ jobs:
       - name: Companion tests
         working-directory: companion
         run: uv run pytest -q
-      - name: Tool tests (build matrix, verify_stack, board files)
+      - name: Tool tests (build matrix, verify_stack, board files, release tooling)
         run: uv run --project companion pytest tests/tools -q
+      - name: One version everywhere (VERSION, apps' Zephyr VERSION, companion)
+        run: uv run --project companion python tools/version.py --check
       - name: Generated protocol bindings, fixtures and test vectors are current
         run: |
           uv run --project companion python tools/codegen.py --check
@@ -56,7 +64,7 @@ jobs:
   ncs-workspace:
     name: NCS workspace cache
     runs-on: ubuntu-latest
-    container: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1
+    container: ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418
     defaults:
       run:
         shell: bash
@@ -78,7 +86,7 @@ jobs:
     name: Firmware build matrix
     needs: ncs-workspace
     runs-on: ubuntu-latest
-    container: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1
+    container: ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418
     defaults:
       run:
         shell: bash
@@ -121,18 +129,20 @@ jobs:
             build/memory-report.md
             build/memory-report.json
             build/*/zephyr.hex
+            build/*/zephyr.bin
             build/*/zephyr.elf
             build/*/zephyr.map
             build/*/.config
             build/*/zephyr.dts
             build/*/verify.json
+            build/*/metadata.json
             build/*/build.log
 
   twister:
     name: Twister (native_sim)
     needs: ncs-workspace
     runs-on: ubuntu-latest
-    container: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1
+    container: ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418
     defaults:
       run:
         shell: bash

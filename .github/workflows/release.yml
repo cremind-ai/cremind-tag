@@ -1,0 +1,227 @@
+name: Release
+
+# A tag vX.Y.Z (VERSION must say X.Y.Z) runs every CI gate, builds the
+# publishable firmware targets pristine in the pinned toolchain container,
+# proves them reproducible, builds the font packs and the companion, packages
+# everything with tools/release.py and uploads it to a DRAFT GitHub release.
+# Nothing is published automatically: a maintainer reviews the draft and
+# publishes it (docs/releasing.md).
+#
+# workflow_dispatch runs the same pipeline on any ref; the result is a workflow
+# artifact, plus a draft release v<VERSION> only when `draft_release` is set.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      draft_release:
+        description: "Also create or update the DRAFT GitHub release v<VERSION>"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NCS_REVISION: v3.4.1
+  NCS_DIR: /ncs
+  CTAG_BUILD_ROOT: /build
+  # Same digest as IMAGE in tools/build.py and the `container:` lines below.
+  CTAG_TOOLCHAIN_IMAGE: ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418
+
+jobs:
+  gates:
+    name: CI gates
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    name: Version, tag and release targets
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      targets: ${{ steps.v.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Sync companion environment
+        run: uv sync --project companion
+      - id: v
+        name: VERSION matches the tag and every derived copy
+        run: |
+          uv run --project companion python tools/version.py --check
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            uv run --project companion python tools/version.py --expect-tag "$GITHUB_REF_NAME"
+          fi
+          echo "version=$(uv run --project companion python tools/version.py)" >> "$GITHUB_OUTPUT"
+          echo "targets=$(uv run --project companion python tools/release.py --list-targets)" >> "$GITHUB_OUTPUT"
+
+  firmware:
+    name: Firmware (release targets, pristine)
+    needs: [gates, version]
+    runs-on: ubuntu-latest
+    container: ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history and tags: the gateway's APP_BUILD_VERSION and the
+          # bridge's build id are `git describe`, which must name the tag.
+          fetch-depth: 0
+      - uses: actions/cache/restore@v4
+        with:
+          path: /ncs
+          key: ncs-${{ env.NCS_REVISION }}-narrow-depth1-v1
+          fail-on-cache-miss: true
+      - name: Trust the checkout (container uid differs)
+        run: git config --global --add safe.directory '*'
+      - name: Build, verify controller stack, check resources, write metadata
+        # Every release target must build: exit 3 (an app is missing) fails too.
+        run: python3 tools/build.py --in-container --pristine ${{ needs.version.outputs.targets }}
+      - name: Memory report to job summary
+        if: always()
+        run: |
+          if [ -f build/memory-report.md ]; then cat build/memory-report.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-firmware
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+          path: |
+            build/memory-report.md
+            build/memory-report.json
+            build/*/zephyr.hex
+            build/*/zephyr.bin
+            build/*/zephyr.elf
+            build/*/zephyr.map
+            build/*/.config
+            build/*/zephyr.dts
+            build/*/devicetree_generated.h
+            build/*/verify.json
+            build/*/metadata.json
+            build/*/build.log
+
+  reproducibility:
+    name: Reproducibility (two checkouts, two build roots)
+    needs: [gates, version]
+    runs-on: ubuntu-latest
+    container: ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/cache/restore@v4
+        with:
+          path: /ncs
+          key: ncs-${{ env.NCS_REVISION }}-narrow-depth1-v1
+          fail-on-cache-miss: true
+      - name: Trust the checkout (container uid differs)
+        run: git config --global --add safe.directory '*'
+      - name: Build every release target twice and compare the images byte for byte
+        run: python3 tools/repro_check.py --in-container ${{ needs.version.outputs.targets }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reproducibility
+          if-no-files-found: ignore
+          path: build/repro/
+
+  fonts-determinism:
+    name: Font packs are deterministic
+    needs: [gates]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Sync companion environment
+        run: uv sync --project companion
+      - uses: actions/cache@v4
+        with:
+          path: fonts/cache
+          key: fonts-${{ hashFiles('fonts/manifest.lock.json') }}
+      - name: Fetch the pinned fonts (verified by SHA-256)
+        run: uv run --project companion cremind-tag fonts fetch
+      - name: Build dev and full twice (all processes, then one) and compare
+        run: uv run --project companion python tools/repro_check.py --no-firmware --fonts dev,full
+
+  package:
+    name: Package and draft the GitHub release
+    needs: [version, firmware, reproducibility, fonts-determinism]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Sync companion environment
+        run: uv sync --project companion
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-firmware
+          path: build
+      - uses: actions/cache@v4
+        with:
+          path: fonts/cache
+          key: fonts-${{ hashFiles('fonts/manifest.lock.json') }}
+      - name: Package dist/${{ needs.version.outputs.version }}
+        run: uv run --project companion python tools/release.py --out dist
+      - name: Check the checksums as a user would
+        run: |
+          (cd "dist/$VERSION" && sha256sum --quiet -c SHA256SUMS)
+          (cd dist && sha256sum -c "cremind-tag-$VERSION.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          if-no-files-found: error
+          retention-days: 30
+          path: dist/
+      - name: Upload to a DRAFT GitHub release (never published here)
+        if: github.ref_type == 'tag' || inputs.draft_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$VERSION"
+          dir="dist/$VERSION"
+          assets=(
+            "dist/cremind-tag-$VERSION.tar.gz" "dist/cremind-tag-$VERSION.tar.gz.sha256"
+            "$dir/release.json" "$dir/SHA256SUMS" "$dir/THIRD_PARTY_NOTICES.txt"
+            "$dir"/companion/*.whl "$dir"/companion/*.tar.gz
+            "$dir"/firmware/*/*.hex "$dir"/firmware/*/*.metadata.json
+          )
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error::release $tag is already published; a published release is never changed"
+              exit 1
+            fi
+            gh release edit "$tag" --notes-file "dist/RELEASE_NOTES-$VERSION.md"
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            extra=()
+            if [ "$GITHUB_REF_TYPE" = "tag" ]; then extra+=(--verify-tag); fi
+            case "$VERSION" in *-*) extra+=(--prerelease) ;; esac
+            gh release create "$tag" "${assets[@]}" --draft --title "Cremind Tag $VERSION" \
+              --notes-file "dist/RELEASE_NOTES-$VERSION.md" --target "$GITHUB_SHA" "${extra[@]}"
+          fi
+          echo "Draft release $tag: $(gh release view "$tag" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"

@@ -90,8 +90,13 @@ cremind-tag connect remove tagc_…
 
 ## 3. Hardware
 
-- **Gateway**: flash the gateway firmware ([building.md](building.md)), plug it
-  in, set `hardware.gateway_url`; `cremind-tag gateway info` checks it.
+- **Gateway**: flash the gateway firmware, plug it in, set
+  `hardware.gateway_url`; `cremind-tag gateway info` checks it.
+  `cremind-tag firmware flash --target gateway-nrf52840dk --hex <image>`
+  verifies a release or `build/` image against its metadata and programs it
+  over the DK's J-Link (bridges likewise); `cremind-tag firmware
+  list|verify|info` show a release's images, check one, and read a board's
+  FICR/UICR ([releasing.md](releasing.md#first-release-j-link-and-flashing)).
 - **Bridges**: provisioned from Cremind (admin: *Scan* → *Provision*, which the
   daemon executes as `scan_unprovisioned` / `provision_bridge`) or locally with
   `cremind-tag mesh scan|provision`. Each bridge needs the same font pack as the
