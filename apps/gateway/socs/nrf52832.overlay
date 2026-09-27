@@ -1,0 +1,6 @@
+/* nRF52832 gateway: the companion's link on the UART (115200 8N1). */
+/ {
+	chosen {
+		cremind,gateway-uart = &uart0;
+	};
+};

@@ -1,0 +1,24 @@
+/*
+ * nRF52 DK gateway (development stand-in for the nRF52832 + CH340 board).
+ * No bootloader: the image links from 0 into code_partition, which ends where
+ * the DK's 24 KiB storage_partition (settings) begins.
+ */
+/ {
+	chosen {
+		zephyr,code-partition = &code_partition;
+	};
+};
+
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+
+&flash0 {
+	partitions {
+		code_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "code";
+			reg = <0x00000000 0x0007a000>;
+		};
+	};
+};

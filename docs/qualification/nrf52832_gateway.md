@@ -1,10 +1,34 @@
 # Qualification report: nRF52832 gateway (`nrf52832_gateway`)
 
-Status: **documented** ([status definitions](../hardware/matrix.md))
+Status: **buildable** — subject to resource qualification ([status definitions](../hardware/matrix.md))
 
-> **TODO:** the gateway application (`apps/gateway`) is not built yet. The board stays
-> *documented* until the secure application links within this board's exact
-> memory geometry and meets the resource targets (*buildable*).
+> The gateway application (`apps/gateway`, [gateway-firmware.md](../gateway-firmware.md))
+> links within this board's exact memory geometry, passes `tools/verify_stack.py`
+> and meets the flash headroom target; no RAM target is set for this board. It
+> fits only with a smaller configuration than the nRF52840 gateway
+> (`apps/gateway/socs/nrf52832.conf`): a 5 KiB layout arena (one 4000-byte
+> layout plus a small one, or about four typical 1 KiB layouts, at most three
+> queued behind the active transfer; `BUSY` beyond), trimmed thread stacks,
+> fewer HCI and mesh buffers. **4,816 B of RAM remain after every static
+> allocation**, and the stack sizes are estimates that have not been measured:
+> qualification must run the debug build (`debug/rtt.conf`, thread analyzer)
+> through provisioning, configuration and sustained delivery and confirm every
+> stack keeps a margin (see "Resource qualification" below). Nothing has run on
+> this board yet.
+
+## Resource qualification
+
+| Item | Build value | To measure on hardware | Result |
+|---|---|---|---|
+| RAM free after static allocation | 4,816 B | - | measured at build |
+| `main` (start-up, then the gateway loop) | 3,072 B | high-water during first boot (self-configuration) and GET_INVENTORY | _pending_ |
+| System work queue | 2,560 B | high-water during provisioning (PSA ECDH, trusted storage) | _pending_ |
+| Bluetooth RX thread | 2,560 B | high-water during provisioning and results from 5 bridges | _pending_ |
+| Mesh advertiser (`BT_MESH_ADV_STACK_SIZE`) | 2,048 B | high-water during 16-segment sends | _pending_ |
+| Mesh settings work queue | 1,400 B | high-water while the CDB is stored | _pending_ |
+| PSA key slots | 20 | no `PSA_ERROR_INSUFFICIENT_MEMORY` with 5 bridges provisioned | _pending_ |
+| Delivery queue | 5 KiB arena, 3 queued | `busy` counter under the throughput test | _pending_ |
+| UART at 115200 baud | 768 B RX ring | `uart_rx_overflow` stays 0 while 4000-byte layouts stream in | _pending_ |
 
 ## 1. Identity
 
@@ -17,7 +41,7 @@ Status: **documented** ([status definitions](../hardware/matrix.md))
 | Serial link | uart_ch340 |
 | Sample(s) | _serial number / marking / source / date received_ |
 | Firmware under test | _`git describe` of the qualified build_ |
-| PSA crypto provider | _Oberon or TF-PSA-Crypto (firmware-notes correction 7)_ |
+| PSA crypto provider | Oberon (`CONFIG_PSA_CRYPTO_DRIVER_OBERON=y` in the build; the mesh requires PSA) |
 
 ## 2. Hardware verification checklist
 
@@ -41,7 +65,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| gateway-nrf52dk | not built yet | - | - | - | - | - | - | - |
+| gateway-nrf52dk | `apps/gateway` | 198,668 / 499,712 | 60.2 % (15 %) | 60,720 / 65,536 | 4,816 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -49,7 +73,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Test | Procedure | Expected | Result |
 |---|---|---|---|
-| Serial link | Companion connects over the documented link | Framing, credits and idempotency per docs/protocol.md section 1 | _pending_ |
+| Serial link | Companion connects over the documented link | Framing, credits and idempotency per docs/protocol.md section 1 | _pending_ on hardware (the protocol core is shared with the nRF52840 build, which passes the native_sim interop test) |
 | Mesh | Provision and configure; power-cycle | Network restored from settings | _pending_ |
 | Layout delivery | Deliver layouts to a tag through the mesh | Stages reported in order; RESULT returned | _pending_ |
 
@@ -83,3 +107,4 @@ Measure with development equipment disconnected, after a power-on reset.
 | Date | Status | Evidence / change |
 |---|---|---|
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
+| 2026-09-28 | buildable | `gateway-nrf52dk` builds (flash 198,668 B = 39.8 % of the 488 KiB code partition, RAM 60,720 B of 64 KiB: 4,816 B free), `verify_stack.py` 16/16; stack sizes unmeasured (resource qualification above). |

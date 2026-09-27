@@ -1,0 +1,3 @@
+rsource "../../Kconfig.gateway"
+
+source "Kconfig.zephyr"

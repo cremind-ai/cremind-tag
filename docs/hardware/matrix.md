@@ -17,8 +17,8 @@ Every board moves through these states; qualification reports in
 
 | Board | Board id | Zephyr board | MCU | Flash / RAM | Host link | Status | Notes |
 |---|---|---|---|---|---|---|---|
-| [nrf52840_gateway](../qualification/nrf52840_gateway.md) | 1 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | usb_cdc_acm | documented |  |
-| [nrf52832_gateway](../qualification/nrf52832_gateway.md) | 2 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | uart_ch340 | documented | Resource qualification pending (CDB + mesh provisioner RAM). |
+| [nrf52840_gateway](../qualification/nrf52840_gateway.md) | 1 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | usb_cdc_acm | buildable |  |
+| [nrf52832_gateway](../qualification/nrf52832_gateway.md) | 2 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | uart_ch340 | buildable | Links with 4.8 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending. |
 
 ## Bridges
 
@@ -71,8 +71,8 @@ From `build/memory-report.json` generated 2026-09-27T16:09:54+00:00 (NCS v3.4.1)
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| gateway-nrf52840dk | not built yet | - | - | - | - | - | - | - |
-| gateway-nrf52dk | not built yet | - | - | - | - | - | - | - |
+| gateway-nrf52840dk | `apps/gateway` | 229,816 / 1,015,808 | 77.4 % (15 %) | 100,244 / 262,144 | 161,900 (none) | pass (edtlib) | ok | 2026-09-27 |
+| gateway-nrf52dk | `apps/gateway` | 198,668 / 499,712 | 60.2 % (15 %) | 60,720 / 65,536 | 4,816 (none) | pass (edtlib) | ok | 2026-09-27 |
 | bridge-nrf52840dk | not built yet | - | - | - | - | - | - | - |
 | bridge-nrf52dk | not built yet | - | - | - | - | - | - | - |
 | tag-laowu-bw | `build/boardcheck` (board-check app, not the product firmware) | 104,316 / 126,976 | 17.9 % (15 %) | 14,316 / 16,384 | 2,068 (2,048) | pass (edtlib) | ok | 2026-09-27 |

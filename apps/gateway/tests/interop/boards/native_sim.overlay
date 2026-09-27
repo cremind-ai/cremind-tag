@@ -1,0 +1,6 @@
+/* The protocol's serial link on the first native PTY UART. */
+/ {
+	chosen {
+		cremind,gateway-uart = &uart0;
+	};
+};

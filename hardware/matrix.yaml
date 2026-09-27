@@ -19,7 +19,7 @@ gateways:
     flash_kib: 1024
     ram_kib: 256
     host_link: usb_cdc_acm
-    status: documented
+    status: buildable
   - id: nrf52832_gateway
     board_id: 2
     zephyr_board: nrf52dk/nrf52832
@@ -27,8 +27,8 @@ gateways:
     flash_kib: 512
     ram_kib: 64
     host_link: uart_ch340
-    status: documented
-    notes: Resource qualification pending (CDB + mesh provisioner RAM).
+    status: buildable
+    notes: Links with 4.8 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending.
 
 bridges:
   - id: nrf52840_bridge

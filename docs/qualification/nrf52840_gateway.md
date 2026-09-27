@@ -1,10 +1,12 @@
 # Qualification report: nRF52840 gateway (`nrf52840_gateway`)
 
-Status: **documented** ([status definitions](../hardware/matrix.md))
+Status: **buildable** ([status definitions](../hardware/matrix.md))
 
-> **TODO:** the gateway application (`apps/gateway`) is not built yet. The board stays
-> *documented* until the secure application links within this board's exact
-> memory geometry and meets the resource targets (*buildable*).
+> The gateway application (`apps/gateway`, [gateway-firmware.md](../gateway-firmware.md))
+> links within this board's exact memory geometry, passes `tools/verify_stack.py`
+> and meets the flash headroom target (no RAM target is set). Its serial side has
+> been exercised on `native_sim` only; nothing has run on this board yet. The
+> hardware test plan is [gateway-firmware.md §13](../gateway-firmware.md#13-hardware-test-plan).
 
 ## 1. Identity
 
@@ -17,7 +19,7 @@ Status: **documented** ([status definitions](../hardware/matrix.md))
 | Serial link | usb_cdc_acm |
 | Sample(s) | _serial number / marking / source / date received_ |
 | Firmware under test | _`git describe` of the qualified build_ |
-| PSA crypto provider | _Oberon or TF-PSA-Crypto (firmware-notes correction 7)_ |
+| PSA crypto provider | Oberon (`CONFIG_PSA_CRYPTO_DRIVER_OBERON=y` in the build; the mesh requires PSA) |
 
 ## 2. Hardware verification checklist
 
@@ -41,7 +43,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| gateway-nrf52840dk | not built yet | - | - | - | - | - | - | - |
+| gateway-nrf52840dk | `apps/gateway` | 229,816 / 1,015,808 | 77.4 % (15 %) | 100,244 / 262,144 | 161,900 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -49,9 +51,9 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Test | Procedure | Expected | Result |
 |---|---|---|---|
-| Serial link | Companion connects over the documented link | Framing, credits and idempotency per docs/protocol.md section 1 | _pending_ |
+| Serial link | Companion connects over the documented link | Framing, credits and idempotency per docs/protocol.md section 1 | _pending_ on hardware (native_sim: the companion's `GatewayClient` against the gateway core over a PTY passes 8/8 scenarios, `apps/gateway/tests/interop`, 2026-09-28) |
 | Mesh | Provision and configure; power-cycle | Network restored from settings | _pending_ |
-| Layout delivery | Deliver layouts to a tag through the mesh | Stages reported in order; RESULT returned | _pending_ |
+| Layout delivery | Deliver layouts to a tag through the mesh | Stages reported in order; RESULT returned | _pending_ (native_sim, simulated mesh: passes) |
 
 ## 5. Power
 
@@ -83,3 +85,4 @@ Measure with development equipment disconnected, after a power-on reset.
 | Date | Status | Evidence / change |
 |---|---|---|
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
+| 2026-09-28 | buildable | `gateway-nrf52840dk` builds (flash 229,816 B = 22.6 % of the 992 KiB code partition, RAM 100,244 B of 256 KiB), `verify_stack.py` 16/16; core ztests and the native_sim interop test pass. |

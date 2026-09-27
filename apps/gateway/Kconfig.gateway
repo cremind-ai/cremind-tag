@@ -1,0 +1,144 @@
+# Gateway options shared by the application (Kconfig) and its native_sim
+# builds (tests/*/Kconfig). docs/gateway-firmware.md explains each.
+
+menu "Cremind Tag gateway"
+
+config CTAG_GW_BOARD_ID
+	int "Protocol board id reported in caps.board"
+	default 1
+	help
+	  protocol/spec.yaml boards: 1 = NRF52840DK_GATEWAY, 2 =
+	  NRF52832_GATEWAY. Set per SoC in socs/<soc>.conf.
+
+config CTAG_GW_SERIAL_CREDITS
+	int "Serial: requests the host may have outstanding (caps.credits)"
+	default 4
+	range 1 32
+	help
+	  Every request is processed as soon as its frame completes; its
+	  response waits in one of these slots until the host grants a credit.
+	  The credit of a request is returned with its response.
+
+config CTAG_GW_TX_FRAME
+	int "Serial: largest decoded frame the gateway sends (bytes)"
+	default 2048
+	range 512 4096
+	help
+	  Bounds INFO, LIST_NODES and GET_INVENTORY answers and EVT_BRIDGE_INFO.
+	  A full inventory (MAX_BRIDGES bridges, MAX_TAGS assignments, health
+	  counters) needs about 1.9 KiB.
+
+config CTAG_GW_EVENT_MAX
+	int "Serial: largest retained event payload (bytes)"
+	default 96
+	range 64 255
+	help
+	  One slot of the SERIAL_EVENT_RETAIN ring. EVT_RESULT, the largest
+	  retained event, encodes to at most 86 bytes.
+
+config CTAG_GW_EVQ_BYTES
+	int "Serial: best-effort event FIFO (bytes)"
+	default 1024
+	range 256 8192
+	help
+	  EVT_STAGE, EVT_UNPROV_BEACON, EVT_TAG_SEEN, EVT_BRIDGE_INFO and EVT_LOG
+	  waiting for a host credit; a full FIFO drops the new event
+	  (events_discarded).
+
+config CTAG_GW_DELIVERY_QUEUE
+	int "Delivery queue: layouts waiting behind the active transfer"
+	default 4
+	range 1 16
+	help
+	  DELIVER_LAYOUT answers BUSY when this many layouts are queued, or when
+	  the layout arena has no room for the new one.
+
+config CTAG_GW_LAYOUT_ARENA
+	int "Delivery queue: bytes for the queued and active layouts"
+	default 20480
+	range 4096 65536
+	help
+	  Layouts are stored back to back (4-byte header, 4-byte aligned) and
+	  released in order. At least CTAG_GW_LAYOUT_MAX + 4 so that the largest
+	  layout always fits an empty queue; typical layouts are about 1 KiB.
+
+config CTAG_GW_LAYOUT_MAX
+	int "Delivery queue: largest layout accepted (bytes)"
+	default 4000
+	range 150 4096
+	help
+	  LAYOUT_SERIAL_MAX (4000) is the largest layout the companion sends;
+	  anything larger answers TOO_LARGE.
+
+config CTAG_GW_AT_BRIDGE
+	int "Deliveries remembered while their bridge works on them"
+	default 16
+	range 1 64
+	help
+	  Validated layouts waiting for their DELIVERY_RESULT (for CANCEL_DELIVERY
+	  and timing.mesh_ms). The oldest entry is forgotten when full.
+
+config CTAG_GW_MESH_OPS
+	int "ASSIGN_TAG / UNASSIGN_TAG / TAG_COMMAND operations in flight"
+	default 8
+	range 1 32
+
+config CTAG_GW_RESULT_DEDUP
+	int "(bridge, result_seq) pairs remembered for de-duplication"
+	default 64
+	range 8 512
+
+config CTAG_GW_REPORTED
+	int "update_ids remembered as reported (one EVT_RESULT each)"
+	default 64
+	range 8 512
+	help
+	  docs/protocol.md 10: exactly one EVT_RESULT per update_id. A later
+	  result for a remembered update_id is acknowledged to the bridge and
+	  dropped.
+
+config CTAG_GW_ASSIGN_MAX
+	int "Assignments remembered for the inventory"
+	default 32
+	range 1 128
+
+config CTAG_GW_NAME_MAX
+	int "Longest bridge name kept (bytes)"
+	default 32
+	range 8 64
+
+config CTAG_GW_UNSEG_QUEUE
+	int "Unsegmented mesh messages waiting for an advertising buffer"
+	default 16
+	range 4 64
+
+config CTAG_GW_TAG_SEEN_INTERVAL_MS
+	int "EVT_TAG_SEEN: minimum interval per (bridge, tag) (ms)"
+	default 10000
+	range 0 600000
+
+config CTAG_GW_STATUS_TIMEOUT_MS
+	int "LAYOUT_STATUS wait after a commit (ms)"
+	default 10000
+
+config CTAG_GW_REPLY_TIMEOUT_MS
+	int "ASSIGN_STATUS and configuration-client reply wait (ms)"
+	default 5000
+
+config CTAG_GW_PROVISION_TIMEOUT_MS
+	int "Provisioning guard: EVT_PROVISIONED TIMEOUT after (ms)"
+	default 90000
+
+config CTAG_GW_UART_RX_RING
+	int "Serial driver: receive ring (bytes)"
+	default 1024
+
+config CTAG_GW_UART_TX_RING
+	int "Serial driver: transmit ring (bytes)"
+	default 1024
+
+config CTAG_GW_EVQ_DEPTH
+	int "Mesh/provisioning events queued for the gateway loop"
+	default 24
+
+endmenu

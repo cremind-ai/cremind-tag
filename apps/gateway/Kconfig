@@ -1,0 +1,5 @@
+# Cremind Tag gateway application options (docs/gateway-firmware.md).
+
+rsource "Kconfig.gateway"
+
+source "Kconfig.zephyr"

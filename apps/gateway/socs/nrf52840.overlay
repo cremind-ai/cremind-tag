@@ -1,0 +1,16 @@
+/*
+ * nRF52840 gateway: entropy from the RNG peripheral (firmware-notes
+ * correction 9) and the companion's link on a USB CDC ACM UART.
+ */
+/ {
+	chosen {
+		zephyr,entropy = &rng;
+		cremind,gateway-uart = &cdc_acm_uart0;
+	};
+};
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
