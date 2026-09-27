@@ -56,7 +56,7 @@ from .outbox import OutboxSender
 from .schema import open_database
 from .screens import ScreenScheduler
 from .settings import DaemonSettings
-from .store import Effects, QueueStore
+from .store import RECEIPTS_IN_ORDER, Effects, QueueStore
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -314,7 +314,8 @@ class DaemonService:
                                           " OR state = 'sent' LIMIT 1", (now,)).fetchone():
                 return False  # something is due, or on its way to a tag and its result still to come
             if live and conn.execute(f"SELECT 1 FROM outbox WHERE dead = 0 AND next_attempt_ts <= ? AND credential_id"
-                                     f" IN ({','.join('?' * len(live))}) LIMIT 1", (now, *live)).fetchone():
+                                     f" IN ({','.join('?' * len(live))}) AND {RECEIPTS_IN_ORDER} LIMIT 1",
+                                     (now, *live, now)).fetchone():
                 return False
         return True
 

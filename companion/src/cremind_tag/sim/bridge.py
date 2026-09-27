@@ -259,8 +259,15 @@ class SimBridge:
         await self.maint.stop()
 
     async def reboot(self) -> None:
-        """Lose RAM state; settings (mesh, assignments) and flash (packs, pending layouts) survive."""
+        """Lose RAM state; settings (mesh, assignments) and flash (packs, pending layouts) survive.
+
+        RAM work stops too: results waiting for their ``RESULT_ACK`` are not re-sent
+        (docs/bridge-firmware.md §3: kept in RAM only; the companion re-sends the revision
+        after ``result_timeout_s`` and the history answers it), queued mesh sends are lost
+        and a resume recovery ends.
+        """
         self.counters["reboots"] += 1
+        self._tasks.cancel_others()
         self.maint.drop_connection()
         self.maint.new_boot()
         if self._session_task is not None:

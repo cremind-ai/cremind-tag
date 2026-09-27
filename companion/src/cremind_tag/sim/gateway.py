@@ -216,6 +216,8 @@ class SimGateway:
         self.endpoint.drop_connection()
         await self._tasks.cancel_all()
         self._slots.clear()
+        self._seen_results.clear()  # results de-duplication is RAM (docs/gateway-firmware.md §6)
+        self._reported.clear()
         self._queue.clear()
         self._by_update.clear()
         self._status_waiters.clear()

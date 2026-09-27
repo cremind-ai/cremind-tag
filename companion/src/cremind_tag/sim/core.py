@@ -139,5 +139,16 @@ class TaskSet:
                 await task
         self._tasks.clear()
 
+    def cancel_others(self) -> int:
+        """Cancel every task but the caller's (a device reset drops its RAM work and may run inside one of
+        its own tasks); returns how many were cancelled."""
+        current = asyncio.current_task()
+        cancelled = 0
+        for task in list(self._tasks):
+            if task is not current and not task.done():
+                task.cancel()
+                cancelled += 1
+        return cancelled
+
     def __len__(self) -> int:
         return len(self._tasks)

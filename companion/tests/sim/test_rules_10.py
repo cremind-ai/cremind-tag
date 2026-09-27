@@ -67,6 +67,26 @@ def test_one_result_per_update_id(tiny_pack: bytes, card: Card) -> None:
     run_scenario(scenario())
 
 
+def test_a_rebooted_gateway_forgets_which_results_it_reported(tiny_pack: bytes) -> None:
+    """Results de-duplication is RAM (docs/gateway-firmware.md §6; the simulator reboots with empty RAM state):
+    a bridge's result re-sent after a gateway reboot (its RESULT_ACK was lost) is reported in the new boot."""
+    from cremind_tag.protocol.msgs import MeshDeliveryResult
+
+    async def scenario() -> None:
+        async with SimHarness(fontpack=tiny_pack, seed=33) as h:
+            gateway = h.sim.gateway
+            tag_id = h.tag_ids[0]
+            result = MeshDeliveryResult(7, 900, tag_id, 1, 1, Status.OK, bytes(8), 3000, 0, 0, 0, 0)
+            gateway._on_result(h.tag_bridge(tag_id), result)
+            gateway._on_result(h.tag_bridge(tag_id), result)  # re-sent in the same boot: de-duplicated
+            assert (gateway.counters["results"], gateway.counters["duplicate_results"]) == (1, 1)
+            await gateway.reboot()
+            gateway._on_result(h.tag_bridge(tag_id), result)
+            assert gateway.counters["results"] == 2
+
+    run_scenario(scenario())
+
+
 def test_status_loss_fault_spec() -> None:
     faults = SimFaults()
     parse_fault("status-loss=2", faults)

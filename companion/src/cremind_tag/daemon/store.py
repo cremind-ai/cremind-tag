@@ -71,6 +71,11 @@ NOT_FOUND_ESCALATE = 3
 """``EVT_RESULT NOT_FOUND`` answers for one revision before it is treated as a security stop (§10)."""
 LAYOUT_STATUSES = frozenset({Status.INVALID, Status.TOO_LARGE, Status.UNSUPPORTED})
 """Results that fail the revision (and the deliveries it shows) but not the tag."""
+RECEIPTS_IN_ORDER = ("NOT (outbox.kind = 'receipts' AND EXISTS (SELECT 1 FROM outbox older"
+                     " WHERE older.credential_id = outbox.credential_id AND older.dead = 0"
+                     " AND older.kind = 'receipts' AND older.id < outbox.id AND older.next_attempt_ts > ?))")
+"""SQL condition (one parameter: now) on an ``outbox`` row: not a receipts row behind an older receipts row
+that waits for its retry. Receipts are posted in the order they were committed."""
 
 
 def _status(value: int | Status) -> Status | int:
@@ -910,13 +915,17 @@ class QueueStore:
     # -- gateway results -------------------------------------------------------------
 
     def apply_stage(self, tag_id: int, revision: int, stage: str) -> bool:
-        """``EVT_STAGE`` (best effort): a non-terminal receipt for the revision's deliveries."""
+        """``EVT_STAGE`` (best effort): a non-terminal receipt for the revision's deliveries.
+
+        A revision superseded here while the bridge already transfers it still reaches the tag (its ``OK`` is
+        recorded as displayed, :meth:`apply_result`), so its stages count too; cards that left the set meanwhile
+        have an outcome and get no receipt."""
         if stage not in STAGE_RANK or stage in ("queued", "companion_accepted", "displayed"):
             return False
         _, now_iso = self._now()
         with self.db.transaction() as conn:
             row = conn.execute("SELECT * FROM revisions WHERE tag_id = ? AND revision = ?"
-                               " AND state IN ('pending', 'sent')", (tag_id, revision)).fetchone()
+                               " AND state IN ('pending', 'sent', 'superseded')", (tag_id, revision)).fetchone()
             if row is None:
                 return False
             rev = RevisionRow.from_row(row)
@@ -1268,16 +1277,23 @@ class QueueStore:
             self._enqueue(conn, kind, credential_id, payload, now_iso, dedupe_key)
 
     def due_outbox(self, credential_id: str, limit: int = 50) -> list[OutboxRow]:
+        """Rows to send now, oldest first. Receipts go out strictly in order: a receipts row waiting for its
+        retry holds back the newer receipts rows (:data:`RECEIPTS_IN_ORDER`), so a later stage or outcome never
+        overtakes an earlier one and an outage costs one receipts request per back-off, not one per row."""
         now = self.clock()
         with self.db.reading() as conn:
             rows = conn.execute("SELECT * FROM outbox WHERE credential_id = ? AND dead = 0 AND next_attempt_ts <= ?"
-                                " ORDER BY id LIMIT ?", (credential_id, now, limit)).fetchall()
+                                f" AND {RECEIPTS_IN_ORDER} ORDER BY id LIMIT ?",
+                                (credential_id, now, now, limit)).fetchall()
         return [OutboxRow.from_row(r) for r in rows]
 
     def next_outbox_ts(self, credential_id: str) -> float | None:
+        """When :meth:`due_outbox` next returns something: the oldest receipts row decides for the receipts."""
         with self.db.reading() as conn:
-            return conn.execute("SELECT MIN(next_attempt_ts) FROM outbox WHERE credential_id = ? AND dead = 0",
-                                (credential_id,)).fetchone()[0]
+            return conn.execute(
+                "SELECT MIN(next_attempt_ts) FROM outbox WHERE credential_id = ? AND dead = 0 AND (kind != 'receipts'"
+                " OR id = (SELECT MIN(id) FROM outbox WHERE credential_id = ? AND dead = 0 AND kind = 'receipts'))",
+                (credential_id, credential_id)).fetchone()[0]
 
     def outbox_done(self, ids: Sequence[int]) -> None:
         if not ids:
@@ -1491,7 +1507,7 @@ class QueueStore:
 
 
 __all__ = [
-    "INSTRUCTION_KINDS", "LAYOUT_STATUSES", "LINK_STATUSES", "NOT_FOUND_ESCALATE", "SECURITY_STATUSES", "STAGES", "STAGE_RANK",
-    "STALE_REVISION_JUMP", "CommandRow", "ComposeInput", "Effects", "JobRow", "OpResult", "OutboxRow",
+    "INSTRUCTION_KINDS", "LAYOUT_STATUSES", "LINK_STATUSES", "NOT_FOUND_ESCALATE", "RECEIPTS_IN_ORDER",
+    "SECURITY_STATUSES", "STAGES", "STAGE_RANK", "STALE_REVISION_JUMP", "CommandRow", "ComposeInput", "Effects", "JobRow", "OpResult", "OutboxRow",
     "PageOutcome", "QueueStore", "RevisionRow", "StreamRow", "SyncOutcome", "TagView", "status_name", "ts_iso",
 ]

@@ -328,8 +328,10 @@ class ScreenScheduler:
                      rev.revision, status_name(status), ", duplicate" if ack.duplicate else "", tag.bridge_addr,
                      tag.epoch)
         elif status in (Status.BUSY, Status.NO_RESOURCES):
+            # Back-pressure, not a failure: not counted, so a burst of BUSY never inflates the exponential
+            # back-off of a later link failure (retry_delay(attempts)).
             await svc.db.run(lambda: store.defer(rev.tag_id, rev.revision, status_name(status),
-                                                 min(store.retry_initial_s, 2.0)))
+                                                 min(store.retry_initial_s, 2.0), count_attempt=False))
         elif status in (Status.INVALID, Status.TOO_LARGE, Status.UNSUPPORTED):
             svc.apply_effects(await svc.db.run(store.fail_revision, rev.tag_id, rev.revision, int(status),
                                                f"DELIVER_LAYOUT answered {status_name(status)}"

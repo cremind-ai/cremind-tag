@@ -51,4 +51,5 @@ addopts = ["--import-mode=importlib"]
 markers = [
     "network: needs network access (downloads pinned fonts)",
     "fonts: needs the pinned font cache (cremind-tag fonts fetch)",
+    "slow: long simulated scale/fault runs (tests/scale; CREMIND_TAG_SCALE_FULL=1 for the full 200-trial run)",
 ]

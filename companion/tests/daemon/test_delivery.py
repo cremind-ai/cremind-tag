@@ -256,6 +256,26 @@ def test_gateway_reboot_redelivers_what_was_in_flight(make_rig: Any) -> None:
     run_scenario(scenario(), timeout=100)
 
 
+def test_busy_back_pressure_is_not_a_failed_attempt(make_rig: Any) -> None:
+    """A gateway queue that stays full answers BUSY again and again: back-pressure, not a failure. Counted as
+    attempts it grew the exponential back-off a later link failure uses (retry_delay(attempts), up to 600 s)."""
+
+    async def scenario() -> None:
+        async with make_rig(tags=2, delivery_queue=1) as rig:
+            rig.sim.gateway.pause_deliveries()  # one delivery takes the only slot and stays there
+            await rig.start()
+            ids = [rig.fake.add_job("alice", rig.hw(i), title=f"Card for tag {i + 1}") for i in range(2)]
+            await rig.wait(lambda: rig.sim.gateway.counters["busy"] >= 5, what="BUSY answers")
+            with rig.db() as db, db.reading() as conn:
+                attempts = {r["state"]: r["attempts"] for r in conn.execute("SELECT state, attempts FROM revisions")}
+            assert attempts == {"sent": 1, "pending": 0}, attempts
+            rig.sim.gateway.resume_deliveries()
+            await displayed(rig, *ids)
+            rig.assert_consistent_receipts()
+
+    run_scenario(scenario(), timeout=100)
+
+
 def test_progress_updates_follow_the_cadence(make_rig: Any) -> None:
     async def scenario() -> None:
         async with make_rig() as rig:

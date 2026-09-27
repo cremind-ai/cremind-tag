@@ -230,3 +230,47 @@ def test_a_progress_update_during_composition_is_not_lost(tmp_path: Path) -> Non
     assert view.progress_pending  # still to do
     assert TAG in s.tags_needing_work()[0]
     assert s.get_job(502).state == "active"
+
+
+def test_receipts_are_posted_in_order_after_a_failed_post(tmp_path: Path) -> None:
+    """A receipts row waiting for its retry holds back newer receipts rows: a later stage (the terminal
+    outcome) never overtakes an earlier one, and an outage costs one receipts POST per back-off."""
+    now = [1000.0]
+    s = store(tmp_path)
+    s.clock = lambda: now[0]
+    for payload in ({"receipts": [{"delivery_id": 501, "stage": "transferring"}]},
+                    {"receipts": [{"delivery_id": 501, "stage": "displayed", "outcome": "displayed"}]}):
+        s.enqueue("receipts", "cred", payload)
+    s.enqueue("previews", "cred", {"tag_id": "1A2B3C4D", "revision": 1})
+    rows = s.due_outbox("cred", 50)
+    assert [r.kind for r in rows] == ["receipts", "receipts", "previews"]
+    s.outbox_retry([rows[0].id], "HTTP 503", 30.0)  # the first POST failed (it carried only the first row)
+    s.enqueue("receipts", "cred", {"receipts": [{"delivery_id": 502, "stage": "gateway_received"}]})
+    assert [r.kind for r in s.due_outbox("cred", 50)] == ["previews"]  # other kinds keep their own back-off
+    assert s.next_outbox_ts("cred") <= now[0]  # the preview is due now
+    s.outbox_done([r.id for r in s.due_outbox("cred", 50)])
+    assert s.due_outbox("cred", 50) == []
+    assert s.next_outbox_ts("cred") == 1030.0  # the oldest receipts row decides
+    now[0] = 1030.0
+    due = s.due_outbox("cred", 50)
+    assert [r.payload["receipts"][0]["stage"] for r in due] == ["transferring", "displayed", "gateway_received"]
+
+
+def test_stages_of_a_revision_superseded_while_in_flight_are_receipted(tmp_path: Path) -> None:
+    """A newer screen supersedes revision R here while the bridge already transfers R to the tag: R's stages
+    (and its OK) still happen on the tag, so its cards get transferring/refreshing, not a jump to displayed."""
+    from cremind_tag.protocol.ids import Status
+
+    s = store(tmp_path)
+    s.apply_sync("cred", sync_result([job(501, 1), job(502, 2, replace_key="k502")], 2))
+    older = sent_revision(s, [501])
+    sent_revision(s, [501, 502])  # composed after 502 arrived: supersedes the older one
+    assert s.get_revision(TAG, older.revision).state == "superseded"
+    assert s.apply_stage(TAG, older.revision, "transferring")
+    assert s.apply_stage(TAG, older.revision, "refreshing")
+    result(s, older, Status.OK)
+    stages = [r["stage"] for p in outbox(s, "receipts") for r in p["receipts"] if r["delivery_id"] == 501]
+    assert stages == ["gateway_received", "transferring", "refreshing", "displayed"]
+    with s.db.transaction() as conn:  # a card that left the set (resolved) is not receipted by a stale screen
+        conn.execute("UPDATE jobs SET outcome = 'superseded', state = 'resolved' WHERE delivery_id = 502")
+    assert not s.apply_stage(TAG, older.revision + 1, "transferring")  # 501 is displayed, 502 left the set

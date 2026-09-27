@@ -9,8 +9,12 @@ stage backwards, ``accepted`` only moves ``queued`` deliveries, a command
 result is idempotent for the same status).
 
 Errors: transient ones (5xx, network) retry with bounded exponential back-off
-per row; a 4xx refusal marks the row dead (kept for ``cremind-tag queue`` and
-diagnostics); 401/403 stop the sender, a TLS misconfiguration pauses it for
+per row, and the sender itself pauses for that back-off (growing while Cremind
+keeps failing), so an outage costs one request per back-off rather than one
+per queued row; receipts rows go out in commit order (a receipts row waiting
+for its retry holds back the newer ones, :meth:`QueueStore.due_outbox`). A 4xx
+refusal marks the row dead (kept for ``cremind-tag queue`` and diagnostics);
+401/403 stop the sender, a TLS misconfiguration pauses it for
 ``tls_retry_s``; both are reported in ``daemon status``.
 
 ``POST receipts`` may list ``rejected`` receipts: ``terminal``, ``not_owned``
@@ -55,6 +59,8 @@ class OutboxSender:
         self.client = client
         self.credential_id = client.credential_id
         self._wake = asyncio.Event()
+        self._backoff = Backoff(1.0, svc.settings.connector_retry_max_s)
+        self._pause = 0.0
         self.sent = 0
         self.stopped: str | None = None
 
@@ -69,6 +75,11 @@ class OutboxSender:
             if rows:
                 if not await self._send_batch(rows):
                     return
+                if self._pause:
+                    # Cremind failed transiently (or its TLS is misconfigured): nothing more from this credential
+                    # until the back-off ends, new rows included — one request per back-off, not one per row.
+                    pause, self._pause = self._pause, 0.0
+                    await asyncio.sleep(pause)
                 continue
             next_ts = await self.svc.db.run(store.next_outbox_ts, self.credential_id)
             timeout = None if next_ts is None else max(0.05, next_ts - self.svc.clock())
@@ -100,6 +111,7 @@ class OutboxSender:
             log.error("outbox: credential=%s TLS problem (retry in %.0fs): %s", self.credential_id,
                       self.svc.settings.tls_retry_s, exc)
             await self.svc.db.run(self.svc.store.outbox_retry, ids, str(exc), self.svc.settings.tls_retry_s)
+            self._pause = self.svc.settings.tls_retry_s
             return True
         except ConnectorConflict as exc:
             if first.kind == "previews" and exc.code == "epoch_mismatch":
@@ -122,12 +134,15 @@ class OutboxSender:
             await self.svc.db.run(self.svc.store.outbox_dead, ids, str(exc))
             return True
         except ConnectorError as exc:
-            delay = Backoff.delay_for(first.attempts, 1.0, self.svc.settings.connector_retry_max_s)
+            delay = max(Backoff.delay_for(first.attempts, 1.0, self.svc.settings.connector_retry_max_s),
+                        self._backoff.next())
             log.info("outbox: credential=%s kind=%s will retry in %.1fs: %s", self.credential_id, first.kind, delay,
                      exc)
             await self.svc.db.run(self.svc.store.outbox_retry, ids, str(exc), delay)
+            self._pause = delay
             return True
         await self.svc.db.run(self.svc.store.outbox_done, ids)
+        self._backoff.reset()
         self.svc.credential_ok(self.credential_id)
         self.sent += len(batch)
         return True

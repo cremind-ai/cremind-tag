@@ -303,6 +303,35 @@ def test_disconnect_mid_transfer_restarts_from_offset_zero(tiny_pack: bytes, car
     run_scenario(scenario())
 
 
+def test_bridge_reset_drops_results_waiting_for_their_ack(tiny_pack: bytes, card: Card) -> None:
+    """Results waiting for RESULT_ACK are RAM only (docs/bridge-firmware.md §3): a reset loses them; the
+    companion's re-delivery of the revision (result_timeout_s) gets the stored result from the history."""
+
+    async def scenario() -> None:
+        async with SimHarness(fontpack=tiny_pack, seed=28) as h:
+            tag_id = h.tag_ids[0]
+            bridge = h.sim.bridge(0)
+            h.sim.mesh.faults.result_loss = 1.0  # every DELIVERY_RESULT is lost: the bridge keeps re-sending
+            layout = card(0)
+            lost = await h.deliver(tag_id, layout, revision=1)
+            while h.sim.mesh.counters["lost_MeshDeliveryResult"] < 2:  # no gateway event to wake a wait_until
+                await h.sim.clock.sleep_ms(50.0)
+            sent = h.sim.mesh.counters["sent_MeshDeliveryResult"]
+            assert sent < 6  # re-sends are still to come (1 + MESH_RESULT_RETRIES in all)
+            await bridge.reboot()
+            h.sim.mesh.faults.result_loss = 0.0
+            await h.sim.clock.sleep_ms(3 * 2000.0)  # longer than MESH_RESULT_RETRY_MS: no re-send came
+            assert h.sim.mesh.counters["sent_MeshDeliveryResult"] == sent
+            assert lost.update_id not in h.results
+            assert h.sim.tag(tag_id).displayed_digest == expected_digest(layout, tiny_pack)
+            again = await h.deliver(tag_id, layout, revision=1)  # the same revision, a new update_id
+            result = await h.wait_result(again.update_id)
+            assert result.status == Status.OK and result.digest == expected_digest(layout, tiny_pack)[:8]
+            assert h.sim.tag(tag_id).stats["refreshes"] == 1  # answered from the history, not redrawn
+
+    run_scenario(scenario())
+
+
 def test_suspend_failures_are_retried(tiny_pack: bytes, card: Card) -> None:
     config = make_config(fontpack=tiny_pack, seed=25)
     config.faults.bridge.suspend_fail_next = 2

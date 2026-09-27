@@ -104,14 +104,17 @@ class ContentWorker:
                 self.svc.credential_warning(self.credential_id, exc)
                 log.error("content: credential=%s TLS problem (retry in %.0fs): %s", self.credential_id,
                           settings.tls_retry_s, exc)
-                await self._sleep(settings.tls_retry_s)
+                await asyncio.sleep(settings.tls_retry_s)  # see below: a due sync must not cut it short
             except ConnectorError as exc:
                 delay = backoff.next()
                 self.state, self.error = "retrying", str(exc)
                 log.warning("content: credential=%s retry in %.1fs: %s", self.credential_id, delay, exc)
-                await self._sleep(delay)
+                # The whole back-off, even when a sync is due: the sync is usually what just failed, and
+                # _sleep() returns at once while one is due — Cremind would be retried in a tight loop.
+                await asyncio.sleep(delay)
 
     async def _sleep(self, seconds: float) -> None:
+        """The poll interval: cut short by a wake-up or a sync that became due."""
         self._wake.clear()
         if self._sync_due():
             return

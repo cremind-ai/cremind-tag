@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from cremind_tag.connector.client import Credential
+from cremind_tag.daemon.store import STAGES
 from cremind_tag.sim.harness import run_scenario
 
 pytestmark = pytest.mark.timeout(150)
@@ -148,6 +149,45 @@ def test_transient_errors_are_retried(make_rig: Any) -> None:
     run_scenario(scenario(), timeout=100)
 
 
+def test_the_outbox_backs_off_as_a_whole_while_cremind_fails(make_rig: Any) -> None:
+    """During an outage the outbox makes one request per back-off, not one per queued row, and afterwards
+    everything arrives, receipts in the order they were committed."""
+    import httpx
+
+    async def scenario() -> None:
+        async with make_rig(settings={"connector_retry_max_s": 2.0}) as rig:
+            outage = [True]
+            posts: list[str] = []
+            handle = rig.fake.handle
+
+            async def wire(request: httpx.Request) -> httpx.Response:
+                route = request.url.path.rsplit("/", 1)[-1]
+                if request.method == "POST" and route in ("receipts", "previews", "accepted"):
+                    posts.append(route)
+                    if outage[0]:
+                        return httpx.Response(503, json={"error": "unavailable", "detail": "down for the test"})
+                return await handle(request)
+
+            rig.fake.transport = httpx.MockTransport(wire)
+            await rig.start()
+            ids = [rig.fake.add_job("alice", rig.hw(), title=f"Written during the outage {i}") for i in range(3)]
+            await rig.wait(lambda: all(rig.job_state(d) == ("active", "displayed") for d in ids),
+                           what="displayed on the tag (Cremind not told yet)")
+            await asyncio.sleep(2.0)
+            with rig.db() as db, db.reading() as conn:
+                rows = conn.execute("SELECT COUNT(*) FROM outbox WHERE dead = 0").fetchone()[0]
+            assert rows >= 5  # accepted, previews and several receipts rows are waiting
+            assert len(posts) <= 6, posts  # 1 + 2 + 2 + 2 s of back-off, not one request per row
+            outage[0] = False
+            await rig.wait(lambda: all(rig.stage(d) == "displayed" for d in ids), what="Cremind catches up")
+            for d in ids:
+                stages = [r["stage"] for r in rig.fake.receipt_log if r["delivery_id"] == d]
+                assert stages == sorted(stages, key=lambda s: STAGES.index(s)), stages
+            rig.assert_consistent_receipts()
+
+    run_scenario(scenario(), timeout=100)
+
+
 def test_an_epoch_mismatch_rejection_resyncs_and_resends(make_rig: Any) -> None:
     async def scenario() -> None:
         async with make_rig() as rig:
@@ -181,6 +221,37 @@ def test_a_tls_error_pauses_and_retries_instead_of_stopping(make_rig: Any) -> No
             await rig.wait(lambda: rig.stage(did) == "displayed", what="displayed after the retry")
             assert not svc.failed_credentials
             await rig.wait(lambda: not svc.credential_warnings, what="the warning cleared")
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_a_failing_sync_is_retried_with_back_off_not_in_a_loop(make_rig: Any) -> None:
+    """The sync is what fails while Cremind is down (at start, after a 410, every resync_s): the worker must
+    wait its back-off, not retry at once because a sync is still due."""
+
+    async def scenario() -> None:
+        async with make_rig(settings={"connector_retry_max_s": 0.4}) as rig:
+            rig.fake.fail_next["sync"] = [503] * 200
+            svc = await rig.start()
+            await asyncio.sleep(1.5)
+            syncs = sum(1 for _, route, _ in rig.fake.requests if route == "/sync")
+            assert 2 <= syncs <= 8, syncs  # one per 0.4 s back-off, not hundreds
+            rig.fake.fail_next["sync"] = []
+            did = rig.fake.add_job("alice", rig.hw(), title="After the outage")
+            await rig.wait(lambda: rig.stage(did) == "displayed", what="displayed once Cremind answers")
+            assert svc.content_workers[rig.content_cred.id].state == "running"
+
+    run_scenario(scenario(), timeout=100)
+
+
+def test_a_tls_error_on_the_first_sync_waits_tls_retry_s(make_rig: Any) -> None:
+    async def scenario() -> None:
+        async with make_rig(settings={"tls_retry_s": 30.0}) as rig:
+            rig.fake.tls_fail_next = 100
+            await rig.start()
+            await asyncio.sleep(1.0)
+            syncs = sum(1 for _, route, _ in rig.fake.requests if route == "/sync")
+            assert syncs == 1, syncs  # then quiet for tls_retry_s
 
     run_scenario(scenario(), timeout=100)
 
