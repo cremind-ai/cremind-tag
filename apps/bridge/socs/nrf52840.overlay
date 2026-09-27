@@ -1,0 +1,16 @@
+/*
+ * nRF52840 bridge: entropy from the RNG peripheral (firmware-notes
+ * correction 9) and the maintenance port on a USB CDC ACM UART.
+ */
+/ {
+	chosen {
+		zephyr,entropy = &rng;
+		cremind,bridge-maint = &cdc_acm_uart0;
+	};
+};
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};

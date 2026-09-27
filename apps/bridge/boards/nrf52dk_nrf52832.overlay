@@ -1,0 +1,56 @@
+/*
+ * nRF52 DK bridge.
+ *
+ * - An external SPI NOR on DK-free Arduino header pins. PLACEHOLDERS until an
+ *   nRF52832 bridge board is chosen (docs/bridge-firmware.md): SCK P0.25,
+ *   MOSI P0.23, MISO P0.24 (the DK's arduino_spi = SPIM2), CS P0.22 (header
+ *   D10); an 8 MiB MX25R6435F-compatible part.
+ * - No bootloader: the image links from 0 into code_partition, which ends
+ *   where the settings storage begins.
+ */
+/ {
+	chosen {
+		cremind,bridge-flash = &ext_flash;
+		zephyr,code-partition = &code_partition;
+	};
+};
+
+&spi2 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+
+	ext_flash: flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		jedec-id = [c2 28 17];
+		size = <67108864>; /* bits: 8 MiB */
+		has-dpd;
+		t-enter-dpd = <10000>;
+		t-exit-dpd = <35000>;
+	};
+};
+
+/* Not used by the bridge. */
+&spi1 {
+	status = "disabled";
+};
+
+&i2c0 {
+	status = "disabled";
+};
+
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+
+&flash0 {
+	partitions {
+		code_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "code";
+			reg = <0x00000000 0x0007a000>;
+		};
+	};
+};

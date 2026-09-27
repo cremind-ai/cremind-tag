@@ -1,0 +1,11 @@
+# Built by twister (build only); interop.py runs the image against the
+# companion's BridgeMaintClient (docs/bridge-firmware.md, "Tests").
+common:
+  tags:
+    - ctag
+    - bridge
+  platform_allow:
+    - native_sim
+  build_only: true
+tests:
+  ctag.bridge.maint_pty: {}

@@ -1,0 +1,26 @@
+/*
+ * A 32 MiB external NOR stand-in: 4 KiB erase sectors, 4-byte program units
+ * (as the nRF QSPI NOR driver requires), so the > 16 MiB address map of large
+ * parts is exercised.
+ */
+/ {
+	chosen {
+		cremind,bridge-flash = &ext_flash_ctrl;
+	};
+
+	ext_flash_ctrl: flash-controller@40000000 {
+		compatible = "zephyr,sim-flash";
+		reg = <0x40000000 DT_SIZE_M(32)>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		erase-value = <0xff>;
+
+		ext_flash: flash@0 {
+			status = "okay";
+			compatible = "soc-nv-flash";
+			erase-block-size = <4096>;
+			write-block-size = <4>;
+			reg = <0x00000000 DT_SIZE_M(32)>;
+		};
+	};
+};

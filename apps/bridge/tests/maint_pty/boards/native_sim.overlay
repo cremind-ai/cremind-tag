@@ -1,0 +1,24 @@
+/* An 8 MiB external NOR stand-in (the nRF52840 DK's MX25R64) and the
+ * maintenance port on uart0 (a pseudo-terminal). */
+/ {
+	chosen {
+		cremind,bridge-flash = &ext_flash_ctrl;
+		cremind,bridge-maint = &uart0;
+	};
+
+	ext_flash_ctrl: flash-controller@40000000 {
+		compatible = "zephyr,sim-flash";
+		reg = <0x40000000 DT_SIZE_M(8)>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		erase-value = <0xff>;
+
+		ext_flash: flash@0 {
+			status = "okay";
+			compatible = "soc-nv-flash";
+			erase-block-size = <4096>;
+			write-block-size = <4>;
+			reg = <0x00000000 DT_SIZE_M(8)>;
+		};
+	};
+};

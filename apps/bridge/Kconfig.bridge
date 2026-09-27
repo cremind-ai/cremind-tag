@@ -1,0 +1,78 @@
+# Bridge options shared by the application (Kconfig) and its native_sim tests
+# (tests/*/Kconfig). docs/bridge-firmware.md explains each.
+
+menu "Cremind Tag bridge"
+
+config CTAG_BRIDGE_WORKING_SPACE
+	int "External-flash working space (bytes)"
+	default 16777216
+	help
+	  Bytes at the end of the external flash kept out of the two font-pack
+	  slots: slot_size = align_down_64K((flash_size - working_space) / 2)
+	  (docs/fontpack.md 3). Production parts use FONTPACK_WORKING_SPACE
+	  (16 MiB); a development board with a small part (the nRF52840 DK's
+	  8 MiB MX25R64) configures 1 MiB, which `cremind-tag fonts image`
+	  assumes for that board. Holds the slot directory (64 KiB), the
+	  pending-layout ring and a 64 KiB spare block.
+
+config CTAG_BRIDGE_READ_CACHE_LINES
+	int "Font-pack read cache: lines"
+	default 16
+	range 1 256
+
+config CTAG_BRIDGE_READ_CACHE_LINE
+	int "Font-pack read cache: bytes per line (power of two)"
+	default 128
+	help
+	  The renderer reads strike records (12 B), glyph index entries (10 B)
+	  and bitmap rows (<= 32 B) one at a time; a line holds the neighbours
+	  that the next strip reads again.
+
+config CTAG_BRIDGE_STRIP_BUF
+	int "Strip buffer (bytes)"
+	default 1024
+	help
+	  One strip of BRIDGE_STRIP_ROWS native rows: 800 bytes for a 400-px
+	  panel. Wider panels render fewer rows per strip.
+
+config CTAG_BRIDGE_MAX_JOBS
+	int "Jobs (pending layouts and tag commands)"
+	default 24
+	range 4 64
+
+config CTAG_BRIDGE_RESULT_SLOTS
+	int "DELIVERY_RESULTs awaiting RESULT_ACK"
+	default 12
+	range 2 64
+
+config CTAG_BRIDGE_ATT_INFLIGHT
+	int "DATA fragments handed to the host at once"
+	default 6
+	range 1 32
+	help
+	  Kept below CONFIG_BT_ATT_TX_COUNT so that writing a fragment never
+	  blocks the bridge work queue on an ATT buffer.
+
+config CTAG_BRIDGE_MAINT_MAX_FRAME
+	int "Maintenance port: largest decoded frame (caps.max_frame)"
+	default 4096
+	range 256 4096
+
+config CTAG_BRIDGE_MAINT_TX_FRAME
+	int "Maintenance port: response frame buffer"
+	default 1024
+	range 256 4096
+
+config CTAG_BRIDGE_MAINT_CREDITS
+	int "Maintenance port: frames the host may send ahead (caps.credits)"
+	default 2
+	range 1 8
+	help
+	  The receive ring must hold this many maximum-size encoded frames.
+
+config CTAG_BRIDGE_MAINT_SCRATCH
+	int "Maintenance port: read buffer for FONT_COMMIT's SHA-256"
+	default 1024
+	range 128 8192
+
+endmenu

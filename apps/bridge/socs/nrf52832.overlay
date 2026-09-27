@@ -1,0 +1,7 @@
+/* nRF52832 bridge: the maintenance port is the UART (CH340 on the board, the
+ * interface MCU's virtual COM port on the nRF52 DK). */
+/ {
+	chosen {
+		cremind,bridge-maint = &uart0;
+	};
+};

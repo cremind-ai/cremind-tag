@@ -1,0 +1,62 @@
+# Cremind Tag bridge application options (docs/bridge-firmware.md).
+
+rsource "Kconfig.bridge"
+
+menu "Cremind Tag bridge application"
+
+config CTAG_BRIDGE_BOARD_ID
+	int "Protocol board id (spec.yaml boards)"
+	default 3
+	help
+	  NRF52840_BRIDGE = 3, NRF52832_BRIDGE = 4 (set per SoC). Reported in
+	  CAPS_STATUS, HELLO caps and the device UUID.
+
+config CTAG_BRIDGE_WQ_STACK_SIZE
+	int "Bridge work queue stack"
+	default 4096
+	help
+	  Mesh message processing, layout validation (SHA-256), the render
+	  pre-pass (renderer + QR ~0.5 KiB + the font-pack reader), the session
+	  handshake (PSA HMAC/HKDF ~1 KiB) and settings writes.
+
+config CTAG_BRIDGE_WQ_PRIORITY
+	int "Bridge work queue priority"
+	default 10
+	help
+	  Preemptible and below the mesh advertiser (7): rendering never delays
+	  mesh transmissions.
+
+config CTAG_BRIDGE_MAINT_STACK_SIZE
+	int "Maintenance thread stack"
+	default 3072
+	help
+	  CBOR decode (~0.5 KiB), INFO's counter list, and FONT_COMMIT's
+	  SHA-256 and font-pack validation (fontpack_open ~0.5 KiB).
+
+config CTAG_BRIDGE_MAINT_PRIORITY
+	int "Maintenance thread priority"
+	default 12
+
+config CTAG_BRIDGE_EVENT_QUEUE
+	int "Bluetooth events queued for the work queue"
+	default 32
+
+config CTAG_BRIDGE_MESH_RXQ
+	int "Vendor mesh messages queued for the work queue"
+	default 8
+
+config CTAG_BRIDGE_MESH_TXQ
+	int "Outbound vendor mesh messages"
+	default 12
+
+config CTAG_BRIDGE_CFG_QUIET_MS
+	int "No tag connections this long after provisioning (configuration)"
+	default 10000
+
+config CTAG_BRIDGE_TAG_SEEN_INTERVAL_MS
+	int "TAG_SEEN at most this often per tag"
+	default 60000
+
+endmenu
+
+source "Kconfig.zephyr"

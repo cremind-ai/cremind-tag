@@ -1,10 +1,12 @@
 # Qualification report: nRF52840 bridge (`nrf52840_bridge`)
 
-Status: **documented** ([status definitions](../hardware/matrix.md))
+Status: **buildable** ([status definitions](../hardware/matrix.md))
 
-> **TODO:** the bridge application (`apps/bridge`) is not built yet. The board stays
-> *documented* until the secure application links within this board's exact
-> memory geometry and meets the resource targets (*buildable*).
+> The bridge application (`apps/bridge`, [bridge-firmware.md](../bridge-firmware.md))
+> links in this board's exact geometry, passes `tools/verify_stack.py` and meets
+> the flash target. Nothing has run on a physical sample yet: every section
+> below is pending, and the hardware test plan is
+> [bridge-firmware.md §11](../bridge-firmware.md#11-hardware-test-plan).
 
 ## 1. Identity
 
@@ -17,8 +19,8 @@ Status: **documented** ([status definitions](../hardware/matrix.md))
 | Serial link | usb_cdc_acm |
 | External flash | soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only) |
 | Sample(s) | _serial number / marking / source / date received_ |
-| Firmware under test | _`git describe` of the qualified build_ |
-| PSA crypto provider | _Oberon or TF-PSA-Crypto (firmware-notes correction 7)_ |
+| Firmware under test | _`git describe` of the qualified build_ (HELLO/INFO `build`) |
+| PSA crypto provider | nrf_security with the Oberon driver (`CONFIG_PSA_CRYPTO_DRIVER_OBERON=y`); entropy from the RNG peripheral (`zephyr,entropy = &rng`, `CONFIG_ENTROPY_CC3XX=n`) |
 
 ## 2. Hardware verification checklist
 
@@ -42,7 +44,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| bridge-nrf52840dk | not built yet | - | - | - | - | - | - | - |
+| bridge-nrf52840dk | `apps/bridge` | 301,272 / 1,015,808 | 70.3 % (15 %) | 109,186 / 262,144 | 152,958 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -86,3 +88,4 @@ Measure with development equipment disconnected, after a power-on reset.
 | Date | Status | Evidence / change |
 |---|---|---|
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
+| 2026-09-28 | buildable | `bridge-nrf52840dk` (`apps/bridge`): 301,272 B flash of 992 KiB (70.3 % free), 109,186 B RAM of 256 KiB; `verify_stack.py` 16/16 pass; 108 native_sim test cases and the companion maintenance client (`apps/bridge/tests/maint_pty/interop.py`) pass. Development geometry: DK MX25R64 (8 MiB) with a 1 MiB working space. |

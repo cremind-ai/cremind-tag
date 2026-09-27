@@ -1,10 +1,15 @@
 # Qualification report: nRF52832 bridge (`nrf52832_bridge`)
 
-Status: **documented** ([status definitions](../hardware/matrix.md))
+Status: **blocked** ([status definitions](../hardware/matrix.md))
 
-> **TODO:** the bridge application (`apps/bridge`) is not built yet. The board stays
-> *documented* until the secure application links within this board's exact
-> memory geometry and meets the resource targets (*buildable*).
+> **Blocked on RAM (measured, not a controller issue).** The complete bridge
+> (`apps/bridge`, [bridge-firmware.md](../bridge-firmware.md)) links in this
+> board's geometry and passes `tools/verify_stack.py`, but leaves **215 B** of
+> RAM free against the **8,192 B** target, after the trims of
+> `apps/bridge/socs/nrf52832.conf`. Where the 64 KiB go and what would free
+> 8 KiB: [bridge-firmware.md §9](../bridge-firmware.md#9-memory). The external
+> SPI NOR pins in `apps/bridge/boards/nrf52dk_nrf52832.overlay` are
+> placeholders until an nRF52832 bridge board is chosen.
 
 ## 1. Identity
 
@@ -17,8 +22,8 @@ Status: **documented** ([status definitions](../hardware/matrix.md))
 | Serial link | uart_ch340 |
 | External flash | soldered SPI NOR |
 | Sample(s) | _serial number / marking / source / date received_ |
-| Firmware under test | _`git describe` of the qualified build_ |
-| PSA crypto provider | _Oberon or TF-PSA-Crypto (firmware-notes correction 7)_ |
+| Firmware under test | _`git describe` of the qualified build_ (HELLO/INFO `build`) |
+| PSA crypto provider | nrf_security with the Oberon driver (`CONFIG_PSA_CRYPTO_DRIVER_OBERON=y`); entropy from the RNG peripheral |
 
 ## 2. Hardware verification checklist
 
@@ -42,7 +47,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| bridge-nrf52dk | not built yet | - | - | - | - | - | - | - |
+| bridge-nrf52dk | `apps/bridge` | 272,928 / 499,712 | 45.4 % (15 %) | 65,321 / 65,536 | 215 (8,192) | pass (edtlib) | resource-miss | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -86,3 +91,4 @@ Measure with development equipment disconnected, after a power-on reset.
 | Date | Status | Evidence / change |
 |---|---|---|
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
+| 2026-09-28 | blocked | `bridge-nrf52dk` (`apps/bridge`): 272,928 B flash of 488 KiB (45.4 % free); RAM 65,321 of 65,536 B, 215 B free vs the 8,192 B target (bridge application 31.3 KiB incl. two 4 KiB layout buffers, maintenance port 7.6 KiB, work-queue stack 3.5 KiB; controller 9.4 KiB, host 9.2 KiB, mesh 5.3 KiB, kernel stacks 6.3 KiB, PSA 1.9 KiB). `verify_stack.py` 16/16 pass. |

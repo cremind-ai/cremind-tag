@@ -1,0 +1,29 @@
+/*
+ * nRF52840 DK bridge.
+ *
+ * - The on-board 8 MiB MX25R64 on QSPI holds the font packs and the working
+ *   space (development part: 1 MiB working space, nrf52840dk_nrf52840.conf).
+ * - No bootloader: the image links from 0 into code_partition, which ends
+ *   where the settings storage (mesh state, assignments) begins, so the
+ *   linker refuses an image that would grow into it.
+ */
+/ {
+	chosen {
+		cremind,bridge-flash = &mx25r64;
+		zephyr,code-partition = &code_partition;
+	};
+};
+
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+
+&flash0 {
+	partitions {
+		code_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "code";
+			reg = <0x00000000 0x000f8000>;
+		};
+	};
+};
