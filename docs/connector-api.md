@@ -93,9 +93,12 @@ Start-up, reconnection and recovery after local database loss.
  "tags": [{"tag_id": "1A2B3C4D", "name": "Desk", "epoch": 3, "bridge_hw_id": "br-…",
            "width": 400, "height": 300, "planes": 1, "rotation": 0,
            "desired_revision": 18, "displayed_revision": 17, "clear_required": false}],
- "settings": {"layout": "status", "show_excerpts": false, "qr_links": false,
+ "settings": {"enabled": true, "layout": "status", "show_excerpts": false, "qr_links": false,
               "progress_cadence_s": 300, "timezone": "Asia/Ho_Chi_Minh", "language": "vi"}}
 ```
+
+`timezone` is always an IANA name. All connector timestamps are ISO 8601 UTC
+with milliseconds (`2026-09-27T10:00:00.123Z`).
 
 ### `GET events?after=<seq>&limit=<n≤200>`
 → `{"stream_id": "…", "jobs": [job, …], "next_after": 1250, "head_seq": 1250}`
@@ -105,6 +108,11 @@ retained history, or newer than `head_seq` (the server was restored from a
 backup) — the companion must call `sync` (explicit resynchronisation). A
 `stream_id` different from the one the companion stored also means "restored":
 the companion calls `sync` and drops local jobs Cremind no longer lists.
+
+`events` may include jobs that are already terminal (for example cancelled
+before the companion fetched them); the companion records them by `stage` and
+does not display them. Jobs are served only for tags the profile still owns,
+and live jobs only at the tag's current epoch.
 
 ### `POST accepted`
 The companion commits received jobs **and** its cursor in one local SQLite
@@ -122,20 +130,27 @@ transaction, then acknowledges:
                "timing": {"wake_ms": 12000, "mesh_ms": 800, "transfer_ms": 4100, "refresh_ms": 3900},
                "detail": "optional text"}]}
 ```
-→ `{"applied": 1}`. Idempotent; a stage never moves backwards; a terminal
-outcome is final.
+→ `{"applied": 1, "rejected": [{"delivery_id": 502, "reason": "epoch_mismatch"}]}`.
+`reason` ∈ `invalid, unknown, not_owned, epoch_mismatch, terminal`. Idempotent:
+repeating a final receipt with the same outcome is neither applied nor
+rejected; a stage never moves backwards (compare-and-set); a terminal outcome
+is final. On `epoch_mismatch` the companion re-syncs; `terminal`, `not_owned`
+and `unknown` receipts are dropped.
 
 ### `POST previews`
 ```json
-{"tag_id": "1A2B3C4D", "revision": 18, "kind": "desired|displayed", "png_base64": "…", "delivery_ids": [501, 502]}
+{"tag_id": "1A2B3C4D", "epoch": 3, "revision": 18, "kind": "desired|displayed", "png_base64": "…", "delivery_ids": [501, 502]}
 ```
 Stores the latest rendered preview (1-bit PNG, ≤ 64 KiB) for the Tags page.
+Revisions are compared within one epoch; a preview for a non-current epoch is
+refused with 409 `epoch_mismatch`, and every change of owner deletes the tag's
+previews.
 
 ## Job shape
 
 ```json
 {"delivery_id": 501, "seq": 1249, "tag_id": "1A2B3C4D", "epoch": 3,
- "kind": "needs_input", "priority": 90, "replace_key": null, "resolves": null,
+ "kind": "needs_input", "priority": 90, "replace_key": "run:…:input", "resolves": null,
  "created_at": "…", "expires_at": "…", "stage": "queued",
  "card": {"v": 1, "kind": "needs_input", "severity": "attention", "icon": "help",
           "title": "Approve deployment?", "body": null, "lang": "en",
@@ -145,8 +160,15 @@ Stores the latest rendered preview (1-bit PNG, ≤ 64 KiB) for the Tags page.
 
 `kind` ∈ `notification, task_outcome, needs_input, excerpt, progress, health,
 indexing_problem, calendar, automation, usage, pinned_note, tag_diagnostics,
-resolved, clear`. A `resolved` job removes the card named by `resolves` from the
-tag's active set. `clear` asks for a blank screen (ownership change).
+resolved, clear`. Every content job has a `replace_key` (`delivery:<id>` when it
+shares none). A `resolved` job removes the card whose `replace_key` equals its
+`resolves` from the tag's active set; cancelling a delivery in Cremind emits
+such a job (card title "Cancelled", `source.type` `delivery`), so a cancel
+reaches a companion that already fetched the card. `clear` asks for a blank
+screen (ownership change). A `clear_tag` command that fails or expires is
+re-queued up to three times, then the device shows `clear_failed` until an
+admin claims or releases it again; a late `succeeded` result for an expired
+command is still accepted.
 
 ## Screen model
 
