@@ -554,6 +554,16 @@ These close gaps the sections above leave open. The companion's simulator
 - `DUPLICATE` at the bridge: a displayed revision's stored result is re-sent under
   the new `update_id`; a still-pending revision adopts the new `update_id`; a
   revision that ended without being displayed is accepted again.
+- A `LAYOUT_COMMIT` repeated for a transfer the bridge already accepted (its OK
+  was lost) answers `DUPLICATE`, never `NOT_FOUND`, so a lost status never ends
+  a delivery. The gateway treats `DUPLICATE` like `OK` for that transfer.
+- The gateway emits **exactly one** `EVT_RESULT` per `update_id`; later results
+  for an `update_id` it already reported are acknowledged to the bridge and
+  dropped.
+- In `EVT_RESULT`, `NOT_FOUND` is ambiguous (the bridge lost the transfer, or
+  the tag refused the `tag_id`): the companion retries it like a link failure
+  (new `op_id`, back-off) and escalates only after repeated `NOT_FOUND` for the
+  same revision.
 - The bridge persists its `result_seq` counter across reboots so the gateway's
   `(bridge, result_seq)` de-duplication never swallows a new result.
 - A job whose `FRAME_END` was sent but whose `RESULT` was lost ends

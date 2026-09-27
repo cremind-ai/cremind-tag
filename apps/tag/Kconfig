@@ -1,0 +1,35 @@
+# Cremind Tag application options (docs/tag-firmware.md).
+
+config APP_LOW_BATTERY_MV
+	int "Low-battery threshold (mV) for the advertising and CHALLENGE flags"
+	default 2400
+
+config APP_BATTERY_NRF51_DIRECT
+	bool "Measure VDD on nRF51 with the ADC registers"
+	depends on SOC_SERIES_NRF51
+	default y
+	help
+	  Zephyr's nRF51 ADC driver cannot select the 1/3 supply input, so VDD
+	  is sampled directly (10 bit, 1.2 V band gap). The ADC devicetree node
+	  must stay disabled. Off: battery_mv is reported as 0 (unknown).
+
+config APP_TIGHT_CTLR_STACKS
+	bool "Shrink the hidden Zephyr controller RX thread stacks"
+	default y if SOC_SERIES_NRF51
+	help
+	  docs/firmware-notes.md section 12 ("tight"): 640 B controller RX and
+	  384 B priority RX stacks, so that 16 KiB parts keep 2 KiB free. Needs
+	  on-target stack measurement (CONFIG_THREAD_ANALYZER) during
+	  qualification.
+
+# Hidden controller symbols cannot be set from a .conf file; the earliest
+# default wins, so these must come before Kconfig.zephyr.
+config BT_CTLR_RX_STACK_SIZE
+	int
+	default 640 if APP_TIGHT_CTLR_STACKS
+
+config BT_CTLR_RX_PRIO_STACK_SIZE
+	int
+	default 384 if APP_TIGHT_CTLR_STACKS
+
+source "Kconfig.zephyr"

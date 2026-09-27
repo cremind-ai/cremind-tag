@@ -1,0 +1,13 @@
+# The tag firmware's protocol core (apps/tag/src/tag_core.c) with fake panel,
+# storage, clock and nonce hooks; docs/tag-firmware.md "Tests".
+common:
+  tags:
+    - ctag
+    - tag
+  platform_allow:
+    - native_sim
+    - native_sim/native/64
+  integration_platforms:
+    - native_sim
+tests:
+  ctag.tag_core: {}

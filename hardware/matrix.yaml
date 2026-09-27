@@ -39,7 +39,8 @@ bridges:
     ram_kib: 256
     external_flash: soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only)
     maintenance_link: usb_cdc_acm
-    status: documented
+    status: buildable
+    notes: apps/bridge links in the exact geometry and passes verify_stack.py (flash 70 % free, 150 KB RAM free); not flashed yet.
   - id: nrf52832_bridge
     board_id: 4
     zephyr_board: nrf52dk/nrf52832
@@ -48,8 +49,17 @@ bridges:
     ram_kib: 64
     external_flash: soldered SPI NOR
     maintenance_link: uart_ch340
-    status: documented
-    notes: Remaining RAM target 8 KiB; pending-layout storage must stay in external flash.
+    status: blocked
+    blocked_reason: >-
+      Measured (apps/bridge, NCS v3.4.1, 2026-09-28): the full bridge links with 65,321 of 65,536 B RAM used,
+      215 B free against the 8,192 B target, after the RAM trims of apps/bridge/socs/nrf52832.conf (one
+      advertising set, 68-byte HCI events, 1 KiB maintenance frames, 3.5 KiB work-queue stack). The bridge
+      application holds 31.3 KiB (two LAYOUT_HARD_MAX layout buffers 8 KiB: the one being assembled and the
+      one being rendered; maintenance port 7.6 KiB; work-queue stack 3.5 KiB); Zephyr controller 9.4 KiB,
+      host 9.2 KiB, mesh 5.3 KiB, kernel stacks 6.3 KiB, PSA 1.9 KiB. Meeting 8 KiB needs a design change
+      (assembling layouts in external flash and one shared layout buffer, a 10-tag table), not a
+      controller switch. docs/bridge-firmware.md "Memory".
+    notes: Pending layouts already live in external flash; SPI NOR pins on the nRF52 DK are placeholders.
 
 tags:
   - id: laowu_bw
@@ -70,7 +80,8 @@ tags:
     pins: {mosi: 5, sck: 8, cs: 9, dc: 10, reset: 11, busy: 12, bs: 13, wake: 7, debug_tx: 6}
     leds: unconfirmed
     oscillator_32k: unverified (RC assumed until a crystal is confirmed)
-    status: documented
+    status: buildable
+    notes: Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 75.1 % used, 2,068 B RAM free); nothing verified on a sample yet.
   - id: laowu_bwr
     board_id: 17
     zephyr_board: laowu_bwr/nrf51822
@@ -89,7 +100,8 @@ tags:
     pins: {mosi: 10, sck: 11, cs: 12, dc: 13, reset: 14, busy: 15, bs: 16, wake: 9, debug_tx: 8}
     leds: [3, 4, 5]
     oscillator_32k: unverified (RC assumed until a crystal is confirmed)
-    status: documented
+    status: buildable
+    notes: Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 37.0 % used, 2,060 B RAM free); nothing verified on a sample yet.
   - id: sifei_52810
     board_id: 18
     zephyr_board: sifei_52810/nrf52810
@@ -103,8 +115,8 @@ tags:
       controller: unverified
       verified: false
     pins: unverified
-    status: documented
-    notes: Display mapping, panel model and wake sources require physical verification.
+    status: buildable
+    notes: Tag firmware (apps/tag) links with the panel driver and meets the targets (flash 53.3 % used, 9,056 B RAM free); the placeholder panel (id 255) is never driven and frames are refused until display mapping, panel model and wake sources are verified.
   - id: hema_52811
     board_id: 19
     zephyr_board: hema_52811/nrf52811
@@ -118,8 +130,8 @@ tags:
       controller: unverified
       verified: false
     pins: unverified
-    status: documented
-    notes: Display mapping, panel model and wake sources require physical verification.
+    status: buildable
+    notes: Tag firmware (apps/tag) links with the panel driver and meets the targets (flash 53.2 % used, 9,056 B RAM free); the placeholder panel (id 255) is never driven and frames are refused until display mapping, panel model and wake sources are verified.
 
 # Per-board verification checklist (docs/hardware/verification.md explains each item).
 verification_items:

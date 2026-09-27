@@ -1,0 +1,4 @@
+/* SAADC for the VDD measurement (battery.c; internal input, no pin). */
+&adc {
+	status = "okay";
+};

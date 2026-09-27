@@ -32,13 +32,11 @@ jobs:
         run: uv run pytest -q
       - name: Tool tests (build matrix, verify_stack, board files)
         run: uv run --project companion pytest tests/tools -q
-      - name: Generated protocol bindings are current
+      - name: Generated protocol bindings, fixtures and test vectors are current
         run: |
-          if [ -f tools/codegen.py ]; then
-            uv run --project companion python tools/codegen.py --check
-          else
-            echo "tools/codegen.py not present yet; skipping"
-          fi
+          uv run --project companion python tools/codegen.py --check
+          uv run --project companion python tools/gen_fixtures.py --check
+          uv run --project companion python tests/ztest/tag_core/gen_conversation.py --check
 
   host-c:
     name: Host C tests
@@ -157,7 +155,12 @@ jobs:
           # native_sim needs make, which the toolchain image lacks (firmware-notes correction 10).
           apt-get update && apt-get install -y --no-install-recommends make
           cd "$NCS_DIR"
-          west twister -T "$GITHUB_WORKSPACE/tests/ztest" -p native_sim -p native_sim/native/64 \
+          # Library suites plus each app's own portable-core suites.
+          app_tests=()
+          for d in "$GITHUB_WORKSPACE"/apps/*/tests; do
+            [ -d "$d" ] && app_tests+=(-T "$d")
+          done
+          west twister -T "$GITHUB_WORKSPACE/tests/ztest" "${app_tests[@]}" -p native_sim -p native_sim/native/64 \
             -x "ZEPHYR_EXTRA_MODULES=$GITHUB_WORKSPACE" \
             --outdir "$CTAG_BUILD_ROOT/twister-out" --inline-logs -v
       - uses: actions/upload-artifact@v4

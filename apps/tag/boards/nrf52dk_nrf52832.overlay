@@ -1,0 +1,59 @@
+/*
+ * Development tag on the nRF52 DK (protocol board id NRF52DK_TAG = 20).
+ *
+ * The UC8176 node documents where to wire a 4.2-inch 400x300 UC8176 module
+ * (e.g. a black/white 4.2" e-paper breakout) to the Arduino header:
+ *   SCK D13 = P0.25, MOSI D11 = P0.23, CS D10 = P0.22 (arduino_spi = spi2),
+ *   DC A0 = P0.03, RST A1 = P0.04, BUSY A2 = P0.28, BS A3 = P0.29 (tie low).
+ * panel-id 0 (NONE) matches the companion's default enrollment of this
+ * board: a virtual panel that accepts frames, verifies their digest and
+ * "refreshes" after 300 ms without touching any pin. With a module wired,
+ * set panel-id = <1> (UC8176_420_BW) and enroll the tag with `--panel bw`.
+ */
+
+/ {
+	chosen {
+		zephyr,code-partition = &code_partition;
+		cremind,tag-board = &tag_board;
+		cremind,panel = &epd;
+	};
+
+	tag_board: tag-board {
+		compatible = "cremind,tag-board";
+		board-id = <20>;
+		/* Buttons exist, but System OFF wake is not verified for this app. */
+	};
+};
+
+&arduino_spi {
+	epd: epd@0 {
+		compatible = "cremind,uc8176";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(4)>;
+		dc-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio0 4 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;
+		bs-gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
+		width = <400>;
+		height = <300>;
+		planes = <1>;
+		plane-flags = <0x01>;
+		refresh-timeout-ms = <10000>;
+		panel-id = <0>;	/* NONE (virtual); 1 = UC8176_420_BW once wired */
+	};
+};
+
+/* No MCUboot on the tag: code at 0, NVS in the DK's storage partition. */
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+
+&flash0 {
+	partitions {
+		code_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "code";
+			reg = <0x00000000 0x0007a000>;
+		};
+	};
+};

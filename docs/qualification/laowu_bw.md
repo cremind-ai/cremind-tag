@@ -1,10 +1,11 @@
 # Qualification report: Laowu 4.2-inch black/white (`laowu_bw`)
 
-Status: **documented** ([status definitions](../hardware/matrix.md))
+Status: **buildable** ([status definitions](../hardware/matrix.md))
 
-> **TODO:** the tag application (`apps/tag`) is not built yet. The board stays
-> *documented* until the secure application links within this board's exact
-> memory geometry and meets the resource targets (*buildable*).
+> *Buildable* covers the secure tag firmware (`apps/tag`, [tag-firmware.md](../tag-firmware.md))
+> linking within this board's exact memory geometry and meeting the resource
+> targets. Nothing has been flashed or measured on a sample yet: stack sizes are
+> static estimates and every hardware item below is pending.
 
 ## 1. Identity
 
@@ -18,7 +19,7 @@ Status: **documented** ([status definitions](../hardware/matrix.md))
 | 32.768 kHz source | unverified (RC assumed until a crystal is confirmed) |
 | Sample(s) | _serial number / marking / source / date received_ |
 | Firmware under test | _`git describe` of the qualified build_ |
-| PSA crypto provider | _Oberon or TF-PSA-Crypto (firmware-notes correction 7)_ |
+| PSA crypto provider | Oberon PSA driver, `nrf_oberon` 3.0.20 cortex-m0 (build fact; lean profile, one key slot) |
 
 ## 2. Hardware verification checklist
 
@@ -42,7 +43,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
-| tag-laowu-bw | `build/boardcheck` (board-check app, not the product firmware) | 104,316 / 126,976 | 17.9 % (15 %) | 14,316 / 16,384 | 2,068 (2,048) | pass (edtlib) | ok | 2026-09-27 |
+| tag-laowu-bw | `apps/tag` | 95,412 / 126,976 | 24.9 % (15 %) | 14,316 / 16,384 | 2,068 (2,048) | pass (edtlib) | ok | 2026-09-27 |
 
 <!-- build-facts:end -->
 
@@ -98,3 +99,4 @@ Measure with development equipment disconnected, after a power-on reset.
 |---|---|---|
 | 2026-09-27 | documented | Hardware facts recorded in `hardware/matrix.yaml`. |
 | 2026-09-27 | documented | Board definition `boards/cremind/laowu_bw` configures, links and passes `verify_stack.py` with a board-check app (not the tag app). |
+| 2026-09-28 | buildable | `apps/tag` (tag-laowu-bw) links within the exact geometry: flash 95,412 / 126,976 B (24.9 % free), RAM 14,316 / 16,384 B (2,068 B free); `verify_stack.py` pass. Not yet run on hardware. |

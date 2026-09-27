@@ -1,0 +1,53 @@
+# Indirect calls of the tag image followed by stack_depth.py (CALLER=TARGETS,
+# globs; see docs/tag-firmware.md "Stack budget"). Names are the LTO names of
+# the NCS v3.4.1 build; a pattern that matches nothing is reported.
+
+# --- system work queue: every handler the tag submits or the stack uses ---
+work_queue_main=core_fn*,adv_fn*,timeout_fn*,rx_work_handler*,tx_processor*,init_work*,att_tx_destroy_work_handler*,att_timeout*,cal_work*,*calibrat*
+
+# --- main thread: device and SYS_INIT hooks, then main() ---
+z_sys_init_run_level*=gpio_nrfx_init*,spi_nrfx_init*,entropy_nrf5_init*,*clk_init*,*clock_control_init*,*flash_init*,nrf_flash_init*,sys_clock_driver_init*,init_mem_slab_obj_core_list*,k_sys_work_q_init*,hci_driver_init*,*_rtc_timer_init*,nrfx_clock*
+bg_thread_main*=z_sys_init_run_level*
+
+# --- device API vtables (spi, flash, gpio, entropy) ---
+write_bytes*=spi_nrfx_transceive*
+flash_write*=flash_nrf_write*
+nvs_flash_rd*=flash_nrf_read*
+nvs_flash_erase_sector*=flash_nrf_erase*
+gpio_pin_set_dt*=gpio_nrfx_port_set_bits_raw*,gpio_nrfx_port_clear_bits_raw*
+gpio_pin_configure_dt*=gpio_nrfx_pin_configure*
+panel_poll*=gpio_nrfx_port_get_raw*
+panel_*=gpio_nrfx_port_get_raw*,gpio_nrfx_port_set_bits_raw*,gpio_nrfx_port_clear_bits_raw*
+tag_hal_random*=entropy_nrf5_get_entropy*
+ctag_crypto_random*=entropy_nrf5_get_entropy*
+
+# --- ctag_txn store callbacks ---
+ctag_txn_save*=store_write*
+ctag_txn_load*=store_read*
+
+# --- Bluetooth host RX: L2CAP channels, ATT handlers, GATT callbacks ---
+bt_l2cap_recv=bt_att_recv*,l2cap_recv*,*smp*recv*
+bt_att_recv=att_*_req*,att_write_cmd*,att_confirm*,att_handle_rsp*,att_signed_write_cmd*
+write_cb*=write_value*,bt_gatt_attr_write_ccc*
+bt_gatt_foreach_attr_type*=find_info_cb*,find_type_cb*,read_type_cb*,read_group_cb*,read_cb*,write_cb*,notify_cb*,update_ccc*,match_uuid*
+att_chan_read*=read_caps*,bt_gatt_attr_read_*,read_name*,read_appearance*,read_ppcp*
+read_cb*=read_caps*,bt_gatt_attr_read_*,read_name*,read_appearance*,read_ppcp*
+read_type_cb*=read_caps*,bt_gatt_attr_read_*,read_name*,read_appearance*,read_ppcp*
+# handle_event_common dispatches the table its caller passes: the priority
+# events run in the controller's RX thread (bt_hci_recv), the others on the
+# system work queue (rx_work_handler). The targets are attributed to the callers.
+bt_hci_recv=hci_cmd_complete*,hci_cmd_status*,hci_data_buf_overflow*,hci_disconn_complete_prio*,hci_num_completed_packets*,hci_le_meta_prio_event*
+hci_le_meta_prio_event*=le_enh_conn_complete_prio*,le_legacy_conn_complete_prio*
+rx_work_handler*=hci_vendor_event*,hci_le_meta_event*,hci_disconn_complete*,hci_hardware_error*,bt_hci_evt_*
+hci_le_meta_event*=le_legacy_conn_complete,le_enh_conn_complete,le_conn_update_complete*,le_remote_feat_complete*,le_conn_param_req*,le_data_len_change*
+# the controller's RX threads hand events and data to the host
+recv_thread=bt_hci_recv*
+prio_recv_thread=bt_hci_recv*
+notify_connected=connected*,l2cap_connected*
+notify_disconnected*=disconnected*,l2cap_disconnected*
+tx_notify_process=notified*,att_*sent*,chan_*sent*,att_*cb*
+conn_tx_destroy=notified*,att_*sent*,chan_*sent*
+net_buf_destroy*=att_tx_destroy,att_tx_destroy.lto_priv*,hci_rx_pool_destroy*
+bt_send=hci_driver_send*
+init_work*=bt_ready*
+bg_thread_main*=hci_driver_open

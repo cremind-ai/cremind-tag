@@ -64,6 +64,12 @@ operations**; the companion executes them.
 - `POST commands/{id}/result` `{"status": "succeeded|failed", "result": {...}, "error": "..."}` → `200`
   (idempotent for the same status)
 
+Result shapes the companion reports (`result` of `commands/{id}/result`):
+`scan_unprovisioned` → `{"duration_s": 60, "beacons": [{"uuid": "<32 hex>",
+"hw_id": "br-<32 hex>", "rssi": -48, "oob": 0}]}` (strongest first, at most
+40); other kinds return a small object describing what was done (for example
+`{"addr": 2}` after provisioning) or `{}`.
+
 Kinds: `scan_unprovisioned {duration_s}`, `provision_bridge {uuid, name}`,
 `configure_bridge {hw_id}`, `remove_bridge {hw_id}`,
 `assign_tag {tag_id, bridge_hw_id, epoch}` (companion derives `K_epoch`, sends

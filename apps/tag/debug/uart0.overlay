@@ -1,0 +1,7 @@
+/*
+ * Debug build only: enable the UART TX pad (Laowu BW P0.06, BWR P0.08; the
+ * nRF52 DK's VCOM) for the log. Not part of the release build.
+ */
+&uart0 {
+	status = "okay";
+};

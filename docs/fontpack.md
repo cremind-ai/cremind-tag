@@ -117,8 +117,9 @@ reference validator). At install the bridge additionally checks
   highest `seq`. Activation writes the *other* directory sector with `seq + 1`
   — a power loss at any moment leaves the previous record valid (atomic
   activation).
-- Pending layouts: one 4 KiB sector per assigned tag (validated layout + its
-  delivery metadata), so accepted work survives a bridge reset.
+- Pending layouts: 8 KiB records (validated layout + its delivery metadata)
+  written round-robin across the rest of the working space, so accepted work
+  survives a bridge reset and no single sector is erased on every delivery.
 - Parts above 16 MiB need 4-byte addressing; `FLASH_TEST` (maintenance port)
   writes and reads back patterns at the start, the 16 MiB boundary, and the
   last sector of **the whole device** before a board is qualified.
