@@ -14,7 +14,7 @@ from cremind_tag.cli.main import app
 from cremind_tag.fontpack.format import FontPack
 from cremind_tag.sim import BridgeSpec, SimulatorThread
 from cremind_tag.sim.harness import make_config
-from cremind_tag.store import Database
+from cremind_tag.daemon.schema import open_database
 
 pytestmark = pytest.mark.timeout(180)
 
@@ -55,7 +55,7 @@ def test_gateway_and_mesh_commands(sim: SimulatorThread, env: Path) -> None:
     assert "hellos" in cli_json("gateway", "counters", "--url", url)
     nodes = cli_json("mesh", "nodes", "--url", url)
     assert [n["configured"] for n in nodes] == [True]
-    with Database.open(env / "companion.sqlite3") as db:
+    with open_database(env / "companion.sqlite3") as db:
         assert [b.addr for b in db.list_bridges()] == [nodes[0]["addr"]]
         assert len(db.list_gateways()) == 1
 
@@ -64,12 +64,12 @@ def test_gateway_and_mesh_commands(sim: SimulatorThread, env: Path) -> None:
     assert [f["uuid"] for f in found] == [spare]
     out = cli("mesh", "provision", spare, "--name", "spare", "--url", url).stdout
     assert "provisioned" in out and "OK" in out
-    with Database.open(env / "companion.sqlite3") as db:
+    with open_database(env / "companion.sqlite3") as db:
         bridge = db.get_bridge(uuid=spare)
         assert bridge.configured and bridge.name == "spare"
     assert "OK" in cli("mesh", "identify", hex(bridge.addr or 0), "--url", url).stdout
     assert "OK" in cli("mesh", "remove", hex(bridge.addr or 0), "--yes", "--url", url).stdout
-    with Database.open(env / "companion.sqlite3") as db:
+    with open_database(env / "companion.sqlite3") as db:
         assert db.find_bridge(uuid=spare) is None
 
 

@@ -44,11 +44,13 @@ def load() -> Config:
 
 
 def open_db(config: Config | None = None) -> Database:
-    from cremind_tag.store import Database, SchemaError
+    """The companion database with every schema version this build knows (inventory + delivery queue)."""
+    from cremind_tag.daemon.schema import open_database
+    from cremind_tag.store import SchemaError
 
     config = config or load()
     try:
-        return Database.open(config.ensure_data_dir() / "companion.sqlite3")
+        return open_database(config.ensure_data_dir() / "companion.sqlite3")
     except SchemaError as exc:
         fail(str(exc))
 
