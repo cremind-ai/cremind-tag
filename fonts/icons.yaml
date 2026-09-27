@@ -1,0 +1,32 @@
+# Spec icons (protocol/spec.yaml `icons`) -> Material Icons glyphs.
+#
+# The icon face (face 0) of every pack has one glyph per spec icon: glyph id =
+# icon id, rendered from the Material Icons glyph named here (looked up in the
+# pinned font/MaterialIcons-Regular.codepoints). Glyph 0 is empty. Names that
+# Material Icons does not have map to the closest glyph and say why.
+face: material-icons
+icons:
+  - {id: 1,  name: info,          material: info,          codepoint: 0xE88E}
+  - {id: 2,  name: check_circle,  material: check_circle,  codepoint: 0xE86C}
+  - {id: 3,  name: error,         material: error,         codepoint: 0xE000}
+  - {id: 4,  name: warning,       material: warning,       codepoint: 0xE002}
+  - {id: 5,  name: help,          material: help,          codepoint: 0xE887}
+  - {id: 6,  name: chat,          material: chat,          codepoint: 0xE0B7}
+  - {id: 7,  name: task,          material: task,          codepoint: 0xF075}
+  - {id: 8,  name: schedule,      material: schedule,      codepoint: 0xE8B5}
+  - {id: 9,  name: event,         material: event,         codepoint: 0xE878}
+  - {id: 10, name: notifications, material: notifications, codepoint: 0xE7F4}
+  - {id: 11, name: sync,          material: sync,          codepoint: 0xE627}
+  - {id: 12, name: battery_full,  material: battery_full,  codepoint: 0xE1A4}
+  - {id: 13, name: battery_low,   material: battery_alert, codepoint: 0xE19C, note: "Material Icons has no battery_low; battery_alert (battery with '!') is the closest"}
+  - {id: 14, name: wifi_off,      material: wifi_off,      codepoint: 0xE648}
+  - {id: 15, name: link_off,      material: link_off,      codepoint: 0xE16F}
+  - {id: 16, name: description,   material: description,   codepoint: 0xE873}
+  - {id: 17, name: bolt,          material: bolt,          codepoint: 0xEA0B}
+  - {id: 18, name: push_pin,      material: push_pin,      codepoint: 0xF10D}
+  - {id: 19, name: bar_chart,     material: bar_chart,     codepoint: 0xE26B}
+  - {id: 20, name: approval,      material: approval,      codepoint: 0xE982}
+  - {id: 21, name: hourglass,     material: hourglass_empty, codepoint: 0xE88B, note: "Material Icons has no plain hourglass; hourglass_empty is the outline hourglass"}
+  - {id: 22, name: bug_report,    material: bug_report,    codepoint: 0xE868}
+  - {id: 23, name: folder,        material: folder,        codepoint: 0xE2C7}
+  - {id: 24, name: person,        material: person,        codepoint: 0xE7FD}

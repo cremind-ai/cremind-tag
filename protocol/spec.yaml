@@ -73,8 +73,8 @@ constants:
   BRIDGE_MAX_SUSPENDS_PER_MIN: {value: 6,  doc: "Upper bound on mesh suspend/resume cycles per minute (anti-starvation)"}
   FONT_SIZES:               {value: [16, 24, 32], doc: "Glyph strike sizes in pixels"}
   ICON_SIZES:               {value: [16, 24, 32, 48], doc: "Icon strike sizes in pixels"}
-  FONTPACK_WORKING_SPACE:   {value: 16777216, doc: "16 MiB bridge working space in the flash sizing rule"}
-  FONTPACK_DIR_SIZE:        {value: 65536, doc: "Slot directory area at external flash offset 0"}
+  FONTPACK_WORKING_SPACE:   {value: 16777216, doc: "16 MiB bridge working space in the flash sizing rule (production parts; development boards may configure a smaller one, docs/fontpack.md §3)"}
+  FONTPACK_DIR_SIZE:        {value: 65536, doc: "Slot directory area at the START OF THE WORKING SPACE (offset 2 * slot_size), docs/fontpack.md §3"}
 
 # ---------------------------------------------------------------------------
 # Status codes shared by serial responses/events, mesh STATUS/RESULT messages,

@@ -37,6 +37,9 @@ class FaceInfo:
     languages: tuple[str, ...] = ()
     """BCP-47 prefixes that prefer this face (CJK regions: ``zh-Hans``, ``zh-Hant``, ``zh-HK``, ``ja``, ``ko``)."""
     rtl: bool = False
+    variations: tuple[tuple[str, float], ...] = ()
+    """Variation-axis coordinates the pack was rasterised at (Noto Emoji: ``(("wght", 400.0),)``);
+    shape with the same (HarfBuzz ``font.set_variations``)."""
 
 
 @dataclass(frozen=True)
