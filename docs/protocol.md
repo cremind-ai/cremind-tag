@@ -572,8 +572,24 @@ These close gaps the sections above leave open. The companion's simulator
   the tag repeats the refresh.
 - After `FRAME_BEGIN` the bridge waits for that record's credit (or the tag's
   immediate `RESULT`) before streaming plane data.
-- `AUTH_FAILED`, `STALE_EPOCH`, `VERSION_MISMATCH` and `NOT_FOUND` from a tag end
-  the tag's jobs of that epoch. Link-level failures (`DISCONNECTED`, `TIMEOUT`,
+- Statuses a tag sends **before `AUTH_OK`** are unauthenticated (a plaintext
+  `ERROR`, a `CHALLENGE` with an unsupported `proto`, a wrong `mac_t`): anyone
+  who can advertise a tag's public id could send them. The bridge treats them
+  as link-level failures (back-off, no result) until the same status repeats in
+  3 consecutive sessions for that tag and epoch; only then does it end the tag's
+  jobs of that epoch with it (`AUTH_FAILED`, `STALE_EPOCH`, `VERSION_MISMATCH`,
+  `NOT_FOUND`). Statuses inside authenticated `RESULT` records act at once.
+- Session deadlines: the bridge's step deadline advances only on progress (a
+  complete handshake message, an authenticated record, or a `CREDIT` with n > 0
+  while it waits for credit). A `CREDIT` before `AUTH_OK` ends the session
+  (`INVALID`). Every session is also bounded absolutely: the handshake must
+  complete within 5 s of the connection, and each frame (from `FRAME_BEGIN` to
+  its `RESULT`) within 60 s + 1 s per KiB of plane data + the panel's refresh
+  timeout. Expiry ends the session with `TIMEOUT` (a link-level failure).
+- Plane data for a frame is streamed only after the tag has granted a credit
+  for **that** `FRAME_BEGIN` record (credits are counted per record, never
+  carried over from a previous record or job).
+- Link-level failures (`DISCONNECTED`, `TIMEOUT`,
   `CONNECT_FAILED`, `MESH_SUSPEND_FAILED`, `MESH_RESUME_FAILED`) are retried after
   the per-tag back-off and never produce a result on their own; the companion's
   job TTL bounds them.
