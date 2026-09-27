@@ -103,7 +103,12 @@ fontpack_id, layout}` answers:
 - `ACCEPTED` — queued in the gateway (stage `GATEWAY_RECEIVED`),
 - `BUSY` — the gateway's delivery queue is full; retry later,
 - `INVALID` / `TOO_LARGE` — rejected (companion marks the job `FAILED`),
-- `DUPLICATE` — same `op_id` seen.
+- the remembered status with `detail = DUPLICATE` — this `op_id` was seen
+  before (§1.4).
+
+The companion never sends a layout larger than `LAYOUT_SERIAL_MAX` (4000
+bytes): the request's CBOR envelope must fit `SERIAL_MAX_PAYLOAD`. Bridges
+still validate against `LAYOUT_HARD_MAX` (§4.3).
 
 Then `EVT_STAGE` (`BRIDGE_RECEIVED`, `TRANSFERRING`, `REFRESHING`) best effort,
 and exactly one retained `EVT_RESULT` with the final `status`
@@ -500,3 +505,66 @@ the previous 44 bytes. Firmware refuses to advertise (and blinks/logs
 `SECURITY_CONFIG`) when the blob is missing or its CRC fails. The companion
 keeps the secret in the OS credential store and never sends it to Cremind or to
 a bridge.
+
+---
+
+## 10. Shared implementation rules (gateway, bridge, tag, simulator)
+
+These close gaps the sections above leave open. The companion's simulator
+(`docs/simulator.md`) implements exactly these rules; firmware must match.
+
+**Serial link**
+
+- `HELLO` is exempt from credit counting in both directions. Its response's
+  `credits` header byte is added to the `SERIAL_DEFAULT_CREDITS` the host starts
+  with; grants received before the `HELLO` response are ignored.
+- On `HELLO` the device drops responses it has not yet sent, answers `HELLO`
+  immediately, then re-sends every retained event.
+- On a response timeout or a credit stall the host sends `HELLO` again (which
+  repairs credit state after a lost frame) and re-sends pending requests with the
+  same `op_id`.
+- A repeated `op_id` answers the remembered status with `detail = DUPLICATE`.
+  Transient refusals (`BUSY`, `NO_RESOURCES`, `PROVISIONING_ACTIVE`) are **not**
+  remembered, so a retry with the same `op_id` can succeed.
+- `REBOOT` answers first, then the device resets (USB re-enumerates; the host
+  reconnects and sees a new `boot_id`).
+- The gateway identifies itself to the companion by its USB serial number (or,
+  without one, the port it was reached on); the companion derives the hardware id
+  `gw-<uuid5>` from it.
+
+**Delivery**
+
+- A `LAYOUT_STATUS` other than `OK`, `INCOMPLETE` or `DUPLICATE` ends the
+  delivery: the gateway emits its `EVT_RESULT` with that status and a zero digest.
+  Delivering to an unknown or unconfigured bridge answers `NOT_FOUND` at once.
+- `DUPLICATE` at the bridge: a displayed revision's stored result is re-sent under
+  the new `update_id`; a still-pending revision adopts the new `update_id`; a
+  revision that ended without being displayed is accepted again.
+- The bridge persists its `result_seq` counter across reboots so the gateway's
+  `(bridge, result_seq)` de-duplication never swallows a new result.
+- A job whose `FRAME_END` was sent but whose `RESULT` was lost ends
+  `DISPLAY_STATE_UNKNOWN` when the next `CHALLENGE` reports the unknown state for
+  that `(epoch, revision)`; the companion then re-delivers the same revision and
+  the tag repeats the refresh.
+- After `FRAME_BEGIN` the bridge waits for that record's credit (or the tag's
+  immediate `RESULT`) before streaming plane data.
+- `AUTH_FAILED`, `STALE_EPOCH`, `VERSION_MISMATCH` and `NOT_FOUND` from a tag end
+  the tag's jobs of that epoch. Link-level failures (`DISCONNECTED`, `TIMEOUT`,
+  `CONNECT_FAILED`, `MESH_SUSPEND_FAILED`, `MESH_RESUME_FAILED`) are retried after
+  the per-tag back-off and never produce a result on their own; the companion's
+  job TTL bounds them.
+- A successful `CLEAR` resets the bridge's history for that tag to revision 0,
+  mirroring the tag, so a later delivery of the previously shown revision is
+  drawn again rather than answered from history.
+- `ASSIGN_DEL` of an absent assignment answers `OK`.
+- Tag commands `IDENTIFY` and `REFRESH` are companion-level (a new revision); a
+  tag that receives them answers `UNSUPPORTED`.
+
+**Font flash**
+
+- `FLASH_TEST` reports `BUSY` for any test position inside the active slot or the
+  slot directory, and tests the rest.
+
+**Known limitation.** `EVT_RESULT`/`DELIVERY_RESULT` carry no "stored ACK re-sent"
+flag, so the tag's duplicate flag (`RESULT.flags.bit0`) does not reach the
+companion; a duplicate is reported as `OK`.

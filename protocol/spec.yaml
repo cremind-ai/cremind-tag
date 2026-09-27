@@ -38,6 +38,7 @@ constants:
   MESH_RESULT_RETRY_MS:     {value: 2000,  doc: "Interval between DELIVERY_RESULT re-sends"}
   LAYOUT_TYPICAL_MAX:       {value: 1024,  doc: "Typical logical card upper bound (design target, not enforced)"}
   LAYOUT_HARD_MAX:          {value: 4096,  doc: "Hard maximum logical screen size in bytes"}
+  LAYOUT_SERIAL_MAX:        {value: 4000,  doc: "Largest layout the companion sends: DELIVER_LAYOUT's CBOR envelope must fit SERIAL_MAX_PAYLOAD (bridges still accept up to LAYOUT_HARD_MAX)"}
   LAYOUT_MAX_GLYPHS:        {value: 512,   doc: "Hard maximum positioned glyphs per screen"}
   LAYOUT_MAX_COMMANDS:      {value: 256,   doc: "Hard maximum commands per screen"}
   LAYOUT_CHUNK_DATA_MAX:    {value: 150,   doc: "Layout bytes per mesh LAYOUT_CHUNK"}
@@ -241,7 +242,7 @@ serial:
     FONT_COMMIT:     {value: 0x62, dir: h2d, doc: "{} -> {status, fontpack_id}; verifies SHA-256 then flips the slot directory"}
     FONT_STATUS:     {value: 0x63, dir: h2d, doc: "{} -> {status, fontpack_id, slot, size, flash_size}"}
     FONT_ABORT:      {value: 0x64, dir: h2d, doc: "{} -> {status}"}
-    FLASH_TEST:      {value: 0x65, dir: h2d, doc: "{op_id} -> {status, flash_size, items:[{offset, status}]}; erase/write/read-back patterns at the first sector of the inactive slot, the sectors either side of the 16 MiB boundary and the last sector of the device (the working space ends there); never touches the active slot or the directory"}
+    FLASH_TEST:      {value: 0x65, dir: h2d, doc: "{op_id} -> {status, flash_size, items:[{offset, status}]}; erase/write/read-back patterns at the first and last sectors of the inactive slot, the last sector of the device (the working space ends there) and, when neither lies in the active slot or the directory, the sectors either side of the 16 MiB boundary (else that item reports BUSY); never touches the active slot or the directory"}
     # --- events (device -> host), request_id = 0, flags = EVENT, carry {seq} when retained
     EVT_LOG:             {value: 0x80, dir: d2h, doc: "{text} diagnostic, not retained"}
     EVT_UNPROV_BEACON:   {value: 0x81, dir: d2h, doc: "{uuid, rssi, oob}"}
@@ -257,8 +258,8 @@ serial:
 # Mesh / GATT tag command ids (TAG_COMMAND.cmd, mesh TAG_CMD.cmd, GATT CMD record).
 tag_commands:
   CLEAR:    {value: 1, doc: "Clear to white (full refresh) and persist revision 0 for the epoch"}
-  IDENTIFY: {value: 2, doc: "Show an identify pattern with the tag id (bridge renders it)"}
-  REFRESH:  {value: 3, doc: "Re-send the current layout (repeat refresh)"}
+  IDENTIFY: {value: 2, doc: "Companion-level: delivered as a new revision showing the tag id; a tag receiving it answers UNSUPPORTED"}
+  REFRESH:  {value: 3, doc: "Companion-level: re-delivers the current screen as a new revision; a tag receiving it answers UNSUPPORTED"}
   SLEEP:    {value: 4, doc: "Enter shipping mode (System OFF) — only if external wake is verified"}
 
 node_roles:
