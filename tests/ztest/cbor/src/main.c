@@ -271,4 +271,254 @@ ZTEST(ctag_cbor, test_decode_strictness)
 	zassert_equal(ctag_cbor_key_kind(62), 0);
 }
 
+/* ---- Work bounds: nested maps were once re-scanned for every later key ---- */
+
+static uint8_t big[65536 + 8];
+
+static size_t put_head(uint8_t *p, uint8_t major, size_t n)
+{
+	if (n < 24u) {
+		p[0] = (uint8_t)(major << 5 | n);
+		return 1;
+	}
+	if (n < 256u) {
+		p[0] = (uint8_t)(major << 5 | 24u);
+		p[1] = (uint8_t)n;
+		return 2;
+	}
+	p[0] = (uint8_t)(major << 5 | 25u);
+	p[1] = (uint8_t)(n >> 8);
+	p[2] = (uint8_t)n;
+	return 3;
+}
+
+/*
+ * levels nested maps of n entries: unknown keys 64, 65, ... (skipped by the
+ * typed decoding) with value 0, except that the first (or the last) key's
+ * value is the next level's map. A 7 x 32 payload is 680 bytes.
+ */
+static size_t nested(uint8_t *p, unsigned int levels, unsigned int n, bool last)
+{
+	size_t len = put_head(p, 5, n);
+	unsigned int at = last ? n - 1u : 0u;
+
+	for (unsigned int j = 0; j < n; j++) {
+		p[len++] = 0x18;
+		p[len++] = (uint8_t)(64u + j);
+		if (j == at && levels > 1u) {
+			len += nested(&p[len], levels - 1u, n, last);
+		} else {
+			p[len++] = 0x00;
+		}
+	}
+	return len;
+}
+
+static int decode_counted(const uint8_t *data, size_t len)
+{
+	struct ctag_cbor_field f[1] = {{.key = CTAG_CBOR_KEY_STATUS}};
+
+	ctag_cbor_steps = 0;
+	return ctag_cbor_decode(data, len, f, 1);
+}
+
+ZTEST(ctag_cbor, test_nested_maps_linear_work)
+{
+	static const struct {
+		uint8_t levels, n;
+		bool last;
+		int rc;
+	} cases[] = {
+		{7, 8, false, 0},
+		{7, 16, false, 0},
+		{7, 32, false, 0}, /* the review's 680-byte payload */
+		{5, 32, false, 0},
+		{8, 32, false, 0},
+		{3, 32, true, 0},        /* 32 + 32 + 32 keys held at once: MAX_KEYS */
+		{4, 32, true, -EBADMSG}, /* 128 keys held at once */
+		{7, 32, true, -EBADMSG},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		unsigned int levels = cases[i].levels, n = cases[i].n;
+		size_t len = nested(big, levels, n, cases[i].last);
+		/* Each item is visited once (items <= bytes), and each key is
+		 * compared only with the earlier keys of its own map. */
+		unsigned long bound = len + levels * (n * (n - 1u) / 2u);
+
+		if (levels == 7u && n == 32u && !cases[i].last) {
+			zassert_equal(len, 680u);
+		}
+		zassert_equal(decode_counted(big, len), cases[i].rc, "case %u", (unsigned int)i);
+		zassert_true(ctag_cbor_steps <= bound, "case %u: %lu steps > %lu", (unsigned int)i,
+			     ctag_cbor_steps, bound);
+	}
+}
+
+ZTEST(ctag_cbor, test_scan_bounds)
+{
+	size_t len, m;
+
+	/* 96 keys in one map; 97 is refused before any is read. */
+	len = nested(big, 1, 96, false);
+	zassert_ok(decode_counted(big, len));
+	len = nested(big, 1, 97, false);
+	zassert_equal(decode_counted(big, len), -EBADMSG);
+	zassert_true(ctag_cbor_steps <= 2u);
+
+	/* 512 map entries in a payload: {64: [{64: 0} x m]} has 1 + m. */
+	for (m = 511; m <= 512; m++) {
+		len = 0;
+		big[len++] = 0xa1;
+		big[len++] = 0x18;
+		big[len++] = 0x40;
+		len += put_head(&big[len], 4, m);
+		for (size_t j = 0; j < m; j++) {
+			memcpy(&big[len], (const uint8_t[]){0xa1, 0x18, 0x40, 0x00}, 4);
+			len += 4;
+		}
+		zassert_equal(decode_counted(big, len), m == 511 ? 0 : -EBADMSG, "%u maps",
+			      (unsigned int)m);
+		zassert_true(ctag_cbor_steps <= len);
+	}
+
+	/* The key offsets are 16-bit: {64: h'...'} of 65535 bytes, then 65536. */
+	for (m = 65529; m <= 65530; m++) {
+		memset(big, 0, sizeof(big));
+		memcpy(big, (const uint8_t[]){0xa1, 0x18, 0x40, 0x59, (uint8_t)(m >> 8), (uint8_t)m},
+		       6);
+		zassert_equal(decode_counted(big, 6 + m), m == 65529 ? 0 : -EBADMSG);
+	}
+}
+
+ZTEST(ctag_cbor, test_duplicates_per_map)
+{
+	/* Keys are compared within their own map only; values of unknown keys
+	 * are skipped by the typed decoding, so any key kind reaches the scan. */
+	static const struct raw cases[] = {
+		RAW("same key in a nested map and its parent", 0xa2, 0x18, 0x40, 0xa1, 0x18, 0x41,
+		    0x00, 0x18, 0x41, 0x00),
+		RAW("same key in two sibling maps", 0xa1, 0x18, 0x40, 0x82, 0xa1, 0x18, 0x40, 0x00,
+		    0xa1, 0x18, 0x40, 0x00),
+		RAW("distinct map keys", 0xa1, 0x18, 0x40, 0xa2, 0xa1, 0x00, 0x00, 0x00, 0xa1, 0x00,
+		    0x01, 0x00),
+	};
+	static const struct raw dups[] = {
+		RAW("duplicate inside a nested map", 0xa1, 0x18, 0x40, 0xa2, 0x18, 0x41, 0x00, 0x18,
+		    0x41, 0x01),
+		RAW("parent duplicate after a nested map", 0xa2, 0x18, 0x40, 0xa1, 0x18, 0x41, 0x00,
+		    0x18, 0x40, 0x00),
+		RAW("duplicate map keys", 0xa1, 0x18, 0x40, 0xa2, 0xa1, 0x00, 0x00, 0x00, 0xa1, 0x00,
+		    0x00, 0x01),
+		RAW("duplicate counter name", 0xa1, 0x18, 0x19, 0xa2, 0x61, 0x61, 0x00, 0x61, 0x61,
+		    0x01),
+	};
+	size_t len;
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		zassert_ok(decode_counted(cases[i].data, cases[i].len), "%s", cases[i].name);
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(dups); i++) {
+		zassert_equal(decode_counted(dups[i].data, dups[i].len), -EBADMSG, "%s",
+			      dups[i].name);
+	}
+	/* The 96th key repeats the first. */
+	len = nested(big, 1, 96, false);
+	big[len - 2] = 64;
+	zassert_equal(decode_counted(big, len), -EBADMSG);
+}
+
+/* The largest spec shapes: INFO with 64 counters, GET_INVENTORY at its maximum. */
+ZTEST(ctag_cbor, test_spec_sized_payloads)
+{
+	static char names[64][4];
+	static struct ctag_cbor_counter counters[64];
+	static struct ctag_cbor_counter got[64];
+	static struct ctag_cbor_field as_f[128][2];
+	static struct ctag_cbor_map as_maps[128];
+	static struct ctag_cbor_field item[5][12];
+	static struct ctag_cbor_field caps[5];
+	static struct ctag_cbor_map items[5];
+	static const uint8_t caps_keys[5] = {CTAG_CBOR_KEY_FLAGS, CTAG_CBOR_KEY_PROTO,
+					     CTAG_CBOR_KEY_BOARD, CTAG_CBOR_KEY_FLASH_SIZE,
+					     CTAG_CBOR_KEY_MAX_TAGS};
+	static const uint8_t uuid[16] = {1};
+	static const uint8_t fontpack[8] = {2};
+	struct ctag_cbor_field info[] = {
+		{.key = CTAG_CBOR_KEY_STATUS, .kind = CTAG_CBOR_UINT},
+		{.key = CTAG_CBOR_KEY_DETAIL, .kind = CTAG_CBOR_UINT},
+		{.key = CTAG_CBOR_KEY_FW, .kind = CTAG_CBOR_TSTR, .v.str = {(const uint8_t *)"1.2.3", 5}},
+		{.key = CTAG_CBOR_KEY_BUILD, .kind = CTAG_CBOR_TSTR, .v.str = {(const uint8_t *)"b", 1}},
+		{.key = CTAG_CBOR_KEY_BOOT_ID, .kind = CTAG_CBOR_UINT, .v.u = 7},
+		{.key = CTAG_CBOR_KEY_CAPS, .kind = CTAG_CBOR_MAP, .v.map = {caps, 5}},
+		{.key = CTAG_CBOR_KEY_COUNTERS, .kind = CTAG_CBOR_COUNTERS, .v.counters = {counters, 64}},
+		{.key = CTAG_CBOR_KEY_TEXT, .kind = CTAG_CBOR_TSTR, .v.str = {(const uint8_t *)"t", 1}},
+	};
+	struct ctag_cbor_field inv[] = {
+		{.key = CTAG_CBOR_KEY_STATUS, .kind = CTAG_CBOR_UINT},
+		{.key = CTAG_CBOR_KEY_ITEMS, .kind = CTAG_CBOR_MAPS, .v.maps = {items, 5}},
+	};
+	struct ctag_cbor_field f[2] = {{.key = CTAG_CBOR_KEY_COUNTERS}, {.key = CTAG_CBOR_KEY_ITEMS}};
+	int n;
+
+	for (int i = 0; i < 5; i++) {
+		caps[i] = (struct ctag_cbor_field){.key = caps_keys[i], .kind = CTAG_CBOR_UINT};
+	}
+	for (int i = 0; i < 64; i++) {
+		names[i][0] = 'c';
+		names[i][1] = (char)('0' + i / 10);
+		names[i][2] = (char)('0' + i % 10);
+		counters[i] = (struct ctag_cbor_counter){names[i], 3, (uint32_t)i};
+	}
+	n = ctag_cbor_encode(info, ARRAY_SIZE(info), big, sizeof(big));
+	zassert_true(n > 0);
+	zassert_ok(decode_counted(big, (size_t)n), "INFO with 64 counters");
+	zassert_ok(ctag_cbor_decode(big, (size_t)n, f, 1));
+	zassert_equal(ctag_cbor_counters(&f[0].v.str, got, ARRAY_SIZE(got)), 64);
+
+	/* 5 bridges with 12 keys, caps and 8 health counters; 128 assignments. */
+	for (int i = 0; i < 128; i++) {
+		as_f[i][0] = (struct ctag_cbor_field){
+			.key = CTAG_CBOR_KEY_TAG_ID, .kind = CTAG_CBOR_UINT, .v.u = 0x10000000u + i};
+		as_f[i][1] = (struct ctag_cbor_field){
+			.key = CTAG_CBOR_KEY_EPOCH, .kind = CTAG_CBOR_UINT, .v.u = 0x10000u};
+		as_maps[i] = (struct ctag_cbor_map){as_f[i], 2};
+	}
+	for (int i = 0; i < 5; i++) {
+		struct ctag_cbor_field *it = item[i];
+
+		it[0] = (struct ctag_cbor_field){.key = CTAG_CBOR_KEY_ADDR, .kind = CTAG_CBOR_UINT};
+		it[1] = (struct ctag_cbor_field){
+			.key = CTAG_CBOR_KEY_UUID, .kind = CTAG_CBOR_BSTR, .v.str = {uuid, 16}};
+		it[2] = (struct ctag_cbor_field){
+			.key = CTAG_CBOR_KEY_NAME, .kind = CTAG_CBOR_TSTR, .v.str = {uuid, 1}};
+		it[3] = (struct ctag_cbor_field){.key = CTAG_CBOR_KEY_CONFIGURED,
+						 .kind = CTAG_CBOR_BOOL};
+		it[4] = (struct ctag_cbor_field){.key = CTAG_CBOR_KEY_LAST_SEEN_S,
+						 .kind = CTAG_CBOR_UINT};
+		it[5] = (struct ctag_cbor_field){.key = CTAG_CBOR_KEY_ASSIGNED,
+						 .kind = CTAG_CBOR_MAPS,
+						 .v.maps = {i == 0 ? as_maps : NULL, i == 0 ? 128 : 0}};
+		it[6] = (struct ctag_cbor_field){
+			.key = CTAG_CBOR_KEY_FW, .kind = CTAG_CBOR_TSTR, .v.str = {(const uint8_t *)"1", 1}};
+		it[7] = (struct ctag_cbor_field){
+			.key = CTAG_CBOR_KEY_FONTPACK_ID, .kind = CTAG_CBOR_BSTR, .v.str = {fontpack, 8}};
+		it[8] = (struct ctag_cbor_field){
+			.key = CTAG_CBOR_KEY_CAPS, .kind = CTAG_CBOR_MAP, .v.map = {caps, 5}};
+		it[9] = (struct ctag_cbor_field){.key = CTAG_CBOR_KEY_BOARD, .kind = CTAG_CBOR_UINT};
+		it[10] = (struct ctag_cbor_field){.key = CTAG_CBOR_KEY_FLASH_SIZE,
+						  .kind = CTAG_CBOR_UINT};
+		it[11] = (struct ctag_cbor_field){.key = CTAG_CBOR_KEY_COUNTERS,
+						  .kind = CTAG_CBOR_COUNTERS,
+						  .v.counters = {counters, 8}};
+		items[i] = (struct ctag_cbor_map){it, 12};
+	}
+	n = ctag_cbor_encode(inv, ARRAY_SIZE(inv), big, sizeof(big));
+	zassert_true(n > 0 && n <= CTAG_SERIAL_MAX_PAYLOAD, "%d bytes", n);
+	/* 2 + 5 x (12 + 5 + 8) + 128 x 2 = 383 map entries. */
+	zassert_ok(decode_counted(big, (size_t)n), "GET_INVENTORY at its maximum");
+	zassert_ok(ctag_cbor_decode(big, (size_t)n, &f[1], 1));
+	zassert_true(f[1].present);
+}
+
 ZTEST_SUITE(ctag_cbor, NULL, NULL, NULL, NULL, NULL);

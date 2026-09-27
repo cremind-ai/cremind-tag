@@ -252,20 +252,47 @@ int ctag_cbor_encode(const struct ctag_cbor_field *fields, size_t count, uint8_t
 
 /* ---- Well-formedness (cbor_msgs.py check_well_formed) ---- */
 
-static bool scan(const uint8_t *d, size_t len, size_t *pos, unsigned int depth);
+/*
+ * Work bounds of the scan (docs/firmware-libs.md). Every item is visited
+ * once, and a key is compared only with the earlier keys of its own map: the
+ * scan records each key as (start, end) on a stack shared by the maps being
+ * scanned, so a map's keys and the keys its enclosing maps had read before it
+ * must fit MAX_KEYS together. Spec payloads need at most 72 at once (8
+ * top-level keys before a counters map of up to 64: MAINT_COUNTERS, the
+ * gateway's MAX_COUNTERS) and at most 383 map entries (GET_INVENTORY with 5
+ * bridges and CONFIG_CTAG_GW_ASSIGN_MAX = 128). Anything larger is refused.
+ */
+#define MAX_KEYS    96u  /* keys recorded at one time */
+#define MAX_ENTRIES 512u /* map entries in one payload */
+
+#ifdef CTAG_CBOR_STEPS
+unsigned long ctag_cbor_steps;
+#define STEP() (ctag_cbor_steps++)
+#else
+#define STEP() ((void)0)
+#endif
+
+struct wf {
+	const uint8_t *d;
+	size_t len;
+	size_t pos;
+	uint16_t entries;          /* map entries so far */
+	uint16_t keys;             /* recorded keys */
+	uint16_t key[MAX_KEYS][2]; /* start, end: len <= UINT16_MAX */
+};
 
 /* Item head: definite, shortest form, no floats or simple values but false/true. */
-static bool head(const uint8_t *d, size_t len, size_t *pos, uint8_t *major, uint64_t *arg)
+static bool head(struct wf *s, uint8_t *major, uint64_t *arg)
 {
 	uint8_t info;
 	size_t w;
 
-	if (*pos >= len) {
+	if (s->pos >= s->len) {
 		return false;
 	}
-	*major = d[*pos] >> 5;
-	info = d[*pos] & 0x1Fu;
-	(*pos)++;
+	*major = s->d[s->pos] >> 5;
+	info = s->d[s->pos] & 0x1Fu;
+	s->pos++;
 	if (info < 24u) {
 		*arg = info;
 		return *major != 7u || info == 20u || info == 21u;
@@ -274,83 +301,108 @@ static bool head(const uint8_t *d, size_t len, size_t *pos, uint8_t *major, uint
 		return false;
 	}
 	w = (size_t)1u << (info - 24u);
-	if (len - *pos < w) {
+	if (s->len - s->pos < w) {
 		return false;
 	}
 	for (*arg = 0u; w > 0u; w--) {
-		*arg = *arg << 8 | d[(*pos)++];
+		*arg = *arg << 8 | s->d[s->pos++];
 	}
 	w = (size_t)1u << (info - 24u);
 	return *arg >= (w == 1u ? 24u : (uint64_t)1u << (4u * w));
 }
 
-/* Is the key at [k, k_end) equal to an earlier key of the map starting at start? */
-static bool duplicate_key(const uint8_t *d, size_t len, size_t start, size_t k, size_t k_end)
+static bool text_ok(const uint8_t *p, size_t n)
 {
-	size_t p = start;
+	struct ctag_utf8 u;
 
-	while (p < k) {
-		size_t q = p;
+	ctag_utf8_init(&u);
+	ctag_utf8_feed(&u, p, n);
+	return ctag_utf8_valid(&u);
+}
 
-		(void)scan(d, len, &q, 0u);
-		if (q - p == k_end - k && memcmp(&d[p], &d[k], q - p) == 0) {
+/* Is the key just scanned, [k, pos), one of the keys recorded since base? */
+static bool duplicate_key(const struct wf *s, uint16_t base, size_t k)
+{
+	size_t n = s->pos - k;
+	uint16_t i;
+
+	for (i = base; i < s->keys; i++) {
+		STEP();
+		if ((size_t)(s->key[i][1] - s->key[i][0]) == n &&
+		    memcmp(&s->d[s->key[i][0]], &s->d[k], n) == 0) {
 			return true;
 		}
-		p = q;
-		(void)scan(d, len, &p, 0u);
 	}
 	return false;
 }
 
-static bool scan(const uint8_t *d, size_t len, size_t *pos, unsigned int depth)
+static bool scan(struct wf *s, unsigned int depth)
 {
-	struct ctag_utf8 u;
 	uint8_t major;
-	uint64_t arg, i;
-	size_t start;
+	uint64_t arg;
+	uint16_t base;
+	size_t k;
 
-	if (depth > MAX_DEPTH || !head(d, len, pos, &major, &arg)) {
+	STEP();
+	if (depth > MAX_DEPTH || !head(s, &major, &arg)) {
 		return false;
 	}
 	switch (major) {
 	case 2:
 	case 3:
-		if (arg > len - *pos) {
+		if (arg > s->len - s->pos || (major == 3u && !text_ok(&s->d[s->pos], (size_t)arg))) {
 			return false;
 		}
-		if (major == 3u) {
-			ctag_utf8_init(&u);
-			ctag_utf8_feed(&u, &d[*pos], (size_t)arg);
-			if (!ctag_utf8_valid(&u)) {
-				return false;
-			}
-		}
-		*pos += (size_t)arg;
+		s->pos += (size_t)arg;
 		return true;
 	case 4:
-		for (i = 0u; i < arg; i++) {
-			if (!scan(d, len, pos, depth + 1u)) {
+		for (; arg > 0u; arg--) {
+			if (!scan(s, depth + 1u)) {
 				return false;
 			}
 		}
 		return true;
 	case 5:
-		start = *pos;
-		for (i = 0u; i < arg; i++) {
-			size_t k = *pos;
-
-			if (!scan(d, len, pos, depth + 1u) ||
-			    duplicate_key(d, len, start, k, *pos) ||
-			    !scan(d, len, pos, depth + 1u)) {
+		base = s->keys;
+		if (arg > MAX_KEYS - base || arg > MAX_ENTRIES - s->entries) {
+			return false;
+		}
+		s->entries = (uint16_t)(s->entries + arg);
+		for (; arg > 0u; arg--) {
+			k = s->pos;
+			if (!scan(s, depth + 1u) || duplicate_key(s, base, k)) {
+				return false;
+			}
+			s->key[s->keys][0] = (uint16_t)k;
+			s->key[s->keys][1] = (uint16_t)s->pos;
+			s->keys++;
+			if (!scan(s, depth + 1u)) {
 				return false;
 			}
 		}
+		s->keys = base;
 		return true;
 	case 6:
 		return false; /* tags */
 	default:
 		return true; /* integers, false, true */
 	}
+}
+
+/* Out of line: the key stack and the zcbor states are never on the stack together. */
+static __attribute__((noinline)) bool well_formed(const uint8_t *buf, size_t len)
+{
+	struct wf s;
+
+	if (len > UINT16_MAX) {
+		return false;
+	}
+	s.d = buf;
+	s.len = len;
+	s.pos = 0u;
+	s.entries = 0u;
+	s.keys = 0u;
+	return scan(&s, 0u) && s.pos == len;
 }
 
 /* ---- Typed decoding ---- */
@@ -485,9 +537,15 @@ static bool decode_map(zcbor_state_t *zs, struct ctag_cbor_field *fields, size_t
 	return zcbor_map_end_decode(zs);
 }
 
+static __attribute__((noinline)) bool decode_payload(const uint8_t *buf, size_t len,
+						    struct ctag_cbor_field *fields, size_t count)
+{
+	ZCBOR_STATE_D(zs, MAX_DEPTH + 1u, buf, len, 1, 0);
+	return decode_map(zs, fields, count);
+}
+
 int ctag_cbor_decode(const uint8_t *buf, size_t len, struct ctag_cbor_field *fields, size_t count)
 {
-	size_t pos = 0u;
 	size_t i;
 
 	for (i = 0u; i < count; i++) {
@@ -497,11 +555,7 @@ int ctag_cbor_decode(const uint8_t *buf, size_t len, struct ctag_cbor_field *fie
 	if (len == 0u) {
 		return 0;
 	}
-	if (!scan(buf, len, &pos, 0u) || pos != len) {
-		return -EBADMSG;
-	}
-	ZCBOR_STATE_D(zs, MAX_DEPTH + 1u, buf, len, 1, 0);
-	return decode_map(zs, fields, count) ? 0 : -EBADMSG;
+	return well_formed(buf, len) && decode_payload(buf, len, fields, count) ? 0 : -EBADMSG;
 }
 
 int ctag_cbor_maps(const struct ctag_cbor_str *maps, struct ctag_cbor_str *items, size_t max)

@@ -60,7 +60,7 @@ Frames are the largest single stack frame of the library's functions
 | `ctag_crc32` (bitwise / nibble) | 48 / 116 | 48 | 44 / 116 | 44 | — | 16 B |
 | `ctag_utf8` | 154 | 154 | 148 | 148 | `ctag_utf8` 4 | 32 B |
 | `ctag_frame` (cobs + serial) | 764 (382 + 382) | 764 | 706 (372 + 334) | 706 | `ctag_serial_rx` 36, `ctag_cobs_decoder` 24, `ctag_credits` 4 | 48 B `frame_build` |
-| `ctag_cbor` (excl. zcbor) | 2036 | 2036 | 2076 | 2076 | `ctag_cbor_field` 16 each | 448 B `ctag_cbor_decode` (zcbor states) |
+| `ctag_cbor` (excl. zcbor) | 2142 | 2142 | 2120 | 2120 | `ctag_cbor_field` 16 each | 432 B `decode_payload` (zcbor states), 416 B `well_formed` (key stack) |
 | `ctag_layout` (validator + assembler) | 1448 (1098 + 350) | 1448 | 1280 (920 + 360) | 1280 | `ctag_layout_asm` 72, `ctag_layout_iter` 16 | 136 B `validate` |
 | `ctag_render` (render + fontpack + qrcodegen) | 8912 (2410 + 1482 + 5020) | 8554 | 8708 (2290 + 1400 + 5018) | 8392 | `ctag_render` 36, `ctag_render_work` 920, `ctag_fontpack` 80 | 488 B `fontpack_open`, 200 B `render_strip` |
 | `ctag_frag` | 206 | 206 | 194 | 194 | `ctag_frag_rx` 12, `ctag_frag_tx` 1 | 24 B |
@@ -87,8 +87,12 @@ Re-measure with `CONFIG_THREAD_ANALYZER` on hardware. On the bridge the own
 frames of `ctag_render_strip` (200) → `qrcodegen_encodeText` (80) →
 `qrcodegen_encodeSegmentsAdvanced` (112) → mask evaluation (≤ 48 each) sum to
 about 500 B, plus the glyph source's `read` callback on the glyph path;
-`ctag_fontpack_open` peaks at 488 B and `ctag_cbor_decode` at 448 B (zcbor
-states) plus its recursion.
+`ctag_fontpack_open` peaks at 488 B. `ctag_cbor_decode` (32) runs its two
+phases out of line, one after the other, so their frames never add up: the
+well-formedness scan, `well_formed` (416, the key stack) + at most 10 levels
+of `scan` (72 each) = 1168 B, the peak the scan had before the key stack
+existed (448 + 10 × 72); then the typed decoding, `decode_payload` (432, the
+zcbor states) + `decode_map` (80) per nested known map + zcbor's skip.
 
 ## ctag_frame — serial framing (docs/protocol.md §1.1, §1.3)
 
@@ -154,6 +158,19 @@ uint8_t ctag_cbor_key_kind(uint32_t key);
   `CTAG_CBOR_MAP` span to `ctag_cbor_decode()` again, split `CTAG_CBOR_MAPS`
   with `ctag_cbor_maps()`, read `CTAG_CBOR_COUNTERS` with
   `ctag_cbor_counters()`. Byte and text strings point into the payload.
+- Decode work is linear in the payload. The scan visits each item once and
+  compares a key only with the earlier keys of its own map, which it records
+  as (start, end) offsets on a 96-entry stack shared by the maps being
+  scanned (a map and the maps it is nested in). Beyond `cbor_msgs.py`, a
+  payload is `-EBADMSG` when a map's keys plus the keys its enclosing maps had
+  read before it exceed 96, when it holds more than 512 map entries in all, or
+  when it is longer than 65535 bytes (16-bit offsets). Every spec message fits:
+  at most 72 keys held at once (INFO: 8 top-level keys before a counters map
+  of up to 64, `MAINT_COUNTERS` and the gateway's `MAX_COUNTERS`) and 383 map
+  entries (GET_INVENTORY with 5 bridges and `CONFIG_CTAG_GW_ASSIGN_MAX` = 128).
+  The old scan re-scanned every earlier entry, nested maps included, for each
+  new key: N^depth work. A 680-byte payload of 7 nested levels × 32 entries
+  did not finish in 84 s on a desktop; it now takes 3921 steps.
 
 ## ctag_layout — validator, iterator, assembler (§3.2–§3.3, §4.1–§4.3)
 
@@ -399,7 +416,7 @@ acceptance of Python's `bytes.decode("utf-8")`.
 | Enrollment | host, ztest | `enrollment.json` |
 | Mutation robustness (layouts → renderer, font packs → reader, COBS, fragments) | host, ztest | — |
 | Session: K_epoch, handshake from both roles, records both ways, tampered/replayed/skipped records, handshake failures, backend sanity | ztest (PSA via Mbed TLS) | `session.json` |
-| CBOR: every fixture payload encoded byte for byte and decoded field for field (nested maps, counters), arrays of maps, strictness rules, encoder rejections | ztest | `serial_frames.json` |
+| CBOR: every fixture payload encoded byte for byte and decoded field for field (nested maps, counters), arrays of maps, strictness rules, encoder rejections; work bounds (the review's nested-map payloads, work counted by `ctag_cbor_steps` under `CTAG_CBOR_STEPS`), scan limits, duplicate keys per map, INFO and GET_INVENTORY at their largest | ztest | `serial_frames.json` |
 
 C test vectors are generated from the JSON fixtures at build time by
 [`tests/host/gen_vectors.py`](../tests/host/gen_vectors.py) (standard library

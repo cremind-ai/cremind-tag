@@ -151,20 +151,22 @@ static void send_plain(struct tag_core *c, uint8_t chr, uint8_t type, uint8_t ar
 	}
 }
 
-static FRAME void send_record(struct tag_core *c, uint8_t type, const uint8_t *pt, size_t len)
+/* Seal and queue a record on STATUS; false when it was not queued (the session ends). */
+static FRAME bool send_record(struct tag_core *c, uint8_t type, const uint8_t *pt, size_t len)
 {
 	uint8_t *p = txq_begin(c, TAG_CHR_STATUS, len + CTAG_RECORD_OVERHEAD);
 	int n;
 
 	if (p == NULL) {
-		return;
+		return false;
 	}
 	n = ctag_record_seal(&c->s.tx, type, pt, len, p, len + CTAG_RECORD_OVERHEAD);
 	if (n < 0) {
 		c->closing = 1u;
-		return;
+		return false;
 	}
 	txq_commit(c, (size_t)n);
+	return true;
 }
 
 /* ERROR{status} on CTRL, then disconnect (5.4: any failure ends the session). */
@@ -199,7 +201,11 @@ static FRAME void result(struct tag_core *c, uint64_t update_id, uint32_t revisi
 	r.refresh_ms = (uint16_t)(refresh_ms > 0xFFFFu ? 0xFFFFu : refresh_ms);
 	r.flags = flags;
 	(void)ctag_rec_result_pack(&r, pt, sizeof(pt));
-	send_record(c, CTAG_REC_RESULT, pt, sizeof(pt));
+	/* Every RESULT queued clears "result pending", the stored ACK of a
+	 * re-delivery included (sim/tag.py send_result()). */
+	if (send_record(c, CTAG_REC_RESULT, pt, sizeof(pt))) {
+		c->result_pending = 0u;
+	}
 }
 
 /* ---- handshake (5.4) ---- */
@@ -362,7 +368,6 @@ void tag_core_refresh_done(struct tag_core *c, uint8_t status)
 	if (c->link && !c->closing && c->s.state == CTAG_SESSION_ESTABLISHED) {
 		result(c, c->rec.update_id, c->rec.revision, status,
 		       status == CTAG_STATUS_OK ? c->rec.digest : NULL, ms, 0u);
-		c->result_pending = 0u;
 		credit(c);
 	}
 }

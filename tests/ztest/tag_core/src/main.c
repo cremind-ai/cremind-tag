@@ -1008,10 +1008,9 @@ ZTEST(tag_core_rules, test_frame_abort_and_out_of_order_data)
 	zassert_equal(fake_panel.commit, 0);
 }
 
-ZTEST(tag_core_rules, test_disconnect_during_refresh_completes)
+/* Revision 1 (update 5) refreshed while the link dropped: no RESULT was sent. */
+static void refresh_without_result(uint8_t d[32])
 {
-	uint8_t d[32];
-
 	rules_established();
 	digest_of(frame_planes[0], 384, d);
 	frame_begin(1, 5, d, 1, 384);
@@ -1023,8 +1022,57 @@ ZTEST(tag_core_rules, test_disconnect_during_refresh_completes)
 	zassert_equal(fake_panel.abort, 0, "a running refresh is never aborted");
 	tag_core_refresh_done(&core, CTAG_STATUS_OK);
 	check_record(1, 1, 5, d, CTAG_STATUS_OK, CTAG_TXN_DISPLAYED);
+}
+
+ZTEST(tag_core_rules, test_disconnect_during_refresh_completes)
+{
+	uint8_t d[32];
+
+	refresh_without_result(d);
 	/* The ACK was not delivered: advertise "result pending". */
 	zassert_equal(tag_core_adv_flags(&core, 3000), TAG_ADV_RESULT_PENDING);
+}
+
+ZTEST(tag_core_rules, test_stored_ack_clears_result_pending)
+{
+	struct ctag_rec_result res;
+	uint8_t d[32];
+
+	refresh_without_result(d);
+	link_up();
+	zassert_equal(handshake(1, NULL), CTAG_STATUS_OK);
+	zassert_equal(tag_core_adv_flags(&core, 3000), TAG_ADV_RESULT_PENDING, "no RESULT yet");
+	/* The bridge re-delivers revision 1: the stored ACK answers it (5.6). */
+	frame_begin(1, 5, d, 1, 384);
+	expect_result(&res);
+	zassert_equal(res.status, CTAG_STATUS_OK);
+	zassert_equal(res.flags, 0x01, "the stored ACK (duplicate)");
+	zassert_equal(res.update_id, 5);
+	zassert_equal(res.revision, 1);
+	expect_credit(1);
+	zassert_equal(tag_core_adv_flags(&core, 3000), 0, "the RESULT was delivered");
+}
+
+ZTEST(tag_core_rules, test_any_result_clears_result_pending)
+{
+	struct ctag_rec_result res;
+	uint8_t cmd[CTAG_REC_CMD_LEN] = {CTAG_TAG_CMD_IDENTIFY};
+	uint8_t d[32];
+
+	/* As sim/tag.py send_result(): every RESULT sent clears the flag. */
+	refresh_without_result(d);
+	link_up();
+	zassert_equal(handshake(1, NULL), CTAG_STATUS_OK);
+	send_record(CTAG_REC_CMD, cmd, sizeof(cmd), true);
+	expect_result(&res);
+	zassert_equal(res.status, CTAG_STATUS_UNSUPPORTED);
+	expect_credit(1);
+	zassert_equal(tag_core_adv_flags(&core, 3000), 0);
+
+	/* A reset loses it (RAM only, as in the simulator). */
+	refresh_without_result(d);
+	tag_core_init(&core, &cfg);
+	zassert_equal(tag_core_adv_flags(&core, 3000), 0);
 }
 
 ZTEST(tag_core_rules, test_advertising_flags)

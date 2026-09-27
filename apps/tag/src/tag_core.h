@@ -108,7 +108,8 @@ struct tag_core {
 	uint8_t fatal;         /* enum tag_fatal, set by tag_core_rx() */
 	uint8_t auth_failures; /* consecutive handshake AUTH failures */
 	uint8_t skip_window;   /* skip the next advertising window (5.4 pacing) */
-	uint8_t result_pending;
+	uint8_t result_pending; /* 5.1 flags bit0: set by a refresh, cleared by any RESULT
+				 * queued; RAM only, as in the simulator */
 	uint8_t bridge_credits; /* DATA records the bridge may still send */
 	uint8_t sleep;          /* CMD{SLEEP} accepted: System OFF after the disconnect */
 

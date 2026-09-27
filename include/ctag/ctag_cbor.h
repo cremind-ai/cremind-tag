@@ -87,9 +87,17 @@ int ctag_cbor_encode(const struct ctag_cbor_field *fields, size_t count, uint8_t
  * present and v are filled. The whole payload is checked as cbor_msgs.py does
  * (well-formed, canonical integers and lengths, no tags/floats, UTF-8 text,
  * no duplicate keys, known keys well-typed). Returns 0 or -EBADMSG. Nested
- * values point into buf.
+ * values point into buf. The work is linear in len: a payload is also refused
+ * when it exceeds the scan's bounds, which every spec message fits (nesting
+ * <= 8; at most 96 keys held at once, a map's keys plus the keys its
+ * enclosing maps had read before it; at most 512 map entries; len <= 65535).
  */
 int ctag_cbor_decode(const uint8_t *buf, size_t len, struct ctag_cbor_field *fields, size_t count);
+
+#ifdef CTAG_CBOR_STEPS
+/* Test builds only: items visited plus key comparisons made by the decoder. */
+extern unsigned long ctag_cbor_steps;
+#endif
 
 /* Split a decoded CTAG_CBOR_MAPS value into its maps; returns the count or -ENOSPC/-EBADMSG. */
 int ctag_cbor_maps(const struct ctag_cbor_str *maps, struct ctag_cbor_str *items, size_t max);
