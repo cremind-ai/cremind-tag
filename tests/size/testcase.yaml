@@ -1,0 +1,14 @@
+# Build-only: links the libraries for Cortex-M0 and Cortex-M4 so that their
+# footprint can be measured (docs/firmware-libs.md, "Measuring").
+common:
+  build_only: true
+  tags:
+    - ctag
+  platform_allow:
+    - qemu_cortex_m0
+    - nrf52840dk/nrf52840
+tests:
+  ctag.size.tag: {}
+  ctag.size.all:
+    extra_configs:
+      - CONFIG_CTAG_SIZE_BRIDGE=y

@@ -1,0 +1,101 @@
+# Cremind Tag firmware libraries (docs/firmware-libs.md). Applications enable
+# only the libraries they link.
+
+config CTAG_FRAME
+	bool "Serial framing: COBS, CRC-32 frames, credits"
+	select CTAG_CRC32
+	help
+	  COBS stream decoder, serial frame build/check (docs/protocol.md 1.1)
+	  and credit accounting (1.3). Gateway and bridge maintenance port.
+
+config CTAG_CBOR
+	bool "Serial CBOR payload maps (zcbor)"
+	select ZCBOR
+	select ZCBOR_CANONICAL
+	select CTAG_UTF8
+	help
+	  Canonical encode / strict decode of the integer-keyed CBOR maps carried
+	  by serial frames. Gateway and bridge maintenance port.
+
+config CTAG_LAYOUT
+	bool "Layout validator, iterator and chunk assembler"
+	help
+	  Validation in the order of docs/protocol.md 4.3, the command iterator
+	  and the LAYOUT_BEGIN/CHUNK/COMMIT assembler of 3.2-3.3. Bridge.
+
+config CTAG_RENDER
+	bool "Strip renderer, font-pack reader, QR"
+	select CTAG_LAYOUT
+	select CTAG_CRC32
+	select CTAG_UTF8
+	help
+	  Bit-exact strip renderer (docs/protocol.md 4.4), font-pack reader
+	  (docs/fontpack.md) and the vendored Nayuki qrcodegen v1.8.0. Bridge.
+
+config CTAG_FRAG
+	bool "GATT fragmentation"
+	help
+	  Fragment encoder and reassembler of docs/protocol.md 5.3. Tag and
+	  bridge.
+
+config CTAG_SESSION
+	bool "Tag session handshake and records"
+	depends on PSA_CRYPTO
+	select CTAG_CRYPTO_PSA
+	help
+	  Handshake state machines for the bridge and the tag, and record
+	  seal/open (docs/protocol.md 5.4-5.5), over ctag_crypto.h with the PSA
+	  backend. The lean PSA profile of docs/firmware-notes.md 12 suffices:
+	  PSA_WANT_ALG_HMAC, PSA_WANT_ALG_SHA_256, PSA_WANT_ALG_CCM,
+	  PSA_WANT_KEY_TYPE_AES, PSA_WANT_AES_KEY_SIZE_128,
+	  PSA_WANT_KEY_TYPE_HMAC; nonces come from sys_csrand_get().
+
+config CTAG_CRYPTO_PSA
+	bool
+	depends on PSA_CRYPTO
+
+config CTAG_TXN
+	bool "Tag display transaction"
+	select CTAG_CRC32
+	help
+	  FRAME_BEGIN decision table, boot recovery rule and the persisted
+	  display record (docs/protocol.md 5.6, 6). Tag.
+
+config CTAG_ENROLL
+	bool "Enrollment blob parser"
+	select CTAG_CRC32
+	help
+	  Parse and verify the 48-byte UICR enrollment blob (docs/protocol.md
+	  9). Tag.
+
+config CTAG_CRC32
+	bool
+
+choice CTAG_CRC32_IMPL
+	prompt "CRC-32 implementation"
+	depends on CTAG_CRC32
+	default CTAG_CRC32_NIBBLE if CTAG_FRAME || CTAG_RENDER
+	default CTAG_CRC32_BITWISE
+
+config CTAG_CRC32_BITWISE
+	bool "Bitwise, no table"
+	help
+	  Smallest; enough for the tag's enrollment blob and display record.
+
+config CTAG_CRC32_NIBBLE
+	bool "16-entry table"
+	help
+	  About four times faster than bitwise for 64 more bytes of flash:
+	  font-pack index checks and serial frames.
+
+config CTAG_CRC32_ZEPHYR
+	bool "Zephyr's crc32_ieee_update()"
+	select CRC
+	help
+	  Share Zephyr's CRC-32 when the application links crc32_ieee()
+	  anyway.
+
+endchoice
+
+config CTAG_UTF8
+	bool

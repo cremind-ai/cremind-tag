@@ -1,0 +1,16 @@
+common:
+  tags:
+    - ctag
+  platform_allow:
+    - native_sim
+    - native_sim/native/64
+  integration_platforms:
+    - native_sim
+tests:
+  ctag.host_suites: {}
+  ctag.host_suites.crc_bitwise:
+    extra_configs:
+      - CONFIG_CTAG_CRC32_BITWISE=y
+  ctag.host_suites.crc_zephyr:
+    extra_configs:
+      - CONFIG_CTAG_CRC32_ZEPHYR=y

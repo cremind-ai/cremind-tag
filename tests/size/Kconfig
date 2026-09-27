@@ -1,0 +1,7 @@
+config CTAG_SIZE_BRIDGE
+	bool "Also link the gateway/bridge libraries"
+	select CTAG_FRAME
+	select CTAG_CBOR
+	select CTAG_RENDER
+
+source "Kconfig.zephyr"
