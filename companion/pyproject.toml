@@ -1,0 +1,30 @@
+[project]
+name = "cremind-tag"
+dynamic = ["version"]
+description = "Cremind Tag companion: protocol reference implementation, gateway client and Cremind connector"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "cbor2>=5.6",
+    "cryptography>=43",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/cremind_tag/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cremind_tag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]

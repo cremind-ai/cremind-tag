@@ -1,0 +1,321 @@
+{
+  "description": "Normative rendering (docs/protocol.md \u00a74.4) with glyphs from fontpack_test.ctfp",
+  "fontpack": "fontpack_test.ctfp",
+  "strip_rows": 16,
+  "strip_note": "Rendering native rows [y0, y0 + strip_rows) of one plane must give exactly those rows of the full plane (row_bytes = ceil(width / 8)); the last strip may be shorter.",
+  "scenarios": [
+    {
+      "name": "rot0_bw_status_card",
+      "description": "rotation 0, 1 plane, plane_flags bit0 = 1 (1 = white)",
+      "panel": {
+        "width": 400,
+        "height": 300,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c010090012c010000050003020018010c000c0002010018012c0020000a0200000003000e000400070005000c00010005000600080007000a0008000f00090008000a000d0002010010010c004000090b0000000c000b000d000b00010005000e0005000f000a00100007001100040013000900040c004c0084014c000101060c000401780114002500640001",
+      "plane_len": 15000,
+      "planes_sha256": [
+        "8b7553d328858d3e377815d4927c725edd879801eba338e22ccdc10ab8280e73"
+      ],
+      "frame_digest": "8b7553d328858d3e377815d4927c725edd879801eba338e22ccdc10ab8280e73"
+    },
+    {
+      "name": "rot1_every_command",
+      "description": "rotation 1 on a 128x296 panel, 2 planes, every command",
+      "panel": {
+        "width": 128,
+        "height": 296,
+        "planes": 2,
+        "plane_flags": 3
+      },
+      "layout_hex": "434c010128018000010008000100020100100104001400030200000003000900040009fe020100180204003c00020500000013000c0303040010020e0104000400007f002701000002010596000a003c00280003010696003c0064000c00320064000107dc0046000101011968747470733a2f2f6372656d696e642e696f2f742f31413242",
+      "plane_len": 4736,
+      "planes_sha256": [
+        "d0b9918de42d057cf32d1c180fff37af24114039c7cbe229f8197f861476db63",
+        "26e63db9b975302500d54d8541a03c3eb05ef37076c395fc8ff4318c5587f602"
+      ],
+      "frame_digest": "558c31e414598a01e8b8b073aa9944072c426c745c8b6207350ec5591ce4e6f0"
+    },
+    {
+      "name": "rot1_asym",
+      "description": "rotation 1, odd native width 37 (row padding)",
+      "panel": {
+        "width": 37,
+        "height": 21,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c0100150025000100040004000000001400050001010502001e00060004000101030300100104000800020100100101002200020700000008000700",
+      "plane_len": 105,
+      "planes_sha256": [
+        "71f89da1b3cb1a1ffe6077fe631cdd5496f442f01b22e60e78a944d17814a63a"
+      ],
+      "frame_digest": "71f89da1b3cb1a1ffe6077fe631cdd5496f442f01b22e60e78a944d17814a63a",
+      "planes_hex": [
+        "fffffffff7007ffffff7c0ffffffef48ffffffef697bfff7efad7dffefefa5feffdfdfe1ff7fbfdfffffbf7fdfe007deffdff5afedffbff6b7f3ffbffffff3ffbfffffedffbfffffdeff7fffffbf7f7fffff7fbf7ffffeffdf7ffffdffeefffffbfff6fffffffffeff"
+      ]
+    },
+    {
+      "name": "rot2_asym",
+      "description": "rotation 2, odd native width",
+      "panel": {
+        "width": 37,
+        "height": 21,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c0100250015000200040004000000001400050001010502001e00060004000101030300100104000800020100100101002200020700000008000700",
+      "plane_len": 105,
+      "planes_sha256": [
+        "98a57ef394f465d855fb4d6c2cab100881c532e3420e3f07165d991957a19457"
+      ],
+      "frame_digest": "98a57ef394f465d855fb4d6c2cab100881c532e3420e3f07165d991957a19457",
+      "planes_hex": [
+        "fffff7fbfffffffbf7fffffffdeffffffffedfffffffff3fffffffff3ffffffffedffffffffdeffffffffbf7fffffff7fbffffffeffdffffffdffeffffffbfff7fffffffffffffffffffffffff1fffffffffe1fffffffffe1fffffffffe1fffffffffe1fffffffffe7"
+      ]
+    },
+    {
+      "name": "rot3_asym",
+      "description": "rotation 3, odd native width",
+      "panel": {
+        "width": 37,
+        "height": 21,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c0100150025000300040004000000001400050001010502001e00060004000101030300100104000800020100100101002200020700000008000700",
+      "plane_len": 105,
+      "planes_sha256": [
+        "80e333a24349c4f9b7b196900af811f2758b1b2becb7b96769b3f1194e6a00c2"
+      ],
+      "frame_digest": "80e333a24349c4f9b7b196900af811f2758b1b2becb7b96769b3f1194e6a00c2",
+      "planes_hex": [
+        "fbfffffffffb7ffefffffbbffdfffff7dffbfffff7eff7fffff7f7effffff7fbdfffffeffdbfffffeffe7fffffeffe7f6b7feffdbfad7fdffbdf003fdff7efffffdfeff7fc3fdfdffbfd2fbfbffdf5afbf7ffef4b7bffffff897bffffff81f7ffffff0077fffffffff"
+      ]
+    },
+    {
+      "name": "rot0_asym",
+      "description": "rotation 0 reference for the three above",
+      "panel": {
+        "width": 37,
+        "height": 21,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c0100250015000000040004000000001400050001010502001e00060004000101030300100104000800020100100101002200020700000008000700",
+      "plane_len": 105,
+      "planes_sha256": [
+        "86027f851861ae97272efea921d6761be70cd469f41b633fb618511c66ce3f78"
+      ],
+      "frame_digest": "86027f851861ae97272efea921d6761be70cd469f41b633fb618511c66ce3f78",
+      "planes_hex": [
+        "3fffffffffc3fffffffffc3fffffffffc3fffffffffc3fffffffffc7fffffffffffffffffffffffff7ffeffffffbffdffffffdffbffffffeff7fffffff7effffffffbdffffffffdbffffffffe7ffffffffe7ffffffffdbffffffffbdffffffff7efffffffeff7fffff"
+      ]
+    },
+    {
+      "name": "bwr_flags_3",
+      "description": "2 planes, plane0 1 = white, plane1 1 = red",
+      "panel": {
+        "width": 400,
+        "height": 300,
+        "planes": 2,
+        "plane_flags": 3
+      },
+      "layout_hex": "434c010090012c0100000600050000000090012800000202010018000a001e00050200000003000e000400070005000c000600050003020018016801080002010010010a005000140000000001000a00020005000300060004000b00050008000600050007000a0008000700090004000a0009000b0006000c000b000d000b000e0005000f000a001000070011000400120009001300060003050010020a006400060a000e017c0110000100030002",
+      "plane_len": 15000,
+      "planes_sha256": [
+        "93c4c64da4abd5b8673d74afb1cd66b78f8f472863974eeec35e04651ed61147",
+        "c95ef547bc25fdfcc70261c8fc049a52c5b30b5da66b5b1c7b0abb7aa76cf5c4"
+      ],
+      "frame_digest": "8c892779feed0499127c6b6bc66679709351eee11868e5ff1fe92cbe650e4909"
+    },
+    {
+      "name": "bwr_flags_0",
+      "description": "2 planes, inverted polarity: plane0 1 = black, plane1 0 = red",
+      "panel": {
+        "width": 400,
+        "height": 300,
+        "planes": 2,
+        "plane_flags": 0
+      },
+      "layout_hex": "434c010090012c0100000600050000000090012800000202010018000a001e00050200000003000e000400070005000c000600050003020018016801080002010010010a005000140000000001000a00020005000300060004000b00050008000600050007000a0008000700090004000a0009000b0006000c000b000d000b000e0005000f000a001000070011000400120009001300060003050010020a006400060a000e017c0110000100030002",
+      "plane_len": 15000,
+      "planes_sha256": [
+        "37d496b9cffd2efe851e6ebb3636f4e8756da2acd374f24d71d51ea3ab922c26",
+        "3db1d92c6bd25d1c1c017e4ad39bc5d82be1afb12a123e01ef947afb19d7cee7"
+      ],
+      "frame_digest": "83ab486921afc3ec183a02fc55f7b88e402046348b681737f8c50b40b155f701"
+    },
+    {
+      "name": "red_on_1_plane",
+      "description": "RED renders as BLACK on a 1-plane panel",
+      "panel": {
+        "width": 400,
+        "height": 300,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c010090012c0100000600050000000090012800000202010018000a001e00050200000003000e000400070005000c000600050003020018016801080002010010010a005000140000000001000a00020005000300060004000b00050008000600050007000a0008000700090004000a0009000b0006000c000b000d000b000e0005000f000a001000070011000400120009001300060003050010020a006400060a000e017c0110000100030002",
+      "plane_len": 15000,
+      "planes_sha256": [
+        "dc1cd5f8756bdb80e7d36d5158cc9046856840812ca4802a25479ce6b555e3b3"
+      ],
+      "frame_digest": "dc1cd5f8756bdb80e7d36d5158cc9046856840812ca4802a25479ce6b555e3b3"
+    },
+    {
+      "name": "bw_flags_0",
+      "description": "1 plane with plane0 1 = black",
+      "panel": {
+        "width": 37,
+        "height": 21,
+        "planes": 1,
+        "plane_flags": 0
+      },
+      "layout_hex": "434c0100250015000000040004000000001400050001010502001e00060004000101030300100104000800020100100101002200020700000008000700",
+      "plane_len": 105,
+      "planes_sha256": [
+        "79b7fe512dafdfc8b25a70b9c655db1611052a9b7b9b8118d38ea60fd6266be0"
+      ],
+      "frame_digest": "79b7fe512dafdfc8b25a70b9c655db1611052a9b7b9b8118d38ea60fd6266be0",
+      "planes_hex": [
+        "c0000000003c0000000003c0000000003c0000000003c000000000380000000000000000000000000800100000040020000002004000000100800000008100000000420000000024000000001800000000180000000024000000004200000000810000000100800000"
+      ]
+    },
+    {
+      "name": "clipping",
+      "description": "commands partly or fully outside the canvas",
+      "panel": {
+        "width": 40,
+        "height": 24,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c0100280018000000070004f6fff6ff32001e00030105fdfffdff0a000a00020105230012001400140000010301001001f8ff0c0002010018011e001e00010d000000071c00f6ff0100010b68747470733a2f2f612e620400800500ff7f05000101",
+      "plane_len": 120,
+      "planes_sha256": [
+        "f4cab221b067f7dbdd6fdd27eab238dd211497f7a602ad06ec4204d863afbd67"
+      ],
+      "frame_digest": "f4cab221b067f7dbdd6fdd27eab238dd211497f7a602ad06ec4204d863afbd67",
+      "planes_hex": [
+        "c07ffff8cbf03ffff2e4f80ffffc11f807fffff2f901fff018000000000001e03ff457fff81ff452fffc07f45effff03f7d5ffff80f01bffffe07fff00fff01ffffefffc0ffffefffe03fffeffff81fffeffffc01dfefffff033fefffff800fefffffe00fefffffe00fefffffe80fefffffe60fefffffec0"
+      ]
+    },
+    {
+      "name": "thick_lines",
+      "description": "LINE widths 1..8 across octants, points, verticals",
+      "panel": {
+        "width": 64,
+        "height": 48,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c01004000300000000a0004200018003e001b000101042000180025002e000201042000180019002c0003010420001800040021000401042000180002001400050104200018001a0002000601042000180028000300070104200018003d000e0008010403000300030003000401043c0002003c002d000201",
+      "plane_len": 384,
+      "planes_sha256": [
+        "0ccfb6d19b202a76e29a465edb214b1f4490a00d126622d2957a05af9d0cbc4d"
+      ],
+      "frame_digest": "0ccfb6d19b202a76e29a465edb214b1f4490a00d126622d2957a05af9d0cbc4d",
+      "planes_hex": [
+        "ffffff03f80fffffffffff03f80fffffc3ffff01f00ffff3c3ffff01f00ffff3c3ffff01e00ffff3c3ffff01e00ffff3ffffff00e00ffff3ffffff80c00ffff3ffffff80c01ffff3ffffff80c01ffff3ffffff80003ffff3ffffffc0003fff80ffffffc0003ffc00ffffffc0007fe000ffffffc0007f0000ffffffe000780000ffffffe000e00000ffffffe00000000000fffff0000000000000fff000000000000001f000000003000000000000003300000000000001f3f000000000000ff3fff0000000003ff3ffffe0000001fff3fffff800000e0073ffffc000007fff81fffc000003fffff3ffe000181ffffff3ff0000f89ffffff3f80007f08ffffff3e0007ff0cffffff3e003ffe1cffffff3e01fffe1cffffff3e0ffffe3c7fffff3ffffffc3e7fffff3ffffffc3e7fffff3ffffffc7e7fffff3ffffff87e7fffff3ffffff87e3fffff3ffffff8ff3fffff3ffffff0ff3fffff3ffffff0ff3fffff3ffffff1ff1fffff3ffffff1ff9fffff3fffffffff9fffff3fffffffff9ffffff"
+      ]
+    },
+    {
+      "name": "progress_edges",
+      "description": "PROGRESS max 0, value > max, tiny boxes, full scale",
+      "panel": {
+        "width": 64,
+        "height": 48,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c0100400030000000090006010001001e000800000000000106210001001e000800f4016400010601000b000400080001000200010607000b00050005000100010001060e000b001400040003000400010624000b001b000900020003000106010016003e000a00ffffffff0106010022003e000c000100ffff010600002f00000005000100010001",
+      "plane_len": 384,
+      "planes_sha256": [
+        "9b518d38d8ec5ab9bd96d1d55a3ded5ec3ce9bd386a30cf7b30ead1eb8a39e90"
+      ],
+      "frame_digest": "9b518d38d8ec5ab9bd96d1d55a3ded5ec3ce9bd386a30cf7b30ead1eb8a39e90",
+      "planes_hex": [
+        "ffffffffffffffff8000000180000001bffffffdbffffffdbffffffda0000005bffffffda0000005bffffffda0000005bffffffda0000005bffffffdbffffffd8000000180000001ffffffffffffffffffffffffffffffff860c000030000001b6edffffb7fffffdb6adffffb40007fdb6ec0000340007fdb60ffffff40007fdb7fffffff40007fdb7fffffff40007fd87fffffff7fffffdfffffffff0000001ffffffffffffffffffffffffffffffff8000000000000001bffffffffffffffda000000000000005a000000000000005a000000000000005a000000000000005a000000000000005a000000000000005bffffffffffffffd8000000000000001ffffffffffffffffffffffffffffffff8000000000000001bffffffffffffffdbffffffffffffffdbffffffffffffffdbffffffffffffffdbffffffffffffffdbffffffffffffffdbffffffffffffffdbffffffffffffffdbffffffffffffffdbffffffffffffffd8000000000000001ffffffffffffffffffffffffffffffff"
+      ]
+    },
+    {
+      "name": "rect_borders",
+      "description": "RECT border >= half size, w/h 0, filled",
+      "panel": {
+        "width": 48,
+        "height": 32,
+        "planes": 1,
+        "plane_flags": 1
+      },
+      "layout_hex": "434c0100300020000000070005010001000a000a000501050d0001000a000700ff0105190001000000090001010519000c000900000000010501000d0014000f0001010518000e00160010000401051a001000030003000000",
+      "plane_len": 192,
+      "planes_sha256": [
+        "7461105e6972082c4e30ff9c376e30e2a6980738bdbeb93845ee9dafd4f7a047"
+      ],
+      "frame_digest": "7461105e6972082c4e30ff9c376e30e2a6980738bdbeb93845ee9dafd4f7a047",
+      "planes_hex": [
+        "ffffffffffff801801ffffff801801ffffff801801ffffff801801ffffff801801ffffff801801ffffff801801ffffff801fffffffff801fffffffff801fffffffffffffffffffffffffffffffff800007ffffffbffff7000003bffff7000003bffff7380003bffff7380003bffff73fffc3bffff70fffc3bffff70fffc3bffff70fffc3bffff70fffc3bffff70fffc3bffff70fffc3bffff70fffc3bffff7000003800007000003ffffff000003ffffff000003ffffffffffffffffffffffff"
+      ]
+    },
+    {
+      "name": "qr",
+      "description": "QR in byte, alphanumeric and numeric modes, boosted ECC, red",
+      "panel": {
+        "width": 160,
+        "height": 100,
+        "planes": 2,
+        "plane_flags": 3
+      },
+      "layout_hex": "434c0100a00064000000040007020002000100011268747470733a2f2f6372656d696e642e696f071e0002000203011748545450533a2f2f4352454d494e442e494f2f542f343207020028000100010a3132333435363738393007500002000101024a68747470733a2f2f6372656d696e642e696f2f742f31413242334334442f65332f7231383f766965773d63617264266c616e673d766926747a3d417369612f486f5f4368695f4d696e68",
+      "plane_len": 2000,
+      "planes_sha256": [
+        "3d5132719d5f1e044a06a074a512ede20015cffbe04d012672fc480c91c34d75",
+        "a995ea9e13c2fe1edb989001fad6fdc259efa2433738440776be8ff1b8e2a60f"
+      ],
+      "frame_digest": "6dcfafdb9a1e49a36676d594724c2fa52344f14d0b134f6d4662d52e4c67b177"
+    },
+    {
+      "name": "glyph_bearings",
+      "description": "negative bearings, descenders, empty/ink-free/out-of-range glyphs, dx/dy",
+      "panel": {
+        "width": 96,
+        "height": 40,
+        "planes": 2,
+        "plane_flags": 3
+      },
+      "layout_hex": "434c01006000280000000300020100100102000e00080000000001000a00020005000300060004000b001100080012000900050006000201001801020022000706000000fa000a00090008fd13000e060e00fcf40100140010000302020000100246001e000102000000",
+      "plane_len": 480,
+      "planes_sha256": [
+        "f72ed00e85bc8bd68e646a7b744d4846f7469e21fb2e2d1abd57abf9064b9eeb",
+        "1f6a9ef571951a0d2424013f7b667d180ad63a4d645e241bf3dd59872c8b8aa0"
+      ],
+      "frame_digest": "e759ff63ffc696caabbdf9835d94b488e0ecf2d363a2144c026ed61d6a31f413",
+      "planes_hex": [
+        "ffffffffffffffffffffffffffffffffffffffffffffffffe01ffffff1d9fe7fffffffffefdffffff7073edfffffffffefdffffff4dcfe3fffffffffefdffffff393beffffffffffefdfb34e764e7e9fffffffffefdf8f39f1d9fe7fffffffffefdfbb6737073edfffffffffefdfa71cf4dcf639ffffffffefdf9f73b393b4e7ffffffffefdfb0421446729dffffffffefdf8d087199f673ffffffffe01fb921060730cfffffffffffffa40439ccf639ffffffffffff9d10273ff4e7fffffffffffffc421ce7f39dfffffffffffffdce739ff673ffffffffb9fffd394e77f1cfffffffffa73ffce739cff739ffffffff9cfffd9c673ff4e7ffffffffb3bffc731ce7f39dffffffff8e7ffdce739ff673ffffffffb9fffd394e77f1cfffffffffa73ffce739cff739ffffffff9cfffd9c673ff4e7ffffffffb3bffc731ce7f39dffffffff8e7ffdce7fffffffffffffffb9fffd39ffffffffffffffffa73ffce739ffffffffffffff9cfffd9cf0ffffffffffffffb3bffc73a07fffffffffffff8e7fffffc03fffffffffffffb9ffffffc03fffffffffffffa73fffffe07fffffffffffff9cfffffff0fffffffffffffffffffffff9ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001f80000000000000000000007fe000000000000000000000fff000000000000000000001fff800000000000000000001fff800000000000000000003fffc00000000000000000003fffc00000000000000000003fffc00000000000000000003fffc00000000000000000003fffc00"
+      ]
+    },
+    {
+      "name": "last_writer_wins",
+      "description": "red background, CLEAR mid-stream, overlaps",
+      "panel": {
+        "width": 32,
+        "height": 16,
+        "planes": 2,
+        "plane_flags": 2
+      },
+      "layout_hex": "434c010020001000000204000500000000100010000001010005040004000800080000020400000f001f0000000101",
+      "plane_len": 64,
+      "planes_sha256": [
+        "57b862944841a6917f61e153d3c64f4e095e3a92c7f838eb06c5c19609c333be",
+        "3a4ed30955b542b5bb35888532c05a4419a0f4dd25269ee9fc6a4664968d100a"
+      ],
+      "frame_digest": "38a1f8beffd284ffb27a9e7bf5bd19230f163b2cbcff34036054a3379daccdaa",
+      "planes_hex": [
+        "000000030000000c00000030000000c00000030000000c00000030000000c00000030000000c00000030000000c00000030000000c00000030000000c0000000",
+        "000000000000000000000000000000000ff000000ff000000ff000000ff000000ff000000ff000000fc000000f30000000000000000000000000000000000000"
+      ]
+    }
+  ]
+}

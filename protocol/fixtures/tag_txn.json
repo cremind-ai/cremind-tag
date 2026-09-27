@@ -1,0 +1,448 @@
+{
+  "description": "Tag decisions: the FRAME_BEGIN table of docs/protocol.md \u00a75.6 (first matching row) and the boot rule of \u00a76. The panel has planes = 1, plane_len = 15000.",
+  "panel": {
+    "planes": 1,
+    "plane_len": 15000
+  },
+  "frame_begin": [
+    {
+      "name": "no stored record",
+      "stored": null,
+      "frame": {
+        "epoch": 3,
+        "revision": 1,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "planes": 1,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": true,
+        "duplicate": false,
+        "status_name": null
+      }
+    },
+    {
+      "name": "older revision",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 16,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "planes": 1,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": false,
+        "status_name": "STALE_REVISION"
+      }
+    },
+    {
+      "name": "older epoch, higher revision",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 2,
+        "revision": 99,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "planes": 1,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": false,
+        "status_name": "STALE_REVISION"
+      }
+    },
+    {
+      "name": "same revision and digest, displayed",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 17,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "planes": 1,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": true,
+        "status_name": "OK"
+      }
+    },
+    {
+      "name": "same revision, other digest, displayed",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 17,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "planes": 1,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": false,
+        "status_name": "REVISION_CONFLICT"
+      }
+    },
+    {
+      "name": "same revision, other digest, refresh intent",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "DISPLAY_STATE_UNKNOWN",
+        "state": "REFRESH_INTENT"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 17,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "planes": 1,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": false,
+        "status_name": "REVISION_CONFLICT"
+      }
+    },
+    {
+      "name": "same revision and digest, display state unknown",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "DISPLAY_STATE_UNKNOWN",
+        "state": "REFRESH_INTENT"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 17,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "planes": 1,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": true,
+        "duplicate": false,
+        "status_name": null
+      }
+    },
+    {
+      "name": "display state unknown, wrong plane_len",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "DISPLAY_STATE_UNKNOWN",
+        "state": "REFRESH_INTENT"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 17,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "planes": 1,
+        "plane_len": 15001
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": false,
+        "status_name": "INVALID"
+      }
+    },
+    {
+      "name": "newer revision",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 18,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "planes": 1,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": true,
+        "duplicate": false,
+        "status_name": null
+      }
+    },
+    {
+      "name": "newer epoch, lower revision",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 4,
+        "revision": 1,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "planes": 1,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": true,
+        "duplicate": false,
+        "status_name": null
+      }
+    },
+    {
+      "name": "newer revision, wrong plane_len",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 18,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "planes": 1,
+        "plane_len": 14999
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": false,
+        "status_name": "INVALID"
+      }
+    },
+    {
+      "name": "newer revision, wrong planes",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 18,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "planes": 2,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": false,
+        "status_name": "INVALID"
+      }
+    },
+    {
+      "name": "older revision and wrong planes",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 10,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "planes": 2,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": false,
+        "status_name": "STALE_REVISION"
+      }
+    },
+    {
+      "name": "duplicate wins over wrong planes",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "frame": {
+        "epoch": 3,
+        "revision": 17,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "planes": 2,
+        "plane_len": 15000
+      },
+      "expect": {
+        "accept": false,
+        "duplicate": true,
+        "status_name": "OK"
+      }
+    }
+  ],
+  "boot": [
+    {
+      "name": "no record",
+      "stored": null,
+      "expect": {
+        "record": null,
+        "persist": false,
+        "challenge_flag_bit0": false
+      }
+    },
+    {
+      "name": "displayed",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "OK",
+        "state": "DISPLAYED"
+      },
+      "expect": {
+        "record": {
+          "tag_id": 439041101,
+          "epoch": 3,
+          "revision": 17,
+          "update_id": 500,
+          "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+          "status_name": "OK",
+          "state": "DISPLAYED"
+        },
+        "persist": false,
+        "challenge_flag_bit0": false
+      }
+    },
+    {
+      "name": "refresh intent",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 18,
+        "update_id": 500,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "status_name": "OK",
+        "state": "REFRESH_INTENT"
+      },
+      "expect": {
+        "record": {
+          "tag_id": 439041101,
+          "epoch": 3,
+          "revision": 18,
+          "update_id": 500,
+          "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+          "status_name": "DISPLAY_STATE_UNKNOWN",
+          "state": "REFRESH_INTENT"
+        },
+        "persist": true,
+        "challenge_flag_bit0": true
+      }
+    },
+    {
+      "name": "already unknown",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 17,
+        "update_id": 500,
+        "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+        "status_name": "DISPLAY_STATE_UNKNOWN",
+        "state": "REFRESH_INTENT"
+      },
+      "expect": {
+        "record": {
+          "tag_id": 439041101,
+          "epoch": 3,
+          "revision": 17,
+          "update_id": 500,
+          "digest": "d2dbc5b4f7dc2edeec5569a1a6ce0708e9060b0aff989d34c1d3ba2e052e4dc1",
+          "status_name": "DISPLAY_STATE_UNKNOWN",
+          "state": "REFRESH_INTENT"
+        },
+        "persist": false,
+        "challenge_flag_bit0": true
+      }
+    },
+    {
+      "name": "refresh intent after refresh timeout",
+      "stored": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 18,
+        "update_id": 500,
+        "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+        "status_name": "REFRESH_TIMEOUT",
+        "state": "REFRESH_INTENT"
+      },
+      "expect": {
+        "record": {
+          "tag_id": 439041101,
+          "epoch": 3,
+          "revision": 18,
+          "update_id": 500,
+          "digest": "26b8a310d840a8882d729bb616dbec77f84f5cdf6b70e6f251e06be212641cb5",
+          "status_name": "DISPLAY_STATE_UNKNOWN",
+          "state": "REFRESH_INTENT"
+        },
+        "persist": true,
+        "challenge_flag_bit0": true
+      }
+    }
+  ]
+}

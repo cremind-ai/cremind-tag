@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.ctfp binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.ttf binary
+*.otf binary
+*.bin binary
+*.hex text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

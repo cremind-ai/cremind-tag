@@ -1,0 +1,285 @@
+{
+  "description": "Mesh vendor messages (docs/protocol.md \u00a72-3). access = opcode (0xC0|op, company id LE) | params. opcode is the Zephyr BT_MESH_MODEL_OP_3(op, MESH_COMPANY_ID) value. errors: decoder result (EINVAL short, EMSGSIZE long).",
+  "vectors": [
+    {
+      "name": "LAYOUT_BEGIN",
+      "op": 1,
+      "opcode": 12713983,
+      "opcode_hex": "c1ffff",
+      "fields": {
+        "xfer_id": 4660,
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 18,
+        "update_id": 8776565086972537,
+        "fontpack_id": "a1b2c3d4e5f60718",
+        "total_len": 1234,
+        "chunk_count": 9,
+        "digest": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+      },
+      "params": "34124d3c2b1a0300000012000000796a5b4c3d2e1f00a1b2c3d4e5f60718d20409f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "access": "c1ffff34124d3c2b1a0300000012000000796a5b4c3d2e1f00a1b2c3d4e5f60718d20409f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+    },
+    {
+      "name": "LAYOUT_CHUNK",
+      "op": 2,
+      "opcode": 12779519,
+      "opcode_hex": "c2ffff",
+      "fields": {
+        "xfer_id": 4660,
+        "index": 8,
+        "data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
+      },
+      "params": "341208000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021",
+      "access": "c2ffff341208000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
+    },
+    {
+      "name": "LAYOUT_COMMIT",
+      "op": 3,
+      "opcode": 12845055,
+      "opcode_hex": "c3ffff",
+      "fields": {
+        "xfer_id": 4660
+      },
+      "params": "3412",
+      "access": "c3ffff3412"
+    },
+    {
+      "name": "LAYOUT_CANCEL",
+      "op": 4,
+      "opcode": 12910591,
+      "opcode_hex": "c4ffff",
+      "fields": {
+        "update_id": 501
+      },
+      "params": "f501000000000000",
+      "access": "c4fffff501000000000000"
+    },
+    {
+      "name": "LAYOUT_STATUS",
+      "op": 5,
+      "opcode": 12976127,
+      "opcode_hex": "c5ffff",
+      "fields": {
+        "xfer_id": 4660,
+        "status": 13,
+        "missing": 134217733
+      },
+      "params": "34120d05000008",
+      "access": "c5ffff34120d05000008"
+    },
+    {
+      "name": "DELIVERY_STAGE",
+      "op": 6,
+      "opcode": 13041663,
+      "opcode_hex": "c6ffff",
+      "fields": {
+        "update_id": 501,
+        "tag_id": 439041101,
+        "revision": 18,
+        "stage": 4
+      },
+      "params": "f5010000000000004d3c2b1a1200000004",
+      "access": "c6fffff5010000000000004d3c2b1a1200000004"
+    },
+    {
+      "name": "DELIVERY_RESULT",
+      "op": 7,
+      "opcode": 13107199,
+      "opcode_hex": "c7ffff",
+      "fields": {
+        "result_seq": 77,
+        "update_id": 501,
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 18,
+        "status": 0,
+        "digest": "0011223344556677",
+        "battery_mv": 2950,
+        "wake_ms": 12000,
+        "suspend_ms": 640,
+        "transfer_ms": 4100,
+        "refresh_ms": 3900
+      },
+      "params": "4d00f5010000000000004d3c2b1a0300000012000000000011223344556677860be02e800204103c0f",
+      "access": "c7ffff4d00f5010000000000004d3c2b1a0300000012000000000011223344556677860be02e800204103c0f"
+    },
+    {
+      "name": "RESULT_ACK",
+      "op": 8,
+      "opcode": 13172735,
+      "opcode_hex": "c8ffff",
+      "fields": {
+        "result_seq": 77
+      },
+      "params": "4d00",
+      "access": "c8ffff4d00"
+    },
+    {
+      "name": "CAPS_GET",
+      "op": 16,
+      "opcode": 13697023,
+      "opcode_hex": "d0ffff",
+      "fields": {},
+      "params": "",
+      "access": "d0ffff"
+    },
+    {
+      "name": "CAPS_STATUS",
+      "op": 17,
+      "opcode": 13762559,
+      "opcode_hex": "d1ffff",
+      "fields": {
+        "proto": 1,
+        "fw_major": 0,
+        "fw_minor": 1,
+        "fw_patch": 0,
+        "board": 3,
+        "fontpack_id": "a1b2c3d4e5f60718",
+        "flash_mib": 64,
+        "max_tags": 20,
+        "assigned": 3,
+        "flags": 1
+      },
+      "params": "0100010003a1b2c3d4e5f607184000140301",
+      "access": "d1ffff0100010003a1b2c3d4e5f607184000140301"
+    },
+    {
+      "name": "HEALTH_GET",
+      "op": 18,
+      "opcode": 13828095,
+      "opcode_hex": "d2ffff",
+      "fields": {},
+      "params": "",
+      "access": "d2ffff"
+    },
+    {
+      "name": "HEALTH_STATUS",
+      "op": 19,
+      "opcode": 13893631,
+      "opcode_hex": "d3ffff",
+      "fields": {
+        "uptime_s": 86400,
+        "sessions_ok": 120,
+        "sessions_fail": 3,
+        "suspend_count": 130,
+        "suspend_max_ms": 980,
+        "resume_fail": 0,
+        "queue_depth": 2,
+        "last_status": 0
+      },
+      "params": "80510100780003008200d40300000200",
+      "access": "d3ffff80510100780003008200d40300000200"
+    },
+    {
+      "name": "ASSIGN_SET",
+      "op": 20,
+      "opcode": 13959167,
+      "opcode_hex": "d4ffff",
+      "fields": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "key": "000102030405060708090a0b0c0d0e0f",
+        "flags": 1
+      },
+      "params": "4d3c2b1a03000000000102030405060708090a0b0c0d0e0f01",
+      "access": "d4ffff4d3c2b1a03000000000102030405060708090a0b0c0d0e0f01"
+    },
+    {
+      "name": "ASSIGN_DEL",
+      "op": 21,
+      "opcode": 14024703,
+      "opcode_hex": "d5ffff",
+      "fields": {
+        "tag_id": 439041101,
+        "epoch": 2
+      },
+      "params": "4d3c2b1a02000000",
+      "access": "d5ffff4d3c2b1a02000000"
+    },
+    {
+      "name": "ASSIGN_STATUS",
+      "op": 22,
+      "opcode": 14090239,
+      "opcode_hex": "d6ffff",
+      "fields": {
+        "tag_id": 439041101,
+        "epoch": 3,
+        "status": 8
+      },
+      "params": "4d3c2b1a0300000008",
+      "access": "d6ffff4d3c2b1a0300000008"
+    },
+    {
+      "name": "TAG_CMD",
+      "op": 23,
+      "opcode": 14155775,
+      "opcode_hex": "d7ffff",
+      "fields": {
+        "update_id": 8776565086972537,
+        "tag_id": 439041101,
+        "epoch": 3,
+        "cmd": 1
+      },
+      "params": "796a5b4c3d2e1f004d3c2b1a0300000001",
+      "access": "d7ffff796a5b4c3d2e1f004d3c2b1a0300000001"
+    },
+    {
+      "name": "IDENTIFY",
+      "op": 24,
+      "opcode": 14221311,
+      "opcode_hex": "d8ffff",
+      "fields": {
+        "seconds": 10
+      },
+      "params": "0a",
+      "access": "d8ffff0a"
+    },
+    {
+      "name": "TAG_SEEN",
+      "op": 25,
+      "opcode": 14286847,
+      "opcode_hex": "d9ffff",
+      "fields": {
+        "tag_id": 439041101,
+        "rssi": -61,
+        "battery_mv": 2950,
+        "flags": 5
+      },
+      "params": "4d3c2b1ac3860b05",
+      "access": "d9ffff4d3c2b1ac3860b05"
+    }
+  ],
+  "errors": [
+    {
+      "name": "LAYOUT_BEGIN one byte short",
+      "op": 1,
+      "params": "34124d3c2b1a0300000012000000796a5b4c3d2e1f00a1b2c3d4e5f60718d20409f0f1f2f3f4f5f6f7f8f9fafbfcfdfe",
+      "error": "EINVAL"
+    },
+    {
+      "name": "LAYOUT_BEGIN one byte long",
+      "op": 1,
+      "params": "34124d3c2b1a0300000012000000796a5b4c3d2e1f00a1b2c3d4e5f60718d20409f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff00",
+      "error": "EMSGSIZE"
+    },
+    {
+      "name": "LAYOUT_CHUNK without index",
+      "op": 2,
+      "params": "3412",
+      "error": "EINVAL"
+    },
+    {
+      "name": "LAYOUT_CHUNK 151 data bytes",
+      "op": 2,
+      "params": "34120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "error": "EMSGSIZE"
+    },
+    {
+      "name": "CAPS_GET with a parameter",
+      "op": 16,
+      "params": "00",
+      "error": "EMSGSIZE"
+    }
+  ]
+}

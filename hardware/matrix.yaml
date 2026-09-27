@@ -1,0 +1,137 @@
+# Cremind Tag hardware support matrix — machine-readable source for
+# docs/hardware/matrix.md and the per-board qualification reports.
+#
+# status (per board/panel combination), in order of progress:
+#   documented  - hardware facts recorded, nothing built yet
+#   buildable   - secure firmware links within the exact memory geometry
+#   functional  - flashed and exercised on a physical sample
+#   qualified   - qualification report complete (power, endurance, faults)
+#   blocked     - cannot be supported; `blocked_reason` records the measured cause
+#
+# Pins are decimal GPIO numbers on port 0. Source for tag hardware facts:
+# EPD-nRF5 docs/devices.md (hardware documentation only; no code is used).
+
+gateways:
+  - id: nrf52840_gateway
+    board_id: 1
+    zephyr_board: nrf52840dk/nrf52840
+    mcu: nRF52840
+    flash_kib: 1024
+    ram_kib: 256
+    host_link: usb_cdc_acm
+    status: documented
+  - id: nrf52832_gateway
+    board_id: 2
+    zephyr_board: nrf52dk/nrf52832
+    mcu: nRF52832
+    flash_kib: 512
+    ram_kib: 64
+    host_link: uart_ch340
+    status: documented
+    notes: Resource qualification pending (CDB + mesh provisioner RAM).
+
+bridges:
+  - id: nrf52840_bridge
+    board_id: 3
+    zephyr_board: nrf52840dk/nrf52840
+    mcu: nRF52840
+    flash_kib: 1024
+    ram_kib: 256
+    external_flash: soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only)
+    maintenance_link: usb_cdc_acm
+    status: documented
+  - id: nrf52832_bridge
+    board_id: 4
+    zephyr_board: nrf52dk/nrf52832
+    mcu: nRF52832
+    flash_kib: 512
+    ram_kib: 64
+    external_flash: soldered SPI NOR
+    maintenance_link: uart_ch340
+    status: documented
+    notes: Remaining RAM target 8 KiB; pending-layout storage must stay in external flash.
+
+tags:
+  - id: laowu_bw
+    board_id: 16
+    zephyr_board: laowu_bw/nrf51822/qfab
+    name: Laowu 4.2-inch black/white
+    mcu: nRF51822
+    soc_variant: QFAB
+    flash_kib: 128
+    ram_kib: 16
+    panel:
+      id: 1
+      controller: UC8176
+      size_in: 4.2
+      resolution: [400, 300]
+      planes: 1
+      verified: false
+    pins: {mosi: 5, sck: 8, cs: 9, dc: 10, reset: 11, busy: 12, bs: 13, wake: 7, debug_tx: 6}
+    leds: unconfirmed
+    oscillator_32k: unverified (RC assumed until a crystal is confirmed)
+    status: documented
+  - id: laowu_bwr
+    board_id: 17
+    zephyr_board: laowu_bwr/nrf51822/qfaa
+    name: Laowu 4.2-inch black/white/red
+    mcu: nRF51802
+    soc_variant: QFAA-compatible (256 KiB / 16 KiB)
+    flash_kib: 256
+    ram_kib: 16
+    panel:
+      id: 2
+      controller: UC8176
+      size_in: 4.2
+      resolution: [400, 300]
+      planes: 2
+      verified: false
+    pins: {mosi: 10, sck: 11, cs: 12, dc: 13, reset: 14, busy: 15, bs: 16, wake: 9, debug_tx: 8}
+    leds: [3, 4, 5]
+    oscillator_32k: unverified (RC assumed until a crystal is confirmed)
+    status: documented
+  - id: sifei_52810
+    board_id: 18
+    zephyr_board: sifei_52810/nrf52810
+    name: Sifei 52810
+    mcu: nRF52810
+    soc_variant: QFAA
+    flash_kib: 192
+    ram_kib: 24
+    panel:
+      id: 255
+      controller: unverified
+      verified: false
+    pins: unverified
+    status: documented
+    notes: Display mapping, panel model and wake sources require physical verification.
+  - id: hema_52811
+    board_id: 19
+    zephyr_board: hema_52811/nrf52811
+    name: Hema/Alibaba 52811
+    mcu: nRF52811
+    soc_variant: QFAA
+    flash_kib: 192
+    ram_kib: 24
+    panel:
+      id: 255
+      controller: unverified
+      verified: false
+    pins: unverified
+    status: documented
+    notes: Display mapping, panel model and wake sources require physical verification.
+
+# Per-board verification checklist (docs/hardware/verification.md explains each item).
+verification_items:
+  - actual MCU variant and memory geometry
+  - display pin mapping and signal polarity
+  - panel model, resolution, colour planes and connector orientation
+  - oscillators (32 MHz crystal, 32.768 kHz crystal or RC)
+  - battery arrangement and supply voltage
+  - power switches, external storage, wake sources and battery sensing
+  - sleep current with development equipment disconnected
+
+# Resource targets (plan section 5).
+resource_targets:
+  flash_headroom_pct: 15
+  ram_free_kib: {nrf51: 2, nrf52810: 3, nrf52811: 3, nrf52832_bridge: 8}

@@ -1,0 +1,51 @@
+{
+  "description": "Enrollment blob (docs/protocol.md \u00a79) written to UICR.CUSTOMER[0..11].",
+  "fields": {
+    "magic": 1195463747,
+    "version": 1,
+    "board": 17,
+    "panel": 2,
+    "flags": 0,
+    "tag_id": 439041101,
+    "secret": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "crc32": 1598951595
+  },
+  "blob": "43544147011102004d3c2b1a404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5fab104e5f",
+  "uicr_customer_addr": {
+    "nrf51": 268439680,
+    "nrf52": 268439680
+  },
+  "intel_hex": [
+    ":020000041000EA",
+    ":1010800043544147011102004D3C2B1A4041424359",
+    ":101090004445464748494A4B4C4D4E4F5051525398",
+    ":1010A0005455565758595A5B5C5D5E5FAB104E5FA6",
+    ":00000001FF"
+  ],
+  "invalid": [
+    {
+      "name": "crc flipped",
+      "blob": "43544147011102004d3c2b1a404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5fab104ea0",
+      "status": 29,
+      "status_name": "SECURITY_CONFIG"
+    },
+    {
+      "name": "magic wrong",
+      "blob": "58544147011102004d3c2b1a404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5fab104e5f",
+      "status": 29,
+      "status_name": "SECURITY_CONFIG"
+    },
+    {
+      "name": "version 2",
+      "blob": "43544147021102004d3c2b1a404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f23a0f275",
+      "status": 29,
+      "status_name": "SECURITY_CONFIG"
+    },
+    {
+      "name": "truncated",
+      "blob": "43544147011102004d3c2b1a404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5fab104e",
+      "status": 29,
+      "status_name": "SECURITY_CONFIG"
+    }
+  ]
+}

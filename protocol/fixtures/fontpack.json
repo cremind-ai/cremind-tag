@@ -1,0 +1,268 @@
+{
+  "description": "Expected parse of fontpack_test.ctfp (docs/fontpack.md). Synthetic bitmaps; icon 6 duplicates icon 1, text glyph 12 duplicates 11, glyph 19 is shared by both text strikes, glyph 1 is empty, glyph 18 is stored without ink.",
+  "file": "fontpack_test.ctfp",
+  "header": {
+    "magic": 1346786371,
+    "version": 1,
+    "header_size": 128,
+    "flags": 0,
+    "total_size": 2087,
+    "pack_id": "a227ef00c31ce7b2",
+    "content_hash": "a227ef00c31ce7b287db17c5bbf2991edcdcc5eb5c086e5be63e269a886fe004",
+    "face_count": 2,
+    "strike_count": 4,
+    "face_table_offset": 128,
+    "strike_table_offset": 160,
+    "string_table_offset": 256,
+    "string_table_size": 48,
+    "bitmap_area_offset": 952,
+    "bitmap_area_size": 1135,
+    "manifest_id": "500f8272e5c0eeef",
+    "header_crc32": 3843461528
+  },
+  "faces": [
+    {
+      "face_id": 0,
+      "flags": 1,
+      "name": "Test Icons 1.000",
+      "scripts": "Zsym",
+      "glyph_count": 7
+    },
+    {
+      "face_id": 1,
+      "flags": 0,
+      "name": "Test Sans 1.000",
+      "scripts": "Latn,Grek",
+      "glyph_count": 20
+    }
+  ],
+  "strikes": [
+    {
+      "face_id": 0,
+      "size_px": 16,
+      "flags": 0,
+      "glyph_count": 7,
+      "index_off": 304,
+      "ascent": 16,
+      "descent": 0,
+      "line_height": 16,
+      "index_crc32": 1108124602
+    },
+    {
+      "face_id": 0,
+      "size_px": 24,
+      "flags": 0,
+      "glyph_count": 7,
+      "index_off": 388,
+      "ascent": 24,
+      "descent": 0,
+      "line_height": 24,
+      "index_crc32": 3837973406
+    },
+    {
+      "face_id": 1,
+      "size_px": 16,
+      "flags": 0,
+      "glyph_count": 20,
+      "index_off": 472,
+      "ascent": 12,
+      "descent": 4,
+      "line_height": 19,
+      "index_crc32": 3037997457
+    },
+    {
+      "face_id": 1,
+      "size_px": 24,
+      "flags": 0,
+      "glyph_count": 20,
+      "index_off": 712,
+      "ascent": 19,
+      "descent": 5,
+      "line_height": 28,
+      "index_crc32": 2525346479
+    }
+  ],
+  "glyphs": [
+    {
+      "face": 0,
+      "size_px": 16,
+      "glyph_id": 0,
+      "bitmap_off": 4294967295,
+      "width": 0,
+      "height": 0,
+      "bearing_x": 0,
+      "bearing_y": 0,
+      "advance": 0,
+      "bitmap": ""
+    },
+    {
+      "face": 0,
+      "size_px": 16,
+      "glyph_id": 1,
+      "bitmap_off": 0,
+      "width": 16,
+      "height": 16,
+      "bearing_x": 0,
+      "bearing_y": 0,
+      "advance": 16,
+      "bitmap": "ffff80018001800180018001800180018001800180018001800180018001ffff"
+    },
+    {
+      "face": 0,
+      "size_px": 16,
+      "glyph_id": 6,
+      "bitmap_off": 0,
+      "width": 16,
+      "height": 16,
+      "bearing_x": 0,
+      "bearing_y": 0,
+      "advance": 16,
+      "bitmap": "ffff80018001800180018001800180018001800180018001800180018001ffff"
+    },
+    {
+      "face": 0,
+      "size_px": 24,
+      "glyph_id": 4,
+      "bitmap_off": 376,
+      "width": 24,
+      "height": 24,
+      "bearing_x": 0,
+      "bearing_y": 0,
+      "advance": 24,
+      "bitmap": "000000001800001800003c00003c00007e00007e0000ff0000ff0001ff8001ff8003ffc003ffc007ffe007ffe00ffff00ffff01ffff81ffff83ffffc3ffffc7ffffe7ffffeffffff"
+    },
+    {
+      "face": 1,
+      "size_px": 16,
+      "glyph_id": 0,
+      "bitmap_off": 520,
+      "width": 8,
+      "height": 12,
+      "bearing_x": 1,
+      "bearing_y": 12,
+      "advance": 10,
+      "bitmap": "ff81818181818181818181ff"
+    },
+    {
+      "face": 1,
+      "size_px": 16,
+      "glyph_id": 1,
+      "bitmap_off": 4294967295,
+      "width": 0,
+      "height": 0,
+      "bearing_x": 0,
+      "bearing_y": 0,
+      "advance": 5,
+      "bitmap": ""
+    },
+    {
+      "face": 1,
+      "size_px": 16,
+      "glyph_id": 7,
+      "bitmap_off": 605,
+      "width": 6,
+      "height": 9,
+      "bearing_x": 0,
+      "bearing_y": 6,
+      "advance": 7,
+      "bitmap": "98e08cb0c498e08cb0"
+    },
+    {
+      "face": 1,
+      "size_px": 16,
+      "glyph_id": 11,
+      "bitmap_off": 647,
+      "width": 10,
+      "height": 13,
+      "bearing_x": -1,
+      "bearing_y": 10,
+      "advance": 11,
+      "bitmap": "8c40b180c60098c0e3008c40b180c60098c0e3008c40b180c600"
+    },
+    {
+      "face": 1,
+      "size_px": 16,
+      "glyph_id": 12,
+      "bitmap_off": 647,
+      "width": 10,
+      "height": 13,
+      "bearing_x": -1,
+      "bearing_y": 10,
+      "advance": 11,
+      "bitmap": "8c40b180c60098c0e3008c40b180c60098c0e3008c40b180c600"
+    },
+    {
+      "face": 1,
+      "size_px": 16,
+      "glyph_id": 18,
+      "bitmap_off": 738,
+      "width": 5,
+      "height": 6,
+      "bearing_x": 0,
+      "bearing_y": 6,
+      "advance": 6,
+      "bitmap": "000000000000"
+    },
+    {
+      "face": 1,
+      "size_px": 16,
+      "glyph_id": 19,
+      "bitmap_off": 744,
+      "width": 8,
+      "height": 8,
+      "bearing_x": 0,
+      "bearing_y": 8,
+      "advance": 9,
+      "bitmap": "183c7effff7e3c18"
+    },
+    {
+      "face": 1,
+      "size_px": 24,
+      "glyph_id": 19,
+      "bitmap_off": 744,
+      "width": 8,
+      "height": 8,
+      "bearing_x": 0,
+      "bearing_y": 8,
+      "advance": 9,
+      "bitmap": "183c7effff7e3c18"
+    },
+    {
+      "face": 1,
+      "size_px": 24,
+      "glyph_id": 13,
+      "bitmap_off": 1016,
+      "width": 8,
+      "height": 15,
+      "bearing_x": 1,
+      "bearing_y": 14,
+      "advance": 9,
+      "bitmap": "b1c698e38cb1c698e38cb1c698e38c"
+    }
+  ],
+  "dedup": {
+    "distinct_bitmaps": 42,
+    "bitmap_area_size": 1135,
+    "undeduplicated_size": 1343
+  },
+  "corruptions": [
+    {
+      "name": "header byte flipped",
+      "offset": 20,
+      "boot_status": "CRC_ERROR",
+      "install_status": "CRC_ERROR"
+    },
+    {
+      "name": "glyph index byte flipped",
+      "offset": 309,
+      "boot_status": "CRC_ERROR",
+      "install_status": "CRC_ERROR"
+    },
+    {
+      "name": "bitmap byte flipped",
+      "offset": 2086,
+      "boot_status": "OK",
+      "install_status": "DIGEST_MISMATCH"
+    }
+  ]
+}

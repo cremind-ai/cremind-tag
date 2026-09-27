@@ -1,0 +1,147 @@
+{
+  "description": "Handshake and records (docs/protocol.md \u00a75.4-5.5). HELLO/CHALLENGE/AUTH/AUTH_OK are the reassembled CTRL messages including their type byte.",
+  "tag_secret": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+  "tag_id": 439041101,
+  "epoch": 3,
+  "nonce_b": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+  "nonce_t": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "hello": "01014d3c2b1a03000000a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+  "challenge": "0201b0b1b2b3b4b5b6b7b8b9babbbcbdbebf020000001100000000860b00",
+  "k_epoch": "94fa4c43ccaddd8c7b3ae368de3db82f",
+  "k_epoch_next": {
+    "epoch": 4,
+    "k_epoch": "42886edd623f3d411384eef0a12fbb67"
+  },
+  "th": "e89ea184dba892f0da265cb49e52849a1e35a92a0ece95397ad26c2eb67b8a19",
+  "mac_b": "a662eab9d84d2cb51afcb938d74732af",
+  "mac_t": "cb7d06dba65bc6f5201a2cf262adae6e",
+  "auth": "03a662eab9d84d2cb51afcb938d74732af",
+  "auth_ok": "04cb7d06dba65bc6f5201a2cf262adae6e",
+  "k_b2t": "3dc7605ce8874a612237c86020ba54a8",
+  "k_t2b": "158cd317f4ddd907f720b8c4cbf95544",
+  "nonce_example": {
+    "direction": "T2B",
+    "counter": 1,
+    "nonce": "01010000000000000000000000"
+  },
+  "records": [
+    {
+      "direction": "B2T",
+      "counter": 0,
+      "type": 16,
+      "type_name": "FRAME_BEGIN",
+      "plaintext": "12000000f5010000000000008b7553d328858d3e377815d4927c725edd879801eba338e22ccdc10ab8280e7301983a",
+      "record": "10000000009505fcbb69396e91077cd39b7e92caa81a78b5656d05573145ec94a944725991c398c6cc69ed8bb38b2b8bc7ba017606dbcec46779c070"
+    },
+    {
+      "direction": "B2T",
+      "counter": 1,
+      "type": 17,
+      "type_name": "PLANE_DATA",
+      "plaintext": "000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "record": "1101000000b0b918b3532de3000891f8c6df4b0daecf64d9a1bdc8457cf36f857efb33df2321b64cdf700b66a780ef32e28ecce2042b7f04091f5c025ba252bf29a58d6a2e4d70ef3166f420caacc54b88ff5dec01363f7d61631aeffd60813dd29ec2aa8614efce1fa28e37226b0f418e60e1250665e20a00f24f12d6e3ce53e9c046e2efaadab047e28dcd6170919342ae8c8d643a4574f03d0c0eef0c6b4fca23c1be9021b8a0c10caaf163132ce62e8b51b43048a97c3119d5edeb8f675b9dcd73d9b324c8e620c0c8f36e"
+    },
+    {
+      "direction": "B2T",
+      "counter": 2,
+      "type": 17,
+      "type_name": "PLANE_DATA",
+      "plaintext": "00bd00ffffffffffffffffffffff",
+      "record": "11020000004539bd200aad6ecf67e325ebd3246b27e9c81a3cae23"
+    },
+    {
+      "direction": "B2T",
+      "counter": 3,
+      "type": 18,
+      "type_name": "FRAME_END",
+      "plaintext": "",
+      "record": "1203000000d3002fec9082b077"
+    },
+    {
+      "direction": "T2B",
+      "counter": 0,
+      "type": 33,
+      "type_name": "PROGRESS",
+      "plaintext": "05",
+      "record": "210000000020af2713635f616d4b"
+    },
+    {
+      "direction": "T2B",
+      "counter": 1,
+      "type": 32,
+      "type_name": "RESULT",
+      "plaintext": "f5010000000000000300000012000000008b7553d328858d3e860b3c0f00",
+      "record": "2001000000f081cbe6b1fe14831ad98a3fe90e290e36563119d9e4df45902f189b0e1f1ff75e2c41e89e3c"
+    },
+    {
+      "direction": "T2B",
+      "counter": 2,
+      "type": 32,
+      "type_name": "RESULT",
+      "plaintext": "f5010000000000000300000012000000008b7553d328858d3e7c0b000001",
+      "record": "2002000000daebbc5883c25e0f9d1d7a1d9e14f69282a3cbfc2c8a513c250c875401c8f9a3dd87e55fc2b7"
+    }
+  ],
+  "tampered": [
+    {
+      "name": "ciphertext bit flipped",
+      "direction": "B2T",
+      "expected_counter": 0,
+      "record": "10000000009505fdbb69396e91077cd39b7e92caa81a78b5656d05573145ec94a944725991c398c6cc69ed8bb38b2b8bc7ba017606dbcec46779c070",
+      "status_name": "AUTH_FAILED"
+    },
+    {
+      "name": "mic bit flipped",
+      "direction": "B2T",
+      "expected_counter": 0,
+      "record": "10000000009505fcbb69396e91077cd39b7e92caa81a78b5656d05573145ec94a944725991c398c6cc69ed8bb38b2b8bc7ba017606dbcec46779c071",
+      "status_name": "AUTH_FAILED"
+    },
+    {
+      "name": "type byte changed (AAD)",
+      "direction": "B2T",
+      "expected_counter": 0,
+      "record": "13000000009505fcbb69396e91077cd39b7e92caa81a78b5656d05573145ec94a944725991c398c6cc69ed8bb38b2b8bc7ba017606dbcec46779c070",
+      "status_name": "AUTH_FAILED"
+    },
+    {
+      "name": "replayed record",
+      "direction": "B2T",
+      "expected_counter": 4,
+      "record": "10000000009505fcbb69396e91077cd39b7e92caa81a78b5656d05573145ec94a944725991c398c6cc69ed8bb38b2b8bc7ba017606dbcec46779c070",
+      "status_name": "AUTH_FAILED"
+    },
+    {
+      "name": "counter skipped",
+      "direction": "B2T",
+      "expected_counter": 4,
+      "record": "1205000000deb2dbc687372a0d",
+      "status_name": "AUTH_FAILED"
+    },
+    {
+      "name": "counter field edited (nonce and AAD change)",
+      "direction": "B2T",
+      "expected_counter": 4,
+      "record": "1204000000d3002fec9082b077",
+      "status_name": "AUTH_FAILED"
+    },
+    {
+      "name": "wrong direction key",
+      "direction": "T2B",
+      "expected_counter": 0,
+      "record": "10000000009505fcbb69396e91077cd39b7e92caa81a78b5656d05573145ec94a944725991c398c6cc69ed8bb38b2b8bc7ba017606dbcec46779c070",
+      "status_name": "AUTH_FAILED"
+    },
+    {
+      "name": "truncated below header + mic",
+      "direction": "B2T",
+      "expected_counter": 0,
+      "record": "10000000009505fcbb69396e",
+      "status_name": "AUTH_FAILED"
+    }
+  ],
+  "bad_mac_b": {
+    "mac_b": "a762eab9d84d2cb51afcb938d74732af",
+    "status_name": "AUTH_FAILED"
+  }
+}

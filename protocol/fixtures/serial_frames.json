@@ -1,0 +1,240 @@
+{
+  "description": "Serial frames (docs/protocol.md \u00a71): decoded = header | payload | crc32, wire = COBS + 0x00. Payloads are canonical CBOR (integer keys ascending). error: which counter a receiver increments (len_errors, crc_errors, version_errors).",
+  "frames": [
+    {
+      "name": "hello request",
+      "kind": "request",
+      "type": 1,
+      "request_id": 1,
+      "flags": 0,
+      "credits": 4,
+      "fields": {
+        "proto": 1,
+        "name": "companion"
+      },
+      "payload": "a2181869636f6d70616e696f6e181d01",
+      "decoded": "0101010010000004a2181869636f6d70616e696f6e181d01c528d95c",
+      "wire": "040101010210011604a2181869636f6d70616e696f6e181d01c528d95c00"
+    },
+    {
+      "name": "hello response",
+      "kind": "response",
+      "type": 1,
+      "request_id": 1,
+      "flags": 1,
+      "credits": 4,
+      "fields": {
+        "status": 0,
+        "proto": 1,
+        "fw": "0.1.0",
+        "build": "g1a2b3c4",
+        "boot_id": 1592594996,
+        "caps": {
+          "max_frame": 4096,
+          "credits": 4,
+          "max_bridges": 5,
+          "max_tags": 20,
+          "role": 1
+        }
+      },
+      "payload": "a600001265302e312e3013686731613262336334141a5eed123415a5181e191000181f04182a01183905183a14181d01",
+      "decoded": "0101010030000104a600001265302e312e3013686731613262336334141a5eed123415a5181e191000181f04182a01183905183a14181d0174662e60",
+      "wire": "040101010230040104a6011e1265302e312e3013686731613262336334141a5eed123415a5181e191014181f04182a01183905183a14181d0174662e6000"
+    },
+    {
+      "name": "ping request (empty payload)",
+      "kind": "request",
+      "type": 2,
+      "request_id": 2,
+      "flags": 0,
+      "credits": 0,
+      "fields": {},
+      "payload": "",
+      "decoded": "0102020000000000d56fdf73",
+      "wire": "040102020101010105d56fdf7300"
+    },
+    {
+      "name": "ping response with credit grant",
+      "kind": "response",
+      "type": 2,
+      "request_id": 2,
+      "flags": 1,
+      "credits": 3,
+      "fields": {
+        "status": 0,
+        "uptime_s": 86400
+      },
+      "payload": "a2000018321a00015180",
+      "decoded": "010202000a000103a2000018321a000151803f9801de",
+      "wire": "04010202020a040103a2010418321a080151803f9801de00"
+    },
+    {
+      "name": "deliver layout request",
+      "kind": "request",
+      "type": 48,
+      "request_id": 65535,
+      "flags": 0,
+      "credits": 0,
+      "fields": {
+        "op_id": 8776565086972537,
+        "bridge": 2,
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 18,
+        "update_id": 501,
+        "fontpack_id": "a227ef00c31ce7b2",
+        "layout": "434c010090012c010000050003020018010c000c0002010018012c0020000a0200000003000e000400070005000c00010005000600080007000a0008000f00090008000a000d0002010010010c004000090b0000000c000b000d000b00010005000e0005000f000a00100007001100040013000900040c004c0084014c000101060c000401780114002500640001"
+      },
+      "payload": "a8011b001f2e3d4c5b6a79041a1a2b3c4d05030612071901f50848a227ef00c31ce7b209588e434c010090012c010000050003020018010c000c0002010018012c0020000a0200000003000e000400070005000c00010005000600080007000a0008000f00090008000a000d0002010010010c004000090b0000000c000b000d000b00010005000e0005000f000a00100007001100040013000900040c004c0084014c000101060c000401780114002500640001182102",
+      "decoded": "0130ffffb7000000a8011b001f2e3d4c5b6a79041a1a2b3c4d05030612071901f50848a227ef00c31ce7b209588e434c010090012c010000050003020018010c000c0002010018012c0020000a0200000003000e000400070005000c00010005000600080007000a0008000f00090008000a000d0002010010010c004000090b0000000c000b000d000b00010005000e0005000f000a00100007001100040013000900040c004c0084014c000101060c000401780114002500640001182102fbdc3112",
+      "wire": "060130ffffb7010104a8011b1b1f2e3d4c5b6a79041a1a2b3c4d05030612071901f50848a227ef0bc31ce7b209588e434c010590012c010102050303020418010c020c0302010418012c0220030a0201010203020e020402070205020c02010205020602080207020a0208020f02090208020a020d0302010410010c024003090b0101020c020b020d020b02010205020e0205020f020a02100207021102040213020903040c024c0484014c050101060c060401780114022502640901182102fbdc311200"
+    },
+    {
+      "name": "deliver layout accepted",
+      "kind": "response",
+      "type": 48,
+      "request_id": 65535,
+      "flags": 1,
+      "credits": 1,
+      "fields": {
+        "status": 1
+      },
+      "payload": "a10001",
+      "decoded": "0130ffff03000101a1000130b577b6",
+      "wire": "060130ffff03040101a1060130b577b600"
+    },
+    {
+      "name": "duplicate op response",
+      "kind": "response",
+      "type": 32,
+      "request_id": 9,
+      "flags": 1,
+      "credits": 0,
+      "fields": {
+        "status": 1,
+        "detail": 2
+      },
+      "payload": "a200010b02",
+      "decoded": "0120090005000100a200010b02a72aa15b",
+      "wire": "040120090205020102a208010b02a72aa15b00"
+    },
+    {
+      "name": "result event",
+      "kind": "event",
+      "type": 135,
+      "request_id": 0,
+      "flags": 2,
+      "credits": 0,
+      "fields": {
+        "seq": 7,
+        "update_id": 501,
+        "bridge": 2,
+        "tag_id": 439041101,
+        "epoch": 3,
+        "revision": 18,
+        "status": 0,
+        "digest": "0011223344556677",
+        "battery_mv": 2950,
+        "timing": {
+          "wake_ms": 12000,
+          "mesh_ms": 800,
+          "transfer_ms": 4100,
+          "refresh_ms": 3900,
+          "suspend_ms": 640
+        }
+      },
+      "payload": "aa0000041a1a2b3c4d05030612071901f5181a190b86181ba51833192ee0183419032018351910041836190f3c1837190280181c480011223344556677182102182407",
+      "decoded": "0187000043000200aa0000041a1a2b3c4d05030612071901f5181a190b86181ba51833192ee0183419032018351910041836190f3c1837190280181c480011223344556677182102182407226c0e22",
+      "wire": "030187010243020202aa0133041a1a2b3c4d05030612071901f5181a190b86181ba51833192ee0183419032018351910041836190f3c1837190280181c481211223344556677182102182407226c0e2200"
+    },
+    {
+      "name": "counters response",
+      "kind": "response",
+      "type": 65,
+      "request_id": 10,
+      "flags": 1,
+      "credits": 0,
+      "fields": {
+        "status": 0,
+        "counters": {
+          "crc_errors": 0,
+          "overruns": 2,
+          "events_dropped": 0,
+          "len_errors": 1
+        }
+      },
+      "payload": "a200001819a4686f76657272756e73026a6372635f6572726f7273006a6c656e5f6572726f7273016e6576656e74735f64726f7070656400",
+      "decoded": "01410a0038000100a200001819a4686f76657272756e73026a6372635f6572726f7273006a6c656e5f6572726f7273016e6576656e74735f64726f707065640047de4208",
+      "wire": "0401410a0238020102a201191819a4686f76657272756e73026a6372635f6572726f72731c6a6c656e5f6572726f7273016e6576656e74735f64726f707065640547de420800"
+    },
+    {
+      "name": "event ack",
+      "kind": "request",
+      "type": 4,
+      "request_id": 11,
+      "flags": 0,
+      "credits": 0,
+      "fields": {
+        "seq": 7
+      },
+      "payload": "a1182407",
+      "decoded": "01040b0004000000a118240722f46da4",
+      "wire": "0401040b0204010109a118240722f46da400"
+    },
+    {
+      "name": "log event",
+      "kind": "event",
+      "type": 128,
+      "request_id": 0,
+      "flags": 2,
+      "credits": 0,
+      "fields": {
+        "text": "mesh resume ok"
+      },
+      "payload": "a118266e6d65736820726573756d65206f6b",
+      "decoded": "0180000012000200a118266e6d65736820726573756d65206f6bac3229dd",
+      "wire": "030180010212020217a118266e6d65736820726573756d65206f6bac3229dd00"
+    },
+    {
+      "name": "unknown type answered",
+      "kind": "response",
+      "type": 127,
+      "request_id": 12,
+      "flags": 1,
+      "credits": 0,
+      "fields": {
+        "status": 6
+      },
+      "payload": "a10006",
+      "decoded": "017f0c0003000100a1000662e22e76",
+      "wire": "04017f0c0203020102a1060662e22e7600"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "too short",
+      "decoded": "010203000000000070bc83",
+      "error": "len"
+    },
+    {
+      "name": "crc mismatch",
+      "decoded": "014203000000000070bc83b8",
+      "error": "crc"
+    },
+    {
+      "name": "length mismatch",
+      "decoded": "0102030002000000a085eda92e",
+      "error": "len"
+    },
+    {
+      "name": "version 2",
+      "decoded": "020203000000000093bb0c36",
+      "error": "version"
+    },
+    {
+      "name": "crc checked before version",
+      "decoded": "020203000000000093bb0c00",
+      "error": "crc"
+    }
+  ]
+}

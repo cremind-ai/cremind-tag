@@ -1,0 +1,727 @@
+# Cremind Tag protocol specification — single source of truth.
+#
+# tools/codegen.py turns this file into:
+#   include/ctag/proto_ids.h, proto_msgs.h              (firmware, C)
+#   companion/src/cremind_tag/protocol/ids.py, msgs.py  (companion, Python)
+# CI fails when either generated file is stale (`python tools/codegen.py --check`).
+#
+# All multi-byte integers on every binary wire format are LITTLE-ENDIAN unless a
+# field says otherwise. Field types: u8 u16 u32 u64 i8 i16 i32, bytes[N] (fixed),
+# bytes (rest of message), str[N] (UTF-8, length-prefixed by a preceding field).
+# A trailing `bytes` field names its upper bound with `max: <constant>`. A
+# message without a trailing variable part has exactly its fixed length:
+# decoders reject shorter and longer input (INVALID). Field layouts exclude the
+# message's type/opcode byte, which is framing (mesh opcode, GATT message type).
+# Narrative, flows and rationale live in docs/protocol.md.
+
+spec_version: 1
+
+# ---------------------------------------------------------------------------
+# Global limits and timing. Firmware Kconfig defaults and companion constants
+# both come from here.
+# ---------------------------------------------------------------------------
+constants:
+  PROTO_VERSION:            {value: 1,     doc: "Version carried by serial frames, mesh CAPS, GATT HELLO and layout headers"}
+  SERIAL_MAX_FRAME:         {value: 4096,  doc: "Maximum DECODED serial frame (header + payload + CRC)"}
+  SERIAL_HEADER_LEN:        {value: 8,     doc: "Serial frame header length"}
+  SERIAL_CRC_LEN:           {value: 4,     doc: "CRC-32/IEEE trailer length"}
+  SERIAL_MAX_PAYLOAD:       {value: 4084,  doc: "SERIAL_MAX_FRAME - header - CRC"}
+  SERIAL_MAX_ENCODED:       {value: 4128,  doc: "Worst-case COBS-encoded frame incl. 0x00 delimiter (4096 + ceil(4096/254) + 1, rounded up)"}
+  SERIAL_DEFAULT_CREDITS:   {value: 4,     doc: "Frames each side may send before the first credit grant"}
+  SERIAL_EVENT_RETAIN:      {value: 16,    doc: "Unacknowledged gateway events (EVT_RESULT etc.) kept for re-send"}
+  SERIAL_IDEMPOTENCY_SLOTS: {value: 32,    doc: "Recent op_id -> status entries the gateway remembers"}
+  MESH_COMPANY_ID:          {value: 0xFFFF, doc: "Bluetooth SIG company id used by vendor models. 0xFFFF = SIG test/unassigned value; production needs an assigned id"}
+  MESH_MAX_VENDOR_PARAMS:   {value: 160,   doc: "Maximum vendor-model message parameter bytes"}
+  MESH_MIN_SEG:             {value: 16,    doc: "Minimum CONFIG_BT_MESH_TX_SEG_MAX / RX_SEG_MAX"}
+  MESH_DEFAULT_TTL:         {value: 5,     doc: "Default TTL for gateway<->bridge messages"}
+  MESH_RESULT_RETRIES:      {value: 5,     doc: "Bridge re-sends of DELIVERY_RESULT until RESULT_ACK"}
+  MESH_RESULT_RETRY_MS:     {value: 2000,  doc: "Interval between DELIVERY_RESULT re-sends"}
+  LAYOUT_TYPICAL_MAX:       {value: 1024,  doc: "Typical logical card upper bound (design target, not enforced)"}
+  LAYOUT_HARD_MAX:          {value: 4096,  doc: "Hard maximum logical screen size in bytes"}
+  LAYOUT_MAX_GLYPHS:        {value: 512,   doc: "Hard maximum positioned glyphs per screen"}
+  LAYOUT_MAX_COMMANDS:      {value: 256,   doc: "Hard maximum commands per screen"}
+  LAYOUT_CHUNK_DATA_MAX:    {value: 150,   doc: "Layout bytes per mesh LAYOUT_CHUNK"}
+  LAYOUT_MAX_CHUNKS:        {value: 28,    doc: "ceil(LAYOUT_HARD_MAX / LAYOUT_CHUNK_DATA_MAX)"}
+  LAYOUT_DIGEST_LEN:        {value: 16,    doc: "Layout digest = SHA-256(layout bytes) truncated to 16 bytes"}
+  LAYOUT_QR_MAX_TEXT:       {value: 96,    doc: "Maximum QR payload bytes (short token-free https link)"}
+  FONTPACK_ID_LEN:          {value: 8,     doc: "Font-pack id = first 8 bytes of the pack content SHA-256"}
+  FRAME_DIGEST_LEN:         {value: 32,    doc: "Frame digest = SHA-256 over plane 0 bytes then plane 1 bytes"}
+  MAX_BRIDGES:              {value: 5,     doc: "Bridges per gateway (qualified topology)"}
+  MAX_TAGS:                 {value: 20,    doc: "Tags per gateway (qualified topology)"}
+  MAX_TAGS_PER_BRIDGE:      {value: 20,    doc: "Assignment table size on a bridge"}
+  TAG_KEY_LEN:              {value: 16,    doc: "Per-epoch tag authorization key length (K_epoch)"}
+  TAG_SECRET_LEN:           {value: 32,    doc: "Per-tag enrollment secret length"}
+  TAG_NONCE_LEN:            {value: 16,    doc: "Handshake nonce length, each side"}
+  TAG_MAC_LEN:              {value: 16,    doc: "Truncated HMAC-SHA256 length in the handshake"}
+  TAG_RECORD_MIC_LEN:       {value: 8,     doc: "AES-CCM tag length on records"}
+  TAG_RECORD_BUF:           {value: 256,   doc: "Tag reassembly buffer size (two of these)"}
+  TAG_RECORD_PAYLOAD_MAX:   {value: 192,   doc: "Maximum plaintext payload per authenticated record"}
+  TAG_PLANE_DATA_MAX:       {value: 189,   doc: "Image bytes per PLANE_DATA record (192 - 3 header bytes)"}
+  TAG_RECORD_WIRE_MAX:      {value: 205,   doc: "type(1) + counter(4) + TAG_RECORD_PAYLOAD_MAX + mic(8)"}
+  TAG_CTRL_MSG_MAX:         {value: 64,    doc: "Maximum reassembled control message"}
+  ATT_MTU:                  {value: 23,    doc: "Compatibility baseline ATT MTU"}
+  ATT_VALUE_MAX:            {value: 20,    doc: "ATT_MTU - 3"}
+  FRAG_PAYLOAD_MAX:         {value: 19,    doc: "ATT_VALUE_MAX - 1 fragment header byte"}
+  TAG_WAKE_PERIOD_MS:       {value: 30000, doc: "Nominal RTC wake period"}
+  TAG_WAKE_JITTER_MS:       {value: 3000,  doc: "Uniform +/- jitter added to each wake"}
+  TAG_ADV_WINDOW_MS:        {value: 2000,  doc: "Connectable advertising window per wake"}
+  TAG_ADV_INTERVAL_MS:      {value: 250,   doc: "Advertising interval during the window"}
+  TAG_SESSION_TIMEOUT_MS:   {value: 20000, doc: "Tag drops a connection with no progress for this long"}
+  BRIDGE_CONN_ATTEMPT_MS:   {value: 1000,  doc: "Bounded BLE connection initiation (mesh is suspended meanwhile)"}
+  BRIDGE_STRIP_ROWS:        {value: 16,    doc: "Native panel rows per rendering strip"}
+  BRIDGE_TAG_BACKOFF_MS:    {value: 15000, doc: "Minimum wait before retrying a tag after a failed attempt"}
+  BRIDGE_MAX_SUSPENDS_PER_MIN: {value: 6,  doc: "Upper bound on mesh suspend/resume cycles per minute (anti-starvation)"}
+  FONT_SIZES:               {value: [16, 24, 32], doc: "Glyph strike sizes in pixels"}
+  ICON_SIZES:               {value: [16, 24, 32, 48], doc: "Icon strike sizes in pixels"}
+  FONTPACK_WORKING_SPACE:   {value: 16777216, doc: "16 MiB bridge working space in the flash sizing rule"}
+  FONTPACK_DIR_SIZE:        {value: 65536, doc: "Slot directory area at external flash offset 0"}
+
+# ---------------------------------------------------------------------------
+# Status codes shared by serial responses/events, mesh STATUS/RESULT messages,
+# GATT results and companion receipts. Never renumber; only append.
+# ---------------------------------------------------------------------------
+status_codes:
+  OK:                    {value: 0,  doc: "Success"}
+  ACCEPTED:              {value: 1,  doc: "Accepted for asynchronous processing"}
+  DUPLICATE:             {value: 2,  doc: "Already processed; the stored result is returned"}
+  BUSY:                  {value: 3,  doc: "Temporarily unable (queue full, one-outstanding-send rule); retry later"}
+  NO_RESOURCES:          {value: 4,  doc: "Out of memory/slots"}
+  INVALID:               {value: 5,  doc: "Malformed or out-of-bounds input"}
+  UNSUPPORTED:           {value: 6,  doc: "Unknown message/command/version feature"}
+  NOT_FOUND:             {value: 7,  doc: "Unknown node, tag, update or op"}
+  STALE_EPOCH:           {value: 8,  doc: "Assignment epoch older than the stored one"}
+  STALE_REVISION:        {value: 9,  doc: "Revision older than the displayed/desired one"}
+  REVISION_CONFLICT:     {value: 10, doc: "Same (epoch, revision) with a different digest"}
+  FONTPACK_MISMATCH:     {value: 11, doc: "Layout references a font pack the bridge does not have active"}
+  DIGEST_MISMATCH:       {value: 12, doc: "Computed digest differs from the announced one"}
+  INCOMPLETE:            {value: 13, doc: "Missing chunks/records"}
+  AUTH_FAILED:           {value: 14, doc: "Handshake MAC, record MIC or counter check failed"}
+  TIMEOUT:               {value: 15, doc: "Operation timed out"}
+  CONNECT_FAILED:        {value: 16, doc: "BLE connection could not be established"}
+  DISCONNECTED:          {value: 17, doc: "Link dropped mid-session"}
+  MESH_SUSPEND_FAILED:   {value: 18, doc: "bt_mesh_suspend() rejected; no connection was attempted"}
+  MESH_RESUME_FAILED:    {value: 19, doc: "bt_mesh_resume() failed; session aborted, recovery entered"}
+  PANEL_ERROR:           {value: 20, doc: "Panel controller error (SPI, BUSY stuck, bad staging)"}
+  REFRESH_TIMEOUT:       {value: 21, doc: "BUSY did not release within the panel's refresh bound"}
+  STORAGE_ERROR:         {value: 22, doc: "Persistent storage read/write failed"}
+  DISPLAY_STATE_UNKNOWN: {value: 23, doc: "Reset between physical refresh and result persistence; screen content uncertain"}
+  CANCELLED:             {value: 24, doc: "Cancelled by a newer revision, reassignment or operator"}
+  NOT_ASSIGNED:          {value: 25, doc: "Tag is not assigned to this bridge (or epoch differs)"}
+  TOO_LARGE:             {value: 26, doc: "Exceeds a hard size/count limit"}
+  CRC_ERROR:             {value: 27, doc: "Frame/strike CRC mismatch"}
+  VERSION_MISMATCH:      {value: 28, doc: "Peer protocol version not supported"}
+  SECURITY_CONFIG:       {value: 29, doc: "Missing/invalid key material or enrollment; stop and report"}
+  INTERNAL:              {value: 30, doc: "Unexpected internal error"}
+  PROVISIONING_ACTIVE:   {value: 31, doc: "Refused while provisioning/configuration is in progress"}
+  EXPIRED:               {value: 32, doc: "Job TTL elapsed before delivery"}
+  SUPERSEDED:            {value: 33, doc: "Replaced by a newer revision for the same tag/slot"}
+
+# Stages a delivery moves through (Cremind shows them; receipts carry them).
+delivery_stages:
+  QUEUED:             {value: 0, doc: "Created by Cremind's projection worker"}
+  COMPANION_ACCEPTED: {value: 1, doc: "Committed to the companion's durable queue"}
+  GATEWAY_RECEIVED:   {value: 2, doc: "Gateway acknowledged DELIVER_LAYOUT (serial ACK)"}
+  BRIDGE_RECEIVED:    {value: 3, doc: "Bridge validated the complete layout (LAYOUT_STATUS OK)"}
+  TRANSFERRING:       {value: 4, doc: "Bridge authenticated with the tag and is streaming the image"}
+  REFRESHING:         {value: 5, doc: "Tag validated the frame and started the panel refresh"}
+  DISPLAYED:          {value: 6, doc: "Tag reported BUSY complete and persisted the result (terminal)"}
+
+# Terminal outcomes other than DISPLAYED.
+delivery_outcomes:
+  DISPLAYED:  {value: 0, doc: "Refresh completed and ACKed"}
+  SUPERSEDED: {value: 1, doc: "A newer revision replaced this one before display"}
+  EXPIRED:    {value: 2, doc: "TTL elapsed"}
+  CANCELLED:  {value: 3, doc: "Operator/ownership change cancelled it"}
+  FAILED:     {value: 4, doc: "Permanent failure (security/config/invalid) — stop and report"}
+  UNCERTAIN:  {value: 5, doc: "Refresh may or may not have happened (DISPLAY_STATE_UNKNOWN, lost result)"}
+
+# ---------------------------------------------------------------------------
+# Serial protocol: companion (host) <-> gateway, and companion <-> bridge
+# maintenance port. COBS-framed, 0x00-delimited.
+# Decoded frame: header(8) | payload(len) | crc32(4) over header+payload.
+# ---------------------------------------------------------------------------
+serial:
+  header:
+    - {name: version,    type: u8,  doc: "PROTO_VERSION"}
+    - {name: type,       type: u8,  doc: "Message type"}
+    - {name: request_id, type: u16, doc: "Echoed in responses; 0 for events"}
+    - {name: length,     type: u16, doc: "Payload length"}
+    - {name: flags,      type: u8,  doc: "serial.flags bits"}
+    - {name: credits,    type: u8,  doc: "Incremental credit grant: extra frames the SENDER of this frame can now receive"}
+  flags:
+    RESPONSE: {value: 0x01, doc: "This frame answers request_id"}
+    EVENT:    {value: 0x02, doc: "Unsolicited event (request_id = 0)"}
+  # Integer keys for compact CBOR maps. One global dictionary shared by all messages.
+  cbor_keys:
+    status: 0
+    op_id: 1          # uint64 chosen by the companion; idempotency key for side-effecting requests
+    addr: 2           # mesh unicast address (uint)
+    uuid: 3           # 16-byte mesh device UUID (bstr)
+    tag_id: 4         # uint32
+    epoch: 5          # uint32 assignment epoch
+    revision: 6       # uint32 display revision
+    update_id: 7      # uint64 Cremind delivery id
+    fontpack_id: 8    # bstr[8]
+    layout: 9         # bstr (logical screen, <= LAYOUT_HARD_MAX)
+    stage: 10         # uint delivery_stages
+    detail: 11        # uint status detail / sub-code
+    rssi: 12          # int
+    oob: 13           # uint OOB info bits
+    duration_s: 14    # uint
+    relay: 15         # bool
+    ttl: 16           # uint
+    key: 17           # bstr[16]
+    fw: 18            # tstr "x.y.z"
+    build: 19         # tstr build id / git hash
+    boot_id: 20       # uint32 random per boot
+    caps: 21          # map
+    nodes: 22         # array of maps
+    elements: 23      # uint
+    name: 24          # tstr
+    counters: 25      # map tstr -> uint
+    battery_mv: 26    # uint
+    timing: 27        # map {wake_ms, mesh_ms, transfer_ms, refresh_ms, suspend_ms}
+    digest: 28        # bstr
+    proto: 29         # uint protocol version
+    max_frame: 30     # uint
+    credits: 31       # uint initial credits
+    flags: 32         # uint
+    bridge: 33        # uint mesh unicast address of a bridge
+    items: 34         # array
+    cmd: 35           # uint tag_commands
+    seq: 36           # uint event sequence number (EVENT_ACK)
+    time_ms: 37       # uint
+    text: 38          # tstr human-readable error text
+    size: 39          # uint byte size
+    offset: 40        # uint byte offset
+    data: 41          # bstr
+    role: 42          # uint node_roles
+    configured: 43    # bool
+    last_seen_s: 44   # uint seconds since last contact
+    board: 45         # uint board id
+    panel: 46         # uint panel id
+    flash_size: 47    # uint bytes
+    slot: 48          # uint font slot
+    assigned: 49      # array of {tag_id, epoch}
+    uptime_s: 50      # uint
+    wake_ms: 51
+    mesh_ms: 52
+    transfer_ms: 53
+    refresh_ms: 54
+    suspend_ms: 55
+    queue_depth: 56
+    max_bridges: 57
+    max_tags: 58
+    uuid_filter: 59   # bstr prefix filter for SCAN_UNPROV
+    net_idx: 60
+    app_idx: 61
+  message_types:
+    # --- requests (host -> device); the device answers with RESPONSE + {status, ...}
+    HELLO:           {value: 0x01, dir: h2d, doc: "{proto, name} -> {status, proto, fw, build, boot_id, caps:{max_frame, credits, max_bridges, max_tags, role}}"}
+    PING:            {value: 0x02, dir: h2d, doc: "{} -> {status, uptime_s}"}
+    REBOOT:          {value: 0x03, dir: h2d, doc: "{op_id} -> {status}; device reboots after responding"}
+    EVENT_ACK:       {value: 0x04, dir: h2d, doc: "{seq} -> {status}; releases retained events with seq <= given"}
+    INFO:            {value: 0x05, dir: h2d, doc: "{} -> {status, fw, build, boot_id, caps, counters}"}
+    SCAN_UNPROV:     {value: 0x10, dir: h2d, doc: "{duration_s, uuid_filter?} -> {status}; emits EVT_UNPROV_BEACON"}
+    PROVISION:       {value: 0x11, dir: h2d, doc: "{op_id, uuid, name?} -> {status: ACCEPTED}; later EVT_PROVISIONED"}
+    CONFIGURE_NODE:  {value: 0x12, dir: h2d, doc: "{op_id, addr, relay, ttl} -> ACCEPTED; later EVT_NODE_CONFIGURED (app key add/bind + relay + TTL)"}
+    REMOVE_NODE:     {value: 0x13, dir: h2d, doc: "{op_id, addr} -> ACCEPTED; later EVT_NODE_REMOVED (node reset + CDB delete)"}
+    LIST_NODES:      {value: 0x14, dir: h2d, doc: "{} -> {status, nodes:[{addr, uuid, elements, configured, name, last_seen_s}]}"}
+    ASSIGN_TAG:      {value: 0x20, dir: h2d, doc: "{op_id, bridge, tag_id, epoch, key} -> ACCEPTED; later EVT_ASSIGN_RESULT"}
+    UNASSIGN_TAG:    {value: 0x21, dir: h2d, doc: "{op_id, bridge, tag_id, epoch} -> ACCEPTED; later EVT_ASSIGN_RESULT"}
+    DELIVER_LAYOUT:  {value: 0x30, dir: h2d, doc: "{op_id, bridge, tag_id, epoch, revision, update_id, fontpack_id, layout} -> {status: ACCEPTED|BUSY|INVALID|DUPLICATE}; later EVT_STAGE*, EVT_RESULT"}
+    CANCEL_DELIVERY: {value: 0x31, dir: h2d, doc: "{op_id, update_id} -> {status}"}
+    TAG_COMMAND:     {value: 0x32, dir: h2d, doc: "{op_id, bridge, tag_id, epoch, cmd} -> ACCEPTED; later EVT_RESULT (update_id = op_id)"}
+    GET_INVENTORY:   {value: 0x40, dir: h2d, doc: "{} -> {status, items:[bridge info]}; also refreshes via mesh CAPS/HEALTH (EVT_BRIDGE_INFO)"}
+    GET_COUNTERS:    {value: 0x41, dir: h2d, doc: "{} -> {status, counters}"}
+    IDENTIFY_NODE:   {value: 0x42, dir: h2d, doc: "{op_id, addr} -> {status}; bridge blinks/beeps"}
+    # --- bridge maintenance port only (USB CDC / UART on the bridge itself)
+    FONT_BEGIN:      {value: 0x60, dir: h2d, doc: "{size, digest(32), fontpack_id} -> {status, slot, flash_size}"}
+    FONT_DATA:       {value: 0x61, dir: h2d, doc: "{offset, data} -> {status}; offsets strictly sequential"}
+    FONT_COMMIT:     {value: 0x62, dir: h2d, doc: "{} -> {status, fontpack_id}; verifies SHA-256 then flips the slot directory"}
+    FONT_STATUS:     {value: 0x63, dir: h2d, doc: "{} -> {status, fontpack_id, slot, size, flash_size}"}
+    FONT_ABORT:      {value: 0x64, dir: h2d, doc: "{} -> {status}"}
+    FLASH_TEST:      {value: 0x65, dir: h2d, doc: "{op_id} -> {status, flash_size, items:[{offset, status}]}; erase/write/read-back patterns at the first sector of the inactive slot, the sectors either side of the 16 MiB boundary and the last sector of the device (the working space ends there); never touches the active slot or the directory"}
+    # --- events (device -> host), request_id = 0, flags = EVENT, carry {seq} when retained
+    EVT_LOG:             {value: 0x80, dir: d2h, doc: "{text} diagnostic, not retained"}
+    EVT_UNPROV_BEACON:   {value: 0x81, dir: d2h, doc: "{uuid, rssi, oob}"}
+    EVT_PROVISIONED:     {value: 0x82, dir: d2h, doc: "{seq, op_id, uuid, addr, elements, status}"}
+    EVT_NODE_CONFIGURED: {value: 0x83, dir: d2h, doc: "{seq, op_id, addr, status}"}
+    EVT_NODE_REMOVED:    {value: 0x84, dir: d2h, doc: "{seq, op_id, addr, status}"}
+    EVT_ASSIGN_RESULT:   {value: 0x85, dir: d2h, doc: "{seq, op_id, bridge, tag_id, epoch, status}"}
+    EVT_STAGE:           {value: 0x86, dir: d2h, doc: "{update_id, tag_id, revision, stage} best effort, not retained"}
+    EVT_RESULT:          {value: 0x87, dir: d2h, doc: "{seq, update_id, bridge, tag_id, epoch, revision, status, digest(8), battery_mv, timing}"}
+    EVT_BRIDGE_INFO:     {value: 0x88, dir: d2h, doc: "{addr, fw, fontpack_id, caps, assigned, counters}"}
+    EVT_TAG_SEEN:        {value: 0x89, dir: d2h, doc: "{bridge, tag_id, rssi, battery_mv, flags} rate-limited sighting"}
+
+# Mesh / GATT tag command ids (TAG_COMMAND.cmd, mesh TAG_CMD.cmd, GATT CMD record).
+tag_commands:
+  CLEAR:    {value: 1, doc: "Clear to white (full refresh) and persist revision 0 for the epoch"}
+  IDENTIFY: {value: 2, doc: "Show an identify pattern with the tag id (bridge renders it)"}
+  REFRESH:  {value: 3, doc: "Re-send the current layout (repeat refresh)"}
+  SLEEP:    {value: 4, doc: "Enter shipping mode (System OFF) — only if external wake is verified"}
+
+node_roles:
+  GATEWAY: {value: 1, doc: "Mesh provisioner + serial bridge to the companion"}
+  BRIDGE:  {value: 2, doc: "Mesh relay + BLE central + renderer"}
+  TAG:     {value: 3, doc: "Battery e-paper BLE peripheral"}
+
+# ---------------------------------------------------------------------------
+# Bluetooth Mesh vendor models (gateway <-> bridge). All opcodes are 3-octet
+# vendor opcodes: (0xC0 | op) followed by MESH_COMPANY_ID.
+# ---------------------------------------------------------------------------
+mesh:
+  # "on" is quoted: YAML 1.1 parsers (PyYAML) read a bare `on` key as boolean true.
+  models:
+    LAYOUT_SRV: {id: 0x0001, "on": bridge,  doc: "Receives layouts; sends stage/result"}
+    LAYOUT_CLI: {id: 0x0002, "on": gateway, doc: "Sends layouts; receives stage/result"}
+    MGMT_SRV:   {id: 0x0003, "on": bridge,  doc: "Capabilities, health, assignments, tag commands, counters"}
+    MGMT_CLI:   {id: 0x0004, "on": gateway, doc: "Management client"}
+  opcodes:
+    LAYOUT_BEGIN:
+      value: 0x01
+      model: LAYOUT_SRV
+      fields:
+        - {name: xfer_id,     type: u16}
+        - {name: tag_id,      type: u32}
+        - {name: epoch,       type: u32}
+        - {name: revision,    type: u32}
+        - {name: update_id,   type: u64}
+        - {name: fontpack_id, type: "bytes[8]"}
+        - {name: total_len,   type: u16}
+        - {name: chunk_count, type: u8}
+        - {name: digest,      type: "bytes[16]"}
+    LAYOUT_CHUNK:
+      value: 0x02
+      model: LAYOUT_SRV
+      fields:
+        - {name: xfer_id, type: u16}
+        - {name: index,   type: u8}
+        - {name: data,    type: bytes, max: LAYOUT_CHUNK_DATA_MAX, doc: "Every chunk but the last is exactly 150 bytes"}
+    LAYOUT_COMMIT:
+      value: 0x03
+      model: LAYOUT_SRV
+      fields:
+        - {name: xfer_id, type: u16}
+    LAYOUT_CANCEL:
+      value: 0x04
+      model: LAYOUT_SRV
+      fields:
+        - {name: update_id, type: u64}
+    LAYOUT_STATUS:
+      value: 0x05
+      model: LAYOUT_CLI
+      fields:
+        - {name: xfer_id, type: u16}
+        - {name: status,  type: u8}
+        - {name: missing, type: u32, doc: "Bit i set = chunk i missing (valid with INCOMPLETE)"}
+    DELIVERY_STAGE:
+      value: 0x06
+      model: LAYOUT_CLI
+      fields:
+        - {name: update_id, type: u64}
+        - {name: tag_id,    type: u32}
+        - {name: revision,  type: u32}
+        - {name: stage,     type: u8}
+    DELIVERY_RESULT:
+      value: 0x07
+      model: LAYOUT_CLI
+      fields:
+        - {name: result_seq,  type: u16, doc: "Bridge-local sequence, echoed by RESULT_ACK"}
+        - {name: update_id,   type: u64}
+        - {name: tag_id,      type: u32}
+        - {name: epoch,       type: u32}
+        - {name: revision,    type: u32}
+        - {name: status,      type: u8}
+        - {name: digest,      type: "bytes[8]", doc: "First 8 bytes of the frame digest (zeros if none)"}
+        - {name: battery_mv,  type: u16}
+        - {name: wake_ms,     type: u16, doc: "Layout validated -> tag connected"}
+        - {name: suspend_ms,  type: u16, doc: "Mesh suspended duration for the connection attempt"}
+        - {name: transfer_ms, type: u16}
+        - {name: refresh_ms,  type: u16}
+    RESULT_ACK:
+      value: 0x08
+      model: LAYOUT_SRV
+      fields:
+        - {name: result_seq, type: u16}
+    CAPS_GET:
+      value: 0x10
+      model: MGMT_SRV
+      fields: []
+    CAPS_STATUS:
+      value: 0x11
+      model: MGMT_CLI
+      fields:
+        - {name: proto,        type: u8}
+        - {name: fw_major,     type: u8}
+        - {name: fw_minor,     type: u8}
+        - {name: fw_patch,     type: u8}
+        - {name: board,        type: u8}
+        - {name: fontpack_id,  type: "bytes[8]"}
+        - {name: flash_mib,    type: u16}
+        - {name: max_tags,     type: u8}
+        - {name: assigned,     type: u8}
+        - {name: flags,        type: u8, doc: "bit0 font pack valid, bit1 busy with a tag session"}
+    HEALTH_GET:
+      value: 0x12
+      model: MGMT_SRV
+      fields: []
+    HEALTH_STATUS:
+      value: 0x13
+      model: MGMT_CLI
+      fields:
+        - {name: uptime_s,       type: u32}
+        - {name: sessions_ok,    type: u16}
+        - {name: sessions_fail,  type: u16}
+        - {name: suspend_count,  type: u16}
+        - {name: suspend_max_ms, type: u16}
+        - {name: resume_fail,    type: u16}
+        - {name: queue_depth,    type: u8}
+        - {name: last_status,    type: u8}
+    ASSIGN_SET:
+      value: 0x14
+      model: MGMT_SRV
+      fields:
+        - {name: tag_id, type: u32}
+        - {name: epoch,  type: u32}
+        - {name: key,    type: "bytes[16]", doc: "K_epoch for this (tag, epoch)"}
+        - {name: flags,  type: u8, doc: "bit0 primary bridge"}
+    ASSIGN_DEL:
+      value: 0x15
+      model: MGMT_SRV
+      fields:
+        - {name: tag_id, type: u32}
+        - {name: epoch,  type: u32}
+    ASSIGN_STATUS:
+      value: 0x16
+      model: MGMT_CLI
+      fields:
+        - {name: tag_id, type: u32}
+        - {name: epoch,  type: u32}
+        - {name: status, type: u8}
+    TAG_CMD:
+      value: 0x17
+      model: MGMT_SRV
+      fields:
+        - {name: update_id, type: u64, doc: "Companion op id; results come back as DELIVERY_RESULT"}
+        - {name: tag_id,    type: u32}
+        - {name: epoch,     type: u32}
+        - {name: cmd,       type: u8}
+    IDENTIFY:
+      value: 0x18
+      model: MGMT_SRV
+      fields:
+        - {name: seconds, type: u8}
+    TAG_SEEN:
+      value: 0x19
+      model: MGMT_CLI
+      fields:
+        - {name: tag_id,     type: u32}
+        - {name: rssi,       type: i8}
+        - {name: battery_mv, type: u16}
+        - {name: flags,      type: u8}
+
+# ---------------------------------------------------------------------------
+# Logical screen ("layout") — produced by the companion, carried by mesh,
+# rendered by the bridge. Header then commands; every command starts with op.
+# ---------------------------------------------------------------------------
+layout:
+  magic: 0x4C43            # bytes 'C','L'
+  header:
+    - {name: magic,     type: u16}
+    - {name: version,   type: u8}
+    - {name: flags,     type: u8, doc: "bit0 uses red"}
+    - {name: width,     type: u16, doc: "Logical (user-facing) width in px"}
+    - {name: height,    type: u16, doc: "Logical height in px"}
+    - {name: rotation,  type: u8,  doc: "0..3 = logical->native clockwise quarter turns"}
+    - {name: background, type: u8, doc: "colors"}
+    - {name: cmd_count, type: u16}
+  colors:
+    WHITE: 0
+    BLACK: 1
+    RED: 2
+  qr_ecc:
+    LOW: 0
+    MEDIUM: 1
+    QUARTILE: 2
+    HIGH: 3
+  commands:
+    CLEAR:
+      value: 0x01
+      fields:
+        - {name: color, type: u8}
+    GLYPHS:
+      value: 0x02
+      doc: "A run of positioned glyphs from one (face, size) strike. Each glyph origin is relative to the previous glyph origin (the first to origin_x/origin_y). Origin = pen position on the baseline."
+      fields:
+        - {name: face,     type: u16}
+        - {name: size_px,  type: u8}
+        - {name: color,    type: u8}
+        - {name: origin_x, type: i16}
+        - {name: origin_y, type: i16}
+        - {name: count,    type: u8}
+        - {name: glyphs,   type: "glyph[count]", doc: "count x layout.glyph (4 bytes each)"}
+    ICON:
+      value: 0x03
+      fields:
+        - {name: icon,    type: u16, doc: "icons[].id; drawn from face 0 (icon face)"}
+        - {name: size_px, type: u8}
+        - {name: color,   type: u8}
+        - {name: x,       type: i16, doc: "top-left"}
+        - {name: y,       type: i16}
+    LINE:
+      value: 0x04
+      fields:
+        - {name: x0, type: i16}
+        - {name: y0, type: i16}
+        - {name: x1, type: i16}
+        - {name: y1, type: i16}
+        - {name: width, type: u8, doc: "1..8 px; square brush centred on the Bresenham path"}
+        - {name: color, type: u8}
+    RECT:
+      value: 0x05
+      fields:
+        - {name: x, type: i16}
+        - {name: y, type: i16}
+        - {name: w, type: u16}
+        - {name: h, type: u16}
+        - {name: border, type: u8, doc: "0 = filled, else outline thickness"}
+        - {name: color,  type: u8}
+    PROGRESS:
+      value: 0x06
+      fields:
+        - {name: x, type: i16}
+        - {name: y, type: i16}
+        - {name: w, type: u16}
+        - {name: h, type: u16}
+        - {name: value, type: u16}
+        - {name: max,   type: u16}
+        - {name: color, type: u8}
+    QR:
+      value: 0x07
+      fields:
+        - {name: x,         type: i16}
+        - {name: y,         type: i16}
+        - {name: module_px, type: u8, doc: "1..8"}
+        - {name: ecc,       type: u8}
+        - {name: color,     type: u8}
+        - {name: len,       type: u8}
+        - {name: text,      type: "str[len]", doc: "<= LAYOUT_QR_MAX_TEXT, printable ASCII https URL"}
+  # One GLYPHS entry.
+  glyph:
+    - {name: glyph_id, type: u16}
+    - {name: dx,       type: i8, doc: "Pen offset from the previous glyph origin (the first: from origin_x)"}
+    - {name: dy,       type: i8}
+
+# Built-in icon ids (face 0). Rendered from the pinned icon font (docs/fonts.md).
+icons:
+  - {id: 1,  name: info}
+  - {id: 2,  name: check_circle}
+  - {id: 3,  name: error}
+  - {id: 4,  name: warning}
+  - {id: 5,  name: help}
+  - {id: 6,  name: chat}
+  - {id: 7,  name: task}
+  - {id: 8,  name: schedule}
+  - {id: 9,  name: event}
+  - {id: 10, name: notifications}
+  - {id: 11, name: sync}
+  - {id: 12, name: battery_full}
+  - {id: 13, name: battery_low}
+  - {id: 14, name: wifi_off}
+  - {id: 15, name: link_off}
+  - {id: 16, name: description}
+  - {id: 17, name: bolt}
+  - {id: 18, name: push_pin}
+  - {id: 19, name: bar_chart}
+  - {id: 20, name: approval}
+  - {id: 21, name: hourglass}
+  - {id: 22, name: bug_report}
+  - {id: 23, name: folder}
+  - {id: 24, name: person}
+
+# ---------------------------------------------------------------------------
+# Tag GATT service (bridge = central/client, tag = peripheral/server).
+# ---------------------------------------------------------------------------
+gatt:
+  # A full UUID is base_uuid with the short value in place of its "0000" (bits
+  # 96..111), e.g. the service is 6a7c0001-4c1e-4b9f-9d2a-43524d544147. On air
+  # (and in Zephyr's BT_UUID_128_ENCODE) the 16 bytes are little-endian.
+  base_uuid: "6a7c0000-4c1e-4b9f-9d2a-43524d544147"   # ...43524d544147 = "CRMTAG"
+  service_short: 0x0001
+  characteristics:
+    CAPS:   {short: 0x0002, props: [read],                 doc: "tag_caps struct (long read allowed)"}
+    CTRL:   {short: 0x0003, props: [write, indicate],       doc: "Fragmented control messages: handshake + plaintext errors"}
+    DATA:   {short: 0x0004, props: [write_without_response], doc: "Fragmented authenticated records (bridge -> tag)"}
+    STATUS: {short: 0x0005, props: [notify],                doc: "Credit grants (plaintext) and fragmented authenticated records (tag -> bridge)"}
+  # One header byte precedes every ATT value on CTRL, DATA and STATUS. Fragments
+  # reassemble into messages; a message's FIRST byte is its type: ctrl_messages
+  # (0x01-0x0F, plaintext), record_types (0x10-0x2F, authenticated) or
+  # plain_messages (0xC0-0xCF, plaintext, STATUS only).
+  fragment_header:
+    START: {value: 0x80, doc: "First fragment of a message/record"}
+    END:   {value: 0x40, doc: "Last fragment"}
+    SEQ_MASK: {value: 0x3F, doc: "Fragment counter mod 64 per characteristic and direction, continuous across messages, reset to 0 on connect"}
+  plain_messages:
+    CREDIT:
+      value: 0xC0
+      dir: t2b
+      fields:
+        - {name: credits, type: u8, doc: "Incremental grant of DATA records the bridge may send"}
+  tag_caps:
+    - {name: proto,       type: u8}
+    - {name: tag_id,      type: u32}
+    - {name: board,       type: u8}
+    - {name: panel,       type: u8}
+    - {name: width,       type: u16, doc: "Native panel width"}
+    - {name: height,      type: u16, doc: "Native panel height"}
+    - {name: planes,      type: u8,  doc: "1 = BW, 2 = BW + red"}
+    - {name: plane_flags, type: u8,  doc: "bit0: plane0 bit 1 = white; bit1: plane1 bit 1 = red"}
+    - {name: fw_major,    type: u8}
+    - {name: fw_minor,    type: u8}
+    - {name: fw_patch,    type: u8}
+    - {name: max_record,  type: u8,  doc: "TAG_RECORD_PAYLOAD_MAX"}
+    - {name: credits,     type: u8,  doc: "Initial record credits after AUTH_OK"}
+  ctrl_messages:
+    HELLO:
+      value: 0x01
+      dir: b2t
+      fields:
+        - {name: proto,   type: u8}
+        - {name: tag_id,  type: u32}
+        - {name: epoch,   type: u32}
+        - {name: nonce_b, type: "bytes[16]"}
+    CHALLENGE:
+      value: 0x02
+      dir: t2b
+      fields:
+        - {name: proto,         type: u8}
+        - {name: nonce_t,       type: "bytes[16]"}
+        - {name: stored_epoch,  type: u32}
+        - {name: displayed_rev, type: u32}
+        - {name: last_status,   type: u8}
+        - {name: battery_mv,    type: u16}
+        - {name: flags,         type: u8, doc: "bit0 DISPLAY_STATE_UNKNOWN pending, bit1 low battery"}
+    AUTH:
+      value: 0x03
+      dir: b2t
+      fields:
+        - {name: mac_b, type: "bytes[16]"}
+    AUTH_OK:
+      value: 0x04
+      dir: t2b
+      fields:
+        - {name: mac_t, type: "bytes[16]"}
+    ERROR:
+      value: 0x05
+      dir: t2b
+      fields:
+        - {name: status, type: u8}
+  # Authenticated record = type(u8) | counter(u32) | ciphertext | mic(8).
+  # AAD = type|counter; nonce = direction(u8, record_dir) | counter(u32 LE) | 8 zero bytes.
+  # Field layouts below are the plaintext (the type byte is in the record header).
+  record_dir:
+    B2T: 0
+    T2B: 1
+  record_types:
+    FRAME_BEGIN:
+      value: 0x10
+      dir: b2t
+      fields:
+        - {name: revision,  type: u32}
+        - {name: update_id, type: u64}
+        - {name: digest,    type: "bytes[32]", doc: "Frame digest the tag must reproduce"}
+        - {name: planes,    type: u8}
+        - {name: plane_len, type: u16, doc: "Bytes per plane = ceil(width/8) * height"}
+    PLANE_DATA:
+      value: 0x11
+      dir: b2t
+      fields:
+        - {name: plane,  type: u8}
+        - {name: offset, type: u16, doc: "Must equal bytes already received for this plane"}
+        - {name: data,   type: bytes, max: TAG_PLANE_DATA_MAX}
+    FRAME_END:
+      value: 0x12
+      dir: b2t
+      fields: []
+    FRAME_ABORT:
+      value: 0x13
+      dir: b2t
+      fields:
+        - {name: status, type: u8}
+    CMD:
+      value: 0x14
+      dir: b2t
+      fields:
+        - {name: cmd,       type: u8}
+        - {name: update_id, type: u64}
+    RESULT:
+      value: 0x20
+      dir: t2b
+      fields:
+        - {name: update_id,  type: u64}
+        - {name: epoch,      type: u32}
+        - {name: revision,   type: u32}
+        - {name: status,     type: u8}
+        - {name: digest,     type: "bytes[8]"}
+        - {name: battery_mv, type: u16}
+        - {name: refresh_ms, type: u16}
+        - {name: flags,      type: u8, doc: "bit0 duplicate (stored ACK re-sent)"}
+    PROGRESS:
+      value: 0x21
+      dir: t2b
+      fields:
+        - {name: stage, type: u8, doc: "delivery_stages.REFRESHING when validated and refresh starts"}
+
+# Key schedule labels (bytes, ASCII). See docs/security.md.
+crypto:
+  hkdf_salt_epoch: "cremind-tag/v1/epoch"
+  hkdf_info_epoch_prefix: "K_epoch"          # info = prefix | tag_id(u32 LE) | epoch(u32 LE)
+  mac_label_bridge: "B"                     # mac_b = HMAC(K_epoch, "B" | SHA256(HELLO|CHALLENGE))[:16]
+  mac_label_tag: "T"                        # mac_t = HMAC(K_epoch, "T" | SHA256(HELLO|CHALLENGE) | mac_b)[:16]
+  hkdf_info_session: "cremind-tag/v1/session"  # HKDF(IKM=K_epoch, salt=SHA256(HELLO|CHALLENGE), info) -> 32 bytes = k_b2t | k_t2b
+
+# ---------------------------------------------------------------------------
+# Enrollment blob written to UICR.CUSTOMER[0..] by J-Link during enrollment.
+# ---------------------------------------------------------------------------
+enrollment:
+  magic: 0x47415443        # bytes 'C','T','A','G'
+  fields:
+    - {name: magic,    type: u32}
+    - {name: version,  type: u8}
+    - {name: board,    type: u8}
+    - {name: panel,    type: u8}
+    - {name: flags,    type: u8}
+    - {name: tag_id,   type: u32}
+    - {name: secret,   type: "bytes[32]"}
+    - {name: crc32,    type: u32, doc: "CRC-32/IEEE over all previous bytes"}
+
+# Board and panel identifiers (CAPS, enrollment, hardware/matrix.yaml).
+boards:
+  NRF52840DK_GATEWAY: {value: 1,  doc: "nRF52840 DK / dongle gateway (USB CDC ACM)"}
+  NRF52832_GATEWAY:   {value: 2,  doc: "nRF52832 + CH340 UART gateway"}
+  NRF52840_BRIDGE:    {value: 3,  doc: "nRF52840 bridge with soldered external flash"}
+  NRF52832_BRIDGE:    {value: 4,  doc: "nRF52832 bridge variant (resource qualification pending)"}
+  LAOWU_BW_NRF51822:  {value: 16, doc: "Laowu 4.2in black/white, nRF51822 128K/16K"}
+  LAOWU_BWR_NRF51802: {value: 17, doc: "Laowu 4.2in black/white/red, nRF51802 256K/16K"}
+  SIFEI_NRF52810:     {value: 18, doc: "Sifei 52810, 192K/24K"}
+  HEMA_NRF52811:      {value: 19, doc: "Hema/Alibaba 52811, 192K/24K"}
+  NRF52DK_TAG:        {value: 20, doc: "nRF52 DK development tag (display optional)"}
+panels:
+  NONE:               {value: 0, doc: "No panel (dev/test)"}
+  UC8176_420_BW:      {value: 1, doc: "4.2in 400x300 UC8176 monochrome"}
+  UC8176_420_BWR:     {value: 2, doc: "4.2in 400x300 UC8176 black/white/red"}
+  UNVERIFIED:         {value: 255, doc: "Panel not yet physically verified (Sifei/Hema)"}
+
+# ---------------------------------------------------------------------------
+# Font pack (bridge external flash). See docs/fontpack.md.
+# ---------------------------------------------------------------------------
+fontpack:
+  magic: 0x50465443        # bytes 'C','T','F','P'
+  version: 1
+  header_size: 128
+  face_record_size: 16
+  strike_record_size: 24
+  glyph_entry_size: 12
+  empty_bitmap: 0xFFFFFFFF
+  slot_dir_magic: 0x4C535443   # bytes 'C','T','S','L'

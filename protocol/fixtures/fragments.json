@@ -1,0 +1,177 @@
+{
+  "description": "GATT fragmentation (docs/protocol.md \u00a75.3), 19-byte fragment payload (ATT MTU 23). Receivers start at seq 0; error_at is the index of the fragment that aborts.",
+  "fragment_payload": 19,
+  "vectors": [
+    {
+      "name": "CTRL 1 byte",
+      "characteristic": "CTRL",
+      "max_message": 64,
+      "seq_start": 0,
+      "message": "05",
+      "fragments": [
+        "c005"
+      ],
+      "seq_next": 1
+    },
+    {
+      "name": "CTRL HELLO 26 bytes",
+      "characteristic": "CTRL",
+      "max_message": 64,
+      "seq_start": 0,
+      "message": "01010e1b2835424f5c697683909daab7c4d1deebf805121f2c39",
+      "fragments": [
+        "8001010e1b2835424f5c697683909daab7c4d1de",
+        "41ebf805121f2c39"
+      ],
+      "seq_next": 2
+    },
+    {
+      "name": "CTRL exactly one fragment (19)",
+      "characteristic": "CTRL",
+      "max_message": 64,
+      "seq_start": 5,
+      "message": "020f1c293643505d6a7784919eabb8c5d2dfec",
+      "fragments": [
+        "c5020f1c293643505d6a7784919eabb8c5d2dfec"
+      ],
+      "seq_next": 6
+    },
+    {
+      "name": "CTRL 20 bytes",
+      "characteristic": "CTRL",
+      "max_message": 64,
+      "seq_start": 5,
+      "message": "03101d2a3744515e6b7885929facb9c6d3e0edfa",
+      "fragments": [
+        "8503101d2a3744515e6b7885929facb9c6d3e0ed",
+        "46fa"
+      ],
+      "seq_next": 7
+    },
+    {
+      "name": "CTRL 38 bytes",
+      "characteristic": "CTRL",
+      "max_message": 64,
+      "seq_start": 5,
+      "message": "04111e2b3845525f6c798693a0adbac7d4e1eefb0815222f3c495663707d8a97a4b1becbd8e5",
+      "fragments": [
+        "8504111e2b3845525f6c798693a0adbac7d4e1ee",
+        "46fb0815222f3c495663707d8a97a4b1becbd8e5"
+      ],
+      "seq_next": 7
+    },
+    {
+      "name": "CTRL maximum 64 bytes",
+      "characteristic": "CTRL",
+      "max_message": 64,
+      "seq_start": 5,
+      "message": "05121f2c394653606d7a8794a1aebbc8d5e2effc091623303d4a5764717e8b98a5b2bfccd9e6f3000d1a2734414e5b6875828f9ca9b6c3d0ddeaf704111e2b38",
+      "fragments": [
+        "8505121f2c394653606d7a8794a1aebbc8d5e2ef",
+        "06fc091623303d4a5764717e8b98a5b2bfccd9e6",
+        "07f3000d1a2734414e5b6875828f9ca9b6c3d0dd",
+        "48eaf704111e2b38"
+      ],
+      "seq_next": 9
+    },
+    {
+      "name": "DATA maximum record 205 bytes, seq wraps",
+      "characteristic": "DATA",
+      "max_message": 205,
+      "seq_start": 60,
+      "message": "0613202d3a4754616e7b8895a2afbcc9d6e3f0fd0a1724313e4b5865727f8c99a6b3c0cddae7f4010e1b2835424f5c697683909daab7c4d1deebf805121f2c394653606d7a8794a1aebbc8d5e2effc091623303d4a5764717e8b98a5b2bfccd9e6f3000d1a2734414e5b6875828f9ca9b6c3d0ddeaf704111e2b3845525f6c798693a0adbac7d4e1eefb0815222f3c495663707d8a97a4b1becbd8e5f2ff0c192633404d5a6774818e9ba8b5c2cfdce9f603101d2a3744515e6b7885929facb9c6d3e0edfa0714212e3b485562",
+      "fragments": [
+        "bc0613202d3a4754616e7b8895a2afbcc9d6e3f0",
+        "3dfd0a1724313e4b5865727f8c99a6b3c0cddae7",
+        "3ef4010e1b2835424f5c697683909daab7c4d1de",
+        "3febf805121f2c394653606d7a8794a1aebbc8d5",
+        "00e2effc091623303d4a5764717e8b98a5b2bfcc",
+        "01d9e6f3000d1a2734414e5b6875828f9ca9b6c3",
+        "02d0ddeaf704111e2b3845525f6c798693a0adba",
+        "03c7d4e1eefb0815222f3c495663707d8a97a4b1",
+        "04becbd8e5f2ff0c192633404d5a6774818e9ba8",
+        "05b5c2cfdce9f603101d2a3744515e6b7885929f",
+        "46acb9c6d3e0edfa0714212e3b485562"
+      ],
+      "seq_next": 7
+    },
+    {
+      "name": "STATUS CREDIT",
+      "characteristic": "STATUS",
+      "max_message": 205,
+      "seq_start": 63,
+      "message": "c004",
+      "fragments": [
+        "ffc004"
+      ],
+      "seq_next": 0
+    }
+  ],
+  "errors": [
+    {
+      "name": "sequence gap",
+      "max_message": 64,
+      "fragments": [
+        "8001",
+        "4202"
+      ],
+      "error_at": 1,
+      "status": 5,
+      "status_name": "INVALID"
+    },
+    {
+      "name": "START in the middle",
+      "max_message": 64,
+      "fragments": [
+        "8001",
+        "8102"
+      ],
+      "error_at": 1,
+      "status": 5,
+      "status_name": "INVALID"
+    },
+    {
+      "name": "continuation without START",
+      "max_message": 64,
+      "fragments": [
+        "4001"
+      ],
+      "error_at": 0,
+      "status": 5,
+      "status_name": "INVALID"
+    },
+    {
+      "name": "empty fragment",
+      "max_message": 64,
+      "fragments": [
+        "c0"
+      ],
+      "error_at": 0,
+      "status": 5,
+      "status_name": "INVALID"
+    },
+    {
+      "name": "CTRL message of 65 bytes",
+      "max_message": 64,
+      "fragments": [
+        "800714212e3b4855626f7c8996a3b0bdcad7e4f1",
+        "01fe0b1825323f4c596673808d9aa7b4c1cedbe8",
+        "02f5020f1c293643505d6a7784919eabb8c5d2df",
+        "43ecf90613202d3a47"
+      ],
+      "error_at": 3,
+      "status": 5,
+      "status_name": "INVALID"
+    },
+    {
+      "name": "first fragment with seq 5 after connect",
+      "max_message": 64,
+      "fragments": [
+        "8503101d2a3744515e6b7885929facb9c6d3e0ed"
+      ],
+      "error_at": 0,
+      "status": 5,
+      "status_name": "INVALID"
+    }
+  ]
+}
