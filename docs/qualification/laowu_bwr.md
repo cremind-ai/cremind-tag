@@ -51,7 +51,7 @@ Refreshed from `build/memory-report.json` by `tools/gen_hardware_docs.py`.
 
 | Test | Procedure | Expected | Result |
 |---|---|---|---|
-| Enrollment | Write the enrollment blob with the companion; read back UICR | Tag advertises; missing/bad CRC → no advertising, SECURITY_CONFIG | _pending_ |
+| Enrollment | Write the enrollment blob (`cremind tags tools tag enroll`); read back UICR | Tag advertises; missing/bad CRC → no advertising, SECURITY_CONFIG | _pending_ |
 | Advertising cadence | Sniff for 10 min | Window every 30 s ± 3 s, 2 s long, 250 ms interval, legacy 1M | _pending_ |
 | Handshake | Bridge session with the current epoch; then a wrong key | AUTH_OK; wrong key → AUTH_FAILED, 3 failures skip a window | _pending_ |
 | Frame transfer + refresh | Deliver a test layout per plane count | RESULT OK; image correct in every plane; refresh_ms recorded | _pending_ |

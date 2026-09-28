@@ -1,12 +1,14 @@
 # Releasing
 
-A release is one directory, `dist/<version>/`, holding everything needed to
-run Cremind Tag at that version: the firmware of every publishable target, the
-font packs, the companion wheel, the protocol spec and fixtures, the licence
+A release is one directory, `dist/<version>/`, holding the firmware of every
+publishable target, the protocol contract host software pins, the licence
 notices and the checksums — tied together by `release.json`. It is built by
 [`tools/release.py`](../tools/release.py), normally from the tag's CI run
 ([`.github/workflows/release.yml`](../.github/workflows/release.yml)), which
 uploads it to a **draft** GitHub release. Nothing is published automatically.
+
+The host software is not part of it: Cremind is released on its own, with its
+own version, and builds, pins and ships the font packs bridges draw with.
 
 ## Versioning
 
@@ -19,7 +21,12 @@ as bytes. Every other copy is derived from it by
 | Copy | Form | Reaches |
 |---|---|---|
 | `apps/{gateway,bridge,tag}/VERSION` | Zephyr format (`VERSION_MAJOR = …`, `EXTRAVERSION = rc.1`) | `app_version.h`: `APP_VERSION_MAJOR/MINOR/PATCHLEVEL`, `APP_VERSION_STRING` |
-| `companion/src/cremind_tag/__init__.py` `__version__` | PEP 440 (`0.2.0rc1`) | the wheel's name and `cremind-tag --version` |
+
+`VERSION` also names the protocol contract of the release
+(`cremind-tag-contract-<version>`). It versions the firmware only: host
+software has its own version, and compatibility follows the contract's
+protocol capabilities (`contract.json` `protocol`) and the font pack
+identifiers, never a comparison of application versions.
 
 ```sh
 python tools/version.py                 # 0.1.0
@@ -57,7 +64,6 @@ release must use a clone that has the release tag (see
 | Toolchain image | `ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418` (tag `v3.4.1`, linux/amd64) | `IMAGE` in `tools/build.py`, every `container:` and `CTAG_TOOLCHAIN_IMAGE` in `ci.yml` and `release.yml` |
 | nRF Connect SDK | sdk-nrf `v3.4.1` = commit `b20f8619ba9a5530f8c34b0a130d829947cfe55d` (annotated tag object `f34326924aaa`) | `west.yml`, `NCS_REVISION` / `NCS_SDK_NRF_COMMIT` in `tools/build.py` |
 | Zephyr | sdk-zephyr `ncs-v3.4.1` = `33fa6a7aac6a4401d16a67cb9f27a3483fa02dd6` | follows from sdk-nrf's manifest; recorded per build |
-| Fonts | `fonts/manifest.yaml` + `fonts/manifest.lock.json` (manifest id `f2c67d9125acaf06`) | [fonts.md](fonts.md) |
 
 Builds never run the mutable tag. `tests/tools/test_build_provenance.py` fails
 when a workflow names another image than `tools/build.py`, or when `west.yml`
@@ -101,11 +107,8 @@ Every target build writes `build/<target>/metadata.json` next to its artifacts:
 **Guarantee.** For one commit and VERSION, the pinned toolchain image and the
 pinned workspace, `zephyr.hex`, `zephyr.bin` and `zephyr.elf` are byte-identical
 whatever the checkout path, build directory, machine or time of the build; the
-font packs are byte-identical (same pack ids) whatever the process count; the
-companion wheel and sdist are byte-identical for the same `SOURCE_DATE_EPOCH`
-(tools/release.py sets the commit time; hatchling writes reproducible
-archives); the release archive is byte-identical for the same
-`dist/<version>/` content.
+contract archive is byte-identical for the same commit; the release archive is
+byte-identical for the same `dist/<version>/` content.
 `metadata.json`, `zephyr.map` and `build.log` are not covered: they record
 paths and times on purpose.
 
@@ -119,8 +122,7 @@ How builds get there (`repro_cmake_args` in `tools/build.py`):
   this repository) and not the build directory.
 - `BUILD_VERSION` = the sdk-zephyr commit (12 digits) instead of `git describe`
   in the workspace, which depends on whether the clone has tags.
-- `SOURCE_DATE_EPOCH` = the commit time (GCC's `__DATE__`/`__TIME__`,
-  hatchling's archive timestamps).
+- `SOURCE_DATE_EPOCH` = the commit time (GCC's `__DATE__`/`__TIME__`).
 - `safe.directory=*` in the build's git environment, so Zephyr's and NCS's own
   `git describe`/`rev-parse` give the same answer whoever owns the checkout.
 
@@ -138,18 +140,16 @@ must match byte for byte; `zephyr.elf` and the input digests are compared and
 reported. When images differ, the report lists the differing address ranges,
 the ELF section and symbol at each, path strings present in only one image,
 date/time strings, `git describe` strings and GNU build ids, with the fix to
-apply. Font packs: each profile is built twice (all processes, then one) and
-every output file must match.
+apply.
 
 ```sh
 python tools/repro_check.py tag-laowu-bw bridge-nrf52840dk      # host: runs in the toolchain container
 python tools/repro_check.py --release-targets
-uv run --project companion python tools/repro_check.py --no-firmware --fonts dev,full
 ```
 
 The report is `build/repro/report.json`; differing builds are kept under
-`build/repro/<target>/{a,b}/`. The release workflow runs both checks on every
-release target and will not draft a release if either fails.
+`build/repro/<target>/{a,b}/`. The release workflow runs the check on every
+release target and will not draft a release if it fails.
 
 ## What goes into a release
 
@@ -170,7 +170,7 @@ never published, whatever the mark.
 
 `release.json` records each published target's `hardware_status`,
 `release_status` and `qualified`, and every left-out target with the reason.
-`cremind-tag firmware verify` warns about every image that is not qualified,
+`cremind tags tools firmware verify` warns about every image that is not qualified,
 and the draft's notes say which images are only buildable.
 
 `python tools/release.py --list-targets` prints the current selection. On top of
@@ -195,27 +195,31 @@ pinned toolchain — and its files must still hash as recorded.
    ```sh
    python tools/build.py --pristine $(python tools/release.py --list-targets)
    python tools/repro_check.py --release-targets
-   uv run --project companion python tools/release.py
+   uv run python tools/release.py
    ```
 
    `--allow-dirty` packages a dirty tree for a look (never for a release);
-   `--skip-fonts` and `--skip-wheel` leave parts out; `--targets a,b` picks
-   targets; `--out DIR` writes `DIR/<version>/`; `--build` runs `build.py
-   --pristine` first.
+   `--targets a,b` picks targets; `--out DIR` writes `DIR/<version>/`;
+   `--build` runs `build.py --pristine` first.
 4. **Tag and push:** `git tag -a v0.2.0 -m "Cremind Tag 0.2.0" && git push origin v0.2.0`.
 5. **CI** ([`release.yml`](../.github/workflows/release.yml)):
-   `gates` (the whole CI workflow: companion and tool tests, generated files,
-   host C tests, the firmware matrix, twister) → `version` (tag = `v<VERSION>`,
-   every copy in sync, the target list) → `firmware` (pristine builds in the
-   pinned container, full git history) and `reproducibility` (two checkouts,
-   two build roots) and `fonts-determinism` → `package` (`tools/release.py`,
+   `gates` (the whole CI workflow: tool tests, the generated C bindings, the
+   contract, host C tests, the firmware matrix, twister) → `version` (tag =
+   `v<VERSION>`, every copy in sync, the target list) → `firmware` (pristine
+   builds in the pinned container, full git history) and `reproducibility`
+   (two checkouts, two build roots) → `package` (`tools/release.py`,
    `sha256sum -c`, workflow artifact `release-dist`, then the draft release).
-   The NCS workspace comes from the CI cache (`ncs-v3.4.1-narrow-depth1-v1`),
-   the fonts from a cache keyed on `fonts/manifest.lock.json`.
+   The NCS workspace comes from the CI cache (`ncs-v3.4.1-narrow-depth1-v1`).
 6. **Review the draft** on GitHub: notes, statuses, assets. Publish it by hand.
    Re-running the workflow updates a draft (`--clobber`) but fails on a
    published release: a published version is never changed — fix forward with
    a new patch version.
+7. **Pin the contract in Cremind** when the protocol, the fixtures or the
+   hardware tables changed (a change on Cremind's side, released with
+   Cremind): download `cremind-tag-contract-<v>.tar.gz` and its `.sha256` from
+   the release, then in a Cremind checkout `python scripts/tags/pin_contract.py
+   cremind-tag-contract-<v>.tar.gz` and run its protocol tests
+   (`tests/tags/runtime/protocol`).
 
 `workflow_dispatch` runs the same pipeline on any ref and keeps the result as
 the `release-dist` workflow artifact; with `draft_release` it also creates or
@@ -232,38 +236,50 @@ dist/
   <v>/
     release.json                  manifest (below)
     SHA256SUMS                    every other file of <v>/ (sha256sum -c)
-    THIRD_PARTY_NOTICES.txt       Nayuki QR (MIT), Noto (OFL-1.1), Material Icons (Apache-2.0),
-                                  firmware SDK components per target, companion dependencies + licences
+    THIRD_PARTY_NOTICES.txt       Nayuki QR (MIT), firmware SDK components per target
     LICENSE                       MIT
     firmware/
       memory-report.md, memory-report.json
       <target>/<target>-<v>.hex .bin .elf .map .config .dts
                <target>-<v>.metadata.json .verify.json .memory.json
-    fonts/
-      full/  fontpack.ctfp fontpack.json NOTICE LICENSES/ coverage.json
-      dev/   fontpack.ctfp fontpack.json NOTICE LICENSES/ coverage.json
-             image/flash.hex flash.bin flash.json      (nRF52840 DK external flash, development)
-    companion/
-      cremind_tag-<v>-py3-none-any.whl, cremind_tag-<v>.tar.gz
-    protocol/
-      spec.yaml, fixtures/, protocol.md, fontpack.md
+    contract/
+      cremind-tag-contract-<v>.tar.gz          the protocol contract (tools/contract.py)
+      cremind-tag-contract-<v>.tar.gz.sha256
 ```
 
-`release.json` (`schema: cremind-tag/release@1`): `version`, `tag`, `git`
+`release.json` (`schema: cremind-tag/release@2`): `version`, `tag`, `git`
 (`commit`, `describe`, `dirty`, `commit_time`), `source_date_epoch`, `ncs`
 (`revision`, `sdk_nrf_commit`), `toolchain` (`image`, `digest`), `firmware[]`
 (`target`, `app`, `role`, `board`, `soc`, `jlink_device`, `family`, `hardware`,
 `board_id`, `hardware_status`, `release_status`, `qualified`, `version`,
 `files`, `sha256`, `verify_stack`, `memory`, `resources`, `inputs`, `flash` —
-the command that flashes it), `excluded_targets[]`, `fonts` (`manifest_id`,
-per profile `pack_id`, `size`, `faces`, `files`, `sha256`), `companion`
-(`wheel`, `sdist` with SHA-256), `protocol` (`spec`, `spec_sha256`,
-`protocol_version`, `fixtures`).
+the command that flashes it), `excluded_targets[]`, `contract` (`name`,
+`version`, `digest`, `protocol` capabilities, `archive`, `sha256`).
 
 Uploaded to the draft individually: the archive and its `.sha256`,
-`release.json`, `SHA256SUMS`, `THIRD_PARTY_NOTICES.txt`, the wheel and sdist,
-and each target's `.hex` and `.metadata.json`. Everything else (ELF, map, font
-packs, protocol) is in the archive.
+`release.json`, `SHA256SUMS`, `THIRD_PARTY_NOTICES.txt`, the contract archive
+and its `.sha256`, and each target's `.hex` and `.metadata.json`. Everything
+else (ELF, map, memory reports) is in the archive.
+
+## The protocol contract
+
+`tools/contract.py` builds `cremind-tag-contract-<version>` from a commit:
+`contract.json` (schema `cremind-tag/contract@1`: the version, the protocol
+capabilities — `spec_version`, `proto_version`, `secure_proto_version`,
+`fontpack_version` — the source repository and revision, the SHA-256 of every
+file and one `digest` over them), `spec.yaml`, `fixtures/`,
+`tests/conversation.h`, `hardware/matrix.yaml` and `hardware/targets.yaml`,
+and the normative `docs/`. The archive is deterministic; a build from
+uncommitted inputs is refused. CI builds and checks it on every change.
+
+```sh
+uv run python tools/contract.py                          # dist/contract/
+uv run python tools/contract.py --check dist/contract/cremind-tag-contract-0.1.0
+```
+
+Host software never reads a checkout of this repository: it pins a released
+contract and tests its own bindings, reference implementation and hardware
+tables against it (Cremind: `scripts/tags/pin_contract.py`).
 
 ## First release: J-Link and flashing
 
@@ -286,35 +302,37 @@ the exact commands (and writes J-Link command files) without touching the
 board.
 
 ```sh
-cremind-tag firmware list dist/0.1.0
-cremind-tag firmware info --soc nrf52840_qiaa                  # does the probe see the chip?
-cremind-tag firmware verify --hex dist/0.1.0/firmware/gateway-nrf52840dk/gateway-nrf52840dk-0.1.0.hex
+cremind tags tools firmware list dist/0.1.0
+cremind tags tools firmware info --soc nrf52840_qiaa                  # does the probe see the chip?
+cremind tags tools firmware verify --hex dist/0.1.0/firmware/gateway-nrf52840dk/gateway-nrf52840dk-0.1.0.hex
 ```
 
 - **Gateway** (nRF52840 DK): plug the DK's J-Link USB port, then
 
   ```sh
-  cremind-tag firmware flash --target gateway-nrf52840dk \
+  cremind tags tools firmware flash --target gateway-nrf52840dk \
       --hex dist/0.1.0/firmware/gateway-nrf52840dk/gateway-nrf52840dk-0.1.0.hex --dry-run
-  cremind-tag firmware flash --target gateway-nrf52840dk --hex …/gateway-nrf52840dk-0.1.0.hex
+  cremind tags tools firmware flash --target gateway-nrf52840dk --hex …/gateway-nrf52840dk-0.1.0.hex
   ```
 
   Only the pages the image covers are erased (`--erase touched`, the default),
   so the mesh network and the gateway's keys survive an update; `--erase all`
   wipes them and asks first. Then connect the nRF USB port (CDC ACM) and run
-  `cremind-tag gateway info`.
+  `cremind tags tools gateway info`.
 - **Bridge** (nRF52840 DK): the same with `--target bridge-nrf52840dk`. The
-  bridge also needs a font pack in its external flash: `cremind-tag bridge
-  fonts-install` over the maintenance port, or for the DK's 8 MiB part the
-  development image `nrfjprog -f NRF52 --program fonts/dev/image/flash.hex
-  --qspisectorerase --verify` ([fonts.md](fonts.md#flash-sizing)).
-- **Tags**: never `firmware flash` — `cremind-tag tag enroll --board laowu_bw
+  bridge also needs a font pack in its external flash: Cremind installs it
+  over the maintenance port (`cremind tags tools bridge fonts-install`), or for
+  the DK's 8 MiB part a development image Cremind builds
+  (`cremind tags tools fonts image`) is flashed with `nrfjprog -f NRF52
+  --program <image>/flash.hex --qspisectorerase --verify`
+  ([fonts](https://github.com/cremind-ai/cremind/blob/main/docs/tags/fonts.md#flash-sizing)).
+- **Tags**: never `firmware flash` — `cremind tags tools tag enroll --board laowu_bw
   --firmware dist/0.1.0/firmware/tag-laowu-bw/tag-laowu-bw-0.1.0.hex` erases
   the chip, programs the image and writes the tag's identity to UICR
   ([enrollment.md](enrollment.md)). `firmware flash` refuses tag images and
   prints this command.
 
-`cremind-tag firmware info --hex <image>` also compares the device's flash with
+`cremind tags tools firmware info --hex <image>` also compares the device's flash with
 an image without programming it (`nrfutil device fw-verify`, `nrfjprog
 --verify`, J-Link `verifybin`). Like enrollment, these command lines follow the
 vendors' documentation and were exercised against mocked tools only: confirm
@@ -334,7 +352,7 @@ checklist](enrollment.md#first-sample-checklist); for `firmware`, also
 
    On Windows: `Get-FileHash -Algorithm SHA256 <file>` and compare with the
    line in `SHA256SUMS`.
-2. Check what you are about to flash: `cremind-tag firmware verify --hex
+2. Check what you are about to flash: `cremind tags tools firmware verify --hex
    firmware/<target>/<target>-0.1.0.hex` (checksum against `release.json` and
    `SHA256SUMS`, target, board, SoC range, `verify_stack`, qualification).
    `firmware flash` runs the same checks and flashes nothing if one fails.
@@ -344,12 +362,11 @@ checklist](enrollment.md#first-sample-checklist); for `firmware`, also
 4. Rebuild and compare (the strongest check):
 
    ```sh
-   git clone https://github.com/<org>/cremind-tag && cd cremind-tag && git checkout v0.1.0
+   git clone https://github.com/cremind-ai/cremind-tag && cd cremind-tag && git checkout v0.1.0
    python tools/build.py --setup                 # once: the pinned NCS workspace
    python tools/build.py --pristine gateway-nrf52840dk
    sha256sum build/gateway-nrf52840dk/zephyr.hex # = sha256 of gateway-nrf52840dk-0.1.0.hex in release.json
-   uv run --project companion cremind-tag fonts fetch
-   uv run --project companion cremind-tag fonts build --profile full   # pack id = release.json fonts.packs.full.pack_id
+   uv run python tools/contract.py               # sha256 = release.json contract.sha256
    ```
 
    Clone with tags (a plain `git clone` has them): the gateway's and bridge's

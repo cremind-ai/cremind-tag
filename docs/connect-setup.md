@@ -10,13 +10,22 @@ Protocol v1 ([protocol.md](protocol.md)) stays in force for everything this
 document does not change: framing, credits, retained events, delivery,
 layouts, the bridge ↔ tag frame session. Numeric identifiers live in
 [`protocol/spec.yaml`](../protocol/spec.yaml) (generated into
-`include/ctag/proto_ids.h` and `companion/.../protocol/ids.py`); byte-exact
+`include/ctag/proto_ids.h` and Cremind's `app/tags/runtime/protocol/ids.py`); byte-exact
 vectors in `protocol/fixtures/v2_*.json`.
+
+The gateway host — the program a gateway is plugged into, running one worker
+per server, profile and gateway — was first the separate **Cremind Connect**
+(§11). Cremind now fills that role itself: the Cremind server's own computer,
+or a Cremind desktop app set up as a gateway computer for a server elsewhere
+(outbound HTTPS only), runs the same workers with the same flows and
+credentials. Cremind Connect is retired; its workers move into Cremind as
+they are, keys and pairings included. §11 remains the reference for what it
+left on a computer.
 
 ```mermaid
 flowchart LR
     UI["Browser or Cremind desktop<br/>Settings → Tags"] <-->|profile API| S["Cremind server<br/>ownership · operations · authority · vault"]
-    S <-->|outbound HTTPS| H["Cremind Connect<br/>one worker per server+profile+gateway"]
+    S <-->|in process, or outbound HTTPS| H["Gateway computer (Cremind)<br/>one worker per server+profile+gateway"]
     H <-->|USB serial, Noise IK| G["Gateway"]
     G <-->|Mesh, tunnel| B["Bridge"]
     B <-->|BLE| T["Tag"]
@@ -98,7 +107,7 @@ needs it.
 
 ### 2.3 Factory contract
 
-"Pre-flashed and ready" means **all** of the following (checked by `cremind-tag
+"Pre-flashed and ready" means **all** of the following (checked by `cremind tags tools
 factory …`, §11.8):
 
 | Item | Gateway | Bridge | Tag |
@@ -678,7 +687,11 @@ worker whose companion is in `recovering` state, once).
 
 ## 11. Cremind Connect
 
-Building, installers, signing and releases: [connect-packaging.md](connect-packaging.md).
+Retired: Cremind's gateway computers run the workers now (see the
+introduction). What follows describes the program as it shipped — the
+directories, IPC and startup registration Cremind reads when it takes a
+computer's workers over. Its packaging:
+[cremind-connect.md](https://github.com/cremind-ai/cremind/blob/main/docs/tags/cremind-connect.md).
 
 ### 11.1 Processes
 
@@ -747,7 +760,7 @@ and licences. Fonts are never built on a user's computer.
 
 ### 11.8 Factory and development tools
 
-`cremind-tag factory tag|bridge|gateway` (development/factory stations only):
+`cremind tags tools factory tag|bridge|gateway` (development/factory stations only):
 program firmware and the UICR v2 blob (tags, SWD) or the setup secret (bridges,
 USB, unowned only), read back the identity, install and verify the font pack
 (bridges), and print the label (PNG with QR + code).

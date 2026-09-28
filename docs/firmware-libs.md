@@ -440,7 +440,7 @@ e.g. `(const uint8_t *)&NRF_UICR->CUSTOMER[0]`; an erased UICR fails the magic.
 The device side of protocol v2 for every role: identity, the key schedule,
 canonical grants and the device's grant rules, the ownership record,
 secure-message framing, tunnel fragments, the Noise IK responder and the v2
-secure messages. It mirrors the companion's `cremind_tag.secure`
+secure messages. It mirrors the companion's `app.tags.runtime.secure`
 (`identity.py`, `grants.py`, `noise.py`, `messages.py`, `device.py`) and is
 tested against `protocol/fixtures/v2_secure.json`. Primitives are the
 formally verified HACL* and the handshake the verified Noise* IK

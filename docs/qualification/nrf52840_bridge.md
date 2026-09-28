@@ -17,7 +17,7 @@ Status: **buildable** ([status definitions](../hardware/matrix.md))
 | Build target(s) | `bridge-nrf52840dk` |
 | MCU | nRF52840 (1024 KiB flash / 256 KiB RAM) |
 | Serial link | usb_cdc_acm |
-| External flash | soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only) |
+| External flash | soldered NOR, capacity from `cremind tags tools fonts size` (DK MX25R6435F 8 MiB is for development only) |
 | Sample(s) | _serial number / marking / source / date received_ |
 | Firmware under test | _`git describe` of the qualified build_ (HELLO/INFO `build`) |
 | PSA crypto provider | nrf_security with the Oberon driver (`CONFIG_PSA_CRYPTO_DRIVER_OBERON=y`); entropy from the RNG peripheral (`zephyr,entropy = &rng`, `CONFIG_ENTROPY_CC3XX=n`) |

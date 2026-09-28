@@ -6,8 +6,8 @@ and written to `UICR.CUSTOMER[0..11]` (0x10001080) over SWD. The companion keeps
 the secret in the OS credential store and a row in its inventory. Firmware
 refuses to advertise until a valid blob is present.
 
-Code: `cremind_tag.enroll` (`tools.py` drives the programmers, `enroll.py`
-implements `enroll_tag`, which `cremind-tag tag enroll` calls).
+Code: `app.tags.runtime.enroll` (`tools.py` drives the programmers, `enroll.py`
+implements `enroll_tag`, which `cremind tags tools tag enroll` calls).
 
 > The tool command lines were implemented from the vendors' documentation and
 > tested against a simulated target only. Verify them on the first physical
@@ -78,7 +78,7 @@ until a power-on reset.
 ## The command
 
 ```text
-cremind-tag tag enroll --board <board> [--panel <panel>] [--firmware <zephyr.hex>]
+cremind tags tools tag enroll --board <board> [--panel <panel>] [--firmware <zephyr.hex>]
                        [--protect [--yes]] [--dry-run [--register]]
                        [--tool auto|nrfutil|nrfjprog|jlink] [--serial-number <SN>]
                        [--name <name>] [--tag-id <8 hex>] [--out <dir>] [--keep-hex]

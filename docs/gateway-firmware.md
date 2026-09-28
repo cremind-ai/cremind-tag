@@ -5,9 +5,9 @@ The gateway is the companion's radio: a serial protocol server on USB CDC ACM
 provisions and configures the bridges and delivers layouts to them. This
 document describes the firmware; the protocols it implements are normative in
 [protocol.md](protocol.md) (§1, §2, §3, §10) and `protocol/spec.yaml`. The
-companion's gateway client (`companion/src/cremind_tag/gateway/`) is the peer
+companion's gateway client (Cremind's `app/tags/runtime/gateway/`) is the peer
 it must interoperate with, and the companion's simulator
-(`companion/src/cremind_tag/sim/gateway.py`, [simulator.md](simulator.md))
+(Cremind's `app/tags/runtime/sim/gateway.py`, [simulator.md](https://github.com/cremind-ai/cremind/blob/main/docs/tags/simulator.md))
 implements the same rules; §12 lists every place the firmware differs and why.
 
 **Protocol v2** ([connect-setup.md](connect-setup.md): device identity,
@@ -23,9 +23,8 @@ protocol v1 (§15.12). Sections 1–14 describe v1 and what v2 keeps.
 | `gateway-nrf52dk` | `nrf52dk/nrf52832` (stand-in for the nRF52832 + CH340 board) | v1 | builds, `verify_stack.py` 16/16; **4.5 KiB RAM free with a reduced queue and unmeasured stacks — subject to resource qualification**; too small for v2 (a v2 fit build overflows RAM by 12 KB, §15.12) | [§8](#8-memory) |
 
 Build: `python tools/build.py gateway-nrf52840dk gateway-nrf52840dongle
-gateway-nrf52dk` (on Windows: `unset VIRTUAL_ENV;
-companion/.venv/Scripts/python.exe tools/build.py …`); see
-[building.md](building.md).
+gateway-nrf52dk` (or `uv run python tools/build.py …` when `python` lacks
+PyYAML); see [building.md](building.md).
 
 ---
 
@@ -468,12 +467,12 @@ or `nrfjprog -f NRF52 --program build/gateway-nrf52840dk/zephyr.hex --sectoreras
   and the companion link is the same USB port once the gateway runs.
 - nRF52 DK: the companion link is the J-Link OB virtual COM port (115200 8N1);
   on the target board, the CH340's port.
-- `cremind-tag gateway ports` lists candidate ports with their serial numbers;
-  `cremind-tag gateway info --url <port>` checks the link.
+- `cremind tags tools gateway ports` lists candidate ports with their serial numbers;
+  `cremind tags tools gateway info --url <port>` checks the link.
 
 ## 10. Debugging
 
-- **Counters first**: `cremind-tag gateway counters` (and `gateway info`,
+- **Counters first**: `cremind tags tools gateway counters` (and `gateway info`,
   `gateway events` to watch events live). Serial problems show in
   `crc_errors`, `overruns`, `credit_violations`, `uart_rx_overflow`; mesh
   problems in `mesh_send_failures`, `mesh_busy`, `commit_resends`,
@@ -621,10 +620,10 @@ firmware, at least two tags, the companion on a PC, a J-Link for RTT. Record
 results in the board's qualification report.
 
 1. **Provisioning 5 bridges.** Flash the gateway with a chip erase (new
-   network). `cremind-tag mesh scan -d 10` lists five UUIDs with RSSI; for each
-   `cremind-tag mesh provision <uuid> --name bN` (provisions and configures).
+   network). `cremind tags tools mesh scan -d 10` lists five UUIDs with RSSI; for each
+   `cremind tags tools mesh provision <uuid> --name bN` (provisions and configures).
    Expect `EVT_PROVISIONED` with consecutive addresses `0x0002…`, every
-   `EVT_NODE_CONFIGURED OK`, `cremind-tag mesh nodes` listing five configured
+   `EVT_NODE_CONFIGURED OK`, `cremind tags tools mesh nodes` listing five configured
    bridges, and a sixth `PROVISION` answering `NO_RESOURCES`. Measure the time
    per bridge; check `mesh_send_failures = 0`.
 2. **Relay through an intermediate bridge.** Place bridge B out of the
@@ -638,7 +637,7 @@ results in the board's qualification report.
    `BRIDGE_RECEIVED` rate), `mesh_ms` distribution, `busy`,
    `mesh_send_retries`, `chunks_resent`, `commit_resends`; for the nRF52832 also
    `uart_rx_overflow` at 115200 baud (a 4 KiB layout is ~0.4 s of UART time).
-4. **Reboot recovery.** (a) `cremind-tag gateway reboot` during a transfer:
+4. **Reboot recovery.** (a) `cremind tags tools gateway reboot` during a transfer:
    the companion reconnects with a new `boot_id`, re-delivers its uncertain
    jobs; the network, names and assignments are intact (`mesh nodes`,
    `gateway` inventory). (b) Power-cycle the gateway during provisioning and
@@ -678,7 +677,7 @@ results in the board's qualification report.
 
 The normative description is [connect-setup.md](connect-setup.md) (§2
 identity, §3 keys and sessions, §4 ownership, §5 messages, §6 mesh); the
-reference is the companion's `cremind_tag.secure` package (`device.py` for
+reference is the companion's `app.tags.runtime.secure` package (`device.py` for
 the device rules) and `protocol/fixtures/v2_secure.json`. The gateway runs
 the role-independent secure endpoint of `lib/secure`
 ([firmware-libs.md](firmware-libs.md#ctag_secure--protocol-v2-secure-endpoint-connect-setupmd-25))

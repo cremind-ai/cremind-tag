@@ -6,7 +6,7 @@ pack in its external flash, and pushes the image to the tag over a BLE GATT
 connection. This document describes the firmware; the protocols it implements
 are normative in [protocol.md](protocol.md) (§1.6, §2, §3, §4, §5, §10) and
 [fontpack.md](fontpack.md). The companion's simulator
-(`companion/src/cremind_tag/sim/bridge.py`) implements the same rules;
+(Cremind's `app/tags/runtime/sim/bridge.py`) implements the same rules;
 §12 lists every place the firmware differs and why.
 
 | Target | Board | Status | Memory |
@@ -14,8 +14,8 @@ are normative in [protocol.md](protocol.md) (§1.6, §2, §3, §4, §5, §10) an
 | `bridge-nrf52840dk` | `nrf52840dk/nrf52840` (+ the DK's 8 MiB MX25R64) | builds, verified, meets targets (two tag sessions at once); not yet run on hardware | [§9](#9-memory) |
 | `bridge-nrf52dk` | `nrf52dk/nrf52832` (+ a placeholder SPI NOR) | builds, verified, meets targets (8,409 B RAM free, 10 tags per bridge, 1 QR slot, one tag session); not yet run on hardware | [§9](#9-memory) |
 
-Build: `python tools/build.py bridge-nrf52840dk bridge-nrf52dk` (the companion
-venv's interpreter on Windows: `unset VIRTUAL_ENV; companion/.venv/Scripts/python.exe tools/build.py …`);
+Build: `python tools/build.py bridge-nrf52840dk bridge-nrf52dk` (or
+`uv run python tools/build.py …` when `python` lacks PyYAML);
 see [building.md](building.md).
 
 ---
@@ -81,7 +81,7 @@ see [building.md](building.md).
 
 - **Provisionee**, PB-ADV only, no OOB (protocol.md §2's documented risk).
   Device UUID: `"CTBR"`, the board id, three zero bytes, then the 8-byte FICR
-  device id (`hwinfo_get_device_id`), so `cremind-tag mesh scan --filter 43544252`
+  device id (`hwinfo_get_device_id`), so `cremind tags tools mesh scan --filter 43544252`
   lists only bridges.
 - **Composition**: one element with the Config Server, the Health Server
   (attention blinks the LED), and the vendor models `LAYOUT_SRV` (0x0001) and
@@ -481,7 +481,7 @@ slot_size = align_down_64K((flash_size − W) / 2)
 
 - **Slot directory**: two 4 KiB sectors at the start of the working space,
   each one 64-byte record `'CTSL'`, version 1, seq, slot, pack id, size,
-  content hash, CRC-32 (the layout of `cremind-tag fonts image`). The active
+  content hash, CRC-32 (the layout of `cremind tags tools fonts image`). The active
   pack is the valid record with the highest seq; activation erases and writes
   the *other* sector with seq + 1, so a power loss at any byte leaves the
   previous record valid (tested at every byte, §10). At boot the active
@@ -715,7 +715,7 @@ plus the items the builds could not verify. Equipment: an nRF52840 DK as
 bridge (RTT logs: build with `-DEXTRA_CONF_FILE=debug.conf`), a gateway, two
 or more tags (nRF52 DK development tags or enrolled boards), a second bridge
 for relay checks, an nRF52840 dongle with the nRF Sniffer, a Power Profiler
-Kit (radio activity), the companion (`cremind-tag`) with the daemon's event
+Kit (radio activity), the host (Cremind's hardware runtime, `cremind tags tools`) with the daemon's event
 log.
 
 | # | Test | Procedure | Pass |
@@ -733,7 +733,7 @@ log.
 | H11 | Rate limit | 20 tags with work, all failing to connect (shielded) for 5 min | ≤ 6 suspensions in any minute (`suspend_count`), relay reachable throughout |
 | H12 | Stack depth | `debug.conf` thread analyzer during H1, H10, a FONT_COMMIT and INFO | every stack keeps ≥ 25 % unused; resize the Kconfig stacks accordingly (nRF52832 values are provisional) |
 | H13 | Render pre-pass time | `render_ms_max` counter for a text-heavy 400×300 BWR card | recorded; mesh latency impact acceptable (the work queue renders ~2 × 19 strips in one item) |
-| H14 | Font install | `cremind-tag bridge fonts-install` of the full pack over USB (nRF52840) and UART (nRF52832) | completes; slot flip; reset during FONT_DATA leaves the old pack active; FLASH_TEST all OK/BUSY as designed |
+| H14 | Font install | `cremind tags tools bridge fonts-install` of the full pack over USB (nRF52840) and UART (nRF52832) | completes; slot flip; reset during FONT_DATA leaves the old pack active; FLASH_TEST all OK/BUSY as designed |
 | H15 | QSPI > 16 MiB | a 32 MiB part with `address-size-32` / `enter-4byte-addr` | FLASH_TEST items either side of 16 MiB OK |
 | H16 | Resets | reset during commit, during a session, during a result retry | pending layouts restored; no duplicate delivery; result_seq continues upward; a repeated commit after the reset answers DUPLICATE |
 | H17 | Spoofed tag | A second DK advertising an assigned tag's id (companion `sim` peer or a test build) answering HELLO with CREDIT{0}, then with ERROR{STALE_EPOCH} | the session ends at once (INVALID), then link failures with back-off; the real tag's jobs end only after 3 consecutive sessions with the same status; other tags keep being served |
@@ -775,10 +775,10 @@ nrfjprog -f NRF52 --reset
   settings storage (`0xF8000` on the nRF52840, `0x7A000` on the nRF52832).
   `--sectorerase` keeps the settings (mesh keys, assignments); `--chiperase`
   (or `nrfjprog --eraseall`) forgets the node — re-provision it afterwards.
-- Factory font pack on the nRF52840 DK: `cremind-tag fonts image <pack> --flash-size 8MiB --working-space 1MiB`
+- Factory font pack on the nRF52840 DK: `cremind tags tools fonts image <pack> --flash-size 8MiB --working-space 1MiB`
   writes `flash.hex` at the QSPI XIP base; program it with
   `nrfjprog -f NRF52 --program flash.hex --qspisectorerase --verify`.
-  Otherwise install over the maintenance port (`cremind-tag bridge fonts-install --url <port>`).
+  Otherwise install over the maintenance port (`cremind tags tools bridge fonts-install --url <port>`).
 - Maintenance port: the nRF52840 DK's **nRF USB** connector enumerates as a
   CDC ACM port (1209:0001, "Cremind Tag bridge"); the nRF52 DK uses the
   J-Link VCOM at 115200 baud.
@@ -788,7 +788,7 @@ nrfjprog -f NRF52 --reset
   to the maintenance port). `tools/build.py` builds release images; for a
   debug image run `west build` by hand in `python tools/build.py --shell`
   with the same arguments plus the fragment.
-- Counters: `cremind-tag bridge info --url <port>` (INFO) and the gateway's
+- Counters: `cremind tags tools bridge info --url <port>` (INFO) and the gateway's
   `GET_INVENTORY` (CAPS/HEALTH) show the scheduler, session, mesh and flash
   counters.
 
@@ -816,7 +816,7 @@ nrfjprog -f NRF52 --reset
   as `max_tags` and `assigned_count`) in its inventory, Cremind
   refuses to claim or assign onto a full bridge, and an `ASSIGN_SET` that still
   meets a full table (`NO_RESOURCES`, e.g. an 11th tag on an nRF52832 bridge)
-  fails the `assign_tag` at once with `bridge_full` (companion.md §6) — the
+  fails the `assign_tag` at once with `bridge_full` ([the runtime's docs](https://github.com/cremind-ai/cremind/blob/main/docs/tags/runtime.md) §6) — the
   admin picks another bridge; nothing chooses one automatically.
 - USB VID/PID 1209:0001 is the pid.codes test pair; `MESH_COMPANY_ID` is
   0xFFFF (spec).

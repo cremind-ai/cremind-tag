@@ -2,7 +2,7 @@
 
 This document is normative. Numeric identifiers, field orders and limits live in
 [`protocol/spec.yaml`](../protocol/spec.yaml); the generated
-`include/ctag/proto_ids.h` and `companion/src/cremind_tag/protocol/ids.py` are
+`include/ctag/proto_ids.h` and Cremind's `app/tags/runtime/protocol/ids.py` are
 the only way code may refer to them. Byte-exact test vectors live in
 [`protocol/fixtures/`](../protocol/fixtures/) and are checked by both the C host
 tests and the Python test-suite.
@@ -583,7 +583,7 @@ only `commit_refresh` issues the refresh command.
 
 ## 7. Connector API (Cremind ↔ companion)
 
-See [`connector-api.md`](connector-api.md).
+See [`connector-api.md`](https://github.com/cremind-ai/cremind/blob/main/docs/tags/connector-api.md).
 
 ---
 
@@ -609,7 +609,7 @@ a bridge.
 ## 10. Shared implementation rules (gateway, bridge, tag, simulator)
 
 These close gaps the sections above leave open. The companion's simulator
-(`docs/simulator.md`) implements exactly these rules; firmware must match.
+(Cremind's `docs/tags/simulator.md`) implements exactly these rules; firmware must match.
 
 **Serial link**
 
@@ -671,7 +671,7 @@ These close gaps the sections above leave open. The companion's simulator
   the tag's epoch floor and reports it, so the next assignment uses a higher
   epoch and the tag accepts it again. The value is unauthenticated, so the
   companion only ever raises the epoch it uses next, and only by a bounded
-  step (docs/companion.md §5 "Epoch floor": at most 256 above the highest
+  step ([the runtime's docs](https://github.com/cremind-ai/cremind/blob/main/docs/tags/runtime.md) §5 "Epoch floor": at most 256 above the highest
   epoch it knows per report): a forged one costs epoch numbers, never access.
 - A result answered from the tag's stored ACK (`RESULT.flags.bit0`) reaches
   the companion as `flags` bit0 (`RESULT_FLAG_DUPLICATE`): the revision was
