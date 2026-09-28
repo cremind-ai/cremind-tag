@@ -33,6 +33,23 @@ def test_restrict_to_owner(tmp_path: Path) -> None:
     assert path.read_bytes() == b"x"  # still ours
 
 
+@pytest.mark.skipif(not IS_WINDOWS, reason="SDDL aliases are Windows only")
+def test_an_owner_written_as_an_sddl_alias_is_still_the_owner(tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitHub's Windows runners run as the built-in Administrator, which a DACL's SDDL writes as ``LA``."""
+    from cremind_tag import private_files
+
+    assert private_files.canonical_sid("SY") == "S-1-5-18"
+    assert private_files.canonical_sid("S-1-5-32-545") == "S-1-5-32-545"
+    path = tmp_path / "secret.bin"
+    path.write_bytes(b"x")
+    monkeypatch.setattr(private_files, "current_user_sid", lambda: private_files.canonical_sid("LA"))
+    monkeypatch.setattr(private_files, "dacl_sddl", lambda _path: "D:P(A;;FA;;;LA)(A;;FA;;;SY)")
+    assert access_problem(path) is None
+    monkeypatch.setattr(private_files, "dacl_sddl", lambda _path: "D:P(A;;FA;;;LA)(A;;FA;;;SY)(A;;FR;;;BU)")
+    assert access_problem(path) == "its ACL also grants access to BU"
+
+
 def test_the_secrets_file_is_owner_only_even_in_an_open_folder(tmp_path: Path) -> None:
     folder = tmp_path / "shared"
     folder.mkdir()

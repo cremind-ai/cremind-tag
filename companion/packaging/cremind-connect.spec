@@ -114,7 +114,7 @@ if IS_MAC:
             "CFBundleURLTypes": [{"CFBundleURLName": "io.cremind.connect.setup",
                                   "CFBundleURLSchemes": ["cremind-connect"]}],
             "LSUIElement": True,
-            "LSMinimumSystemVersion": "11.0",
+            "LSMinimumSystemVersion": "15.0",  # pyicu-wheels' macOS wheels need 15
             "NSHighResolutionCapable": True,
         },
     )

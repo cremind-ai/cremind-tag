@@ -30,10 +30,10 @@ jobs:
       matrix:
         include:
           - { os: windows-latest, target: windows-x64 }
-          - { os: macos-14, target: macos-arm64 }
-          # Intel build. GitHub has been retiring macos-13; if the label is gone, use its Intel successor
-          # (e.g. macos-15-intel) — the target name stays macos-x64.
-          - { os: macos-13, target: macos-x64 }
+          # macOS 15: pyicu-wheels ships macOS wheels for 15 only, so the bundle needs 15 too
+          # (LSMinimumSystemVersion in packaging/cremind-connect.spec).
+          - { os: macos-15, target: macos-arm64 }
+          - { os: macos-15-intel, target: macos-x64 }
           - { os: ubuntu-22.04, target: linux-x64 }  # the oldest glibc the Linux bundle supports
     runs-on: ${{ matrix.os }}
     defaults:

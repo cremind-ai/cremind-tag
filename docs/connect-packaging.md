@@ -138,7 +138,9 @@ service and checks it answers (rolling back if not). Uninstall runs
 first launch — by double-click or by the first link — registers the
 LaunchAgent and asks LaunchServices to index the app (`lsregister -f`); the
 `Info.plist` itself declares the URL scheme. `LSUIElement`: no Dock icon. The
-app must be signed and notarized, or Gatekeeper blocks it (§6).
+app must be signed and notarized, or Gatekeeper blocks it (§6). It needs
+macOS 15 or later (`LSMinimumSystemVersion`): `pyicu-wheels`, the ICU the
+layout engine uses, ships macOS wheels for 15 only, so CI builds on macOS 15.
 
 **Linux `.deb`**: `/opt/cremind-connect/…`, `/usr/bin/cremind-connect` (link),
 `/lib/udev/rules.d/70-cremind-tag.rules` (`uaccess` for the gateway `1209:0002`
@@ -223,9 +225,9 @@ Linux packages are not signed; every build publishes `SHA256SUMS-<target>.txt`.
 ## 7. CI (`.github/workflows/connect.yml`)
 
 On pushes to `main` and pull requests touching `companion/`, on `connect-v*`
-tags and by hand. Matrix: `windows-latest` (x64), `macos-14` (arm64), `macos-13`
-(x64 — switch to the Intel successor label if GitHub retired it) and
-`ubuntu-22.04` (x64; the oldest glibc the Linux bundle supports). Each job: `uv
+tags and by hand. Matrix: `windows-latest` (x64), `macos-15` (arm64),
+`macos-15-intel` (x64) and `ubuntu-22.04` (x64; the oldest glibc the Linux
+bundle supports). Each job: `uv
 sync --group package --locked`, `pytest tests/connect`, build + smoke test,
 sign the program, build the installers, sign/notarize them, checksums, upload
 the artifact `cremind-connect-<target>`. Branch builds are versioned
