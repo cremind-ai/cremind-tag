@@ -261,7 +261,8 @@ class SecureDevice:
                                "controller_match": self.controller_match(), "challenge": self.draw_challenge()}
         if r.state == OwnerState.OWNED:
             out["authority_id"] = self._authority_id()
-            out["owner"] = r.owner
+            if self.controller_match():  # the owner (a profile id) only to the pinned controller
+                out["owner"] = r.owner
             if self.role == NodeRole.TAG and len(r.op_key) == OP_KEY_LEN and self.session is not None:
                 out["root_proof"] = identity.root_proof(r.op_key, self.session.noise.handshake_hash)
         return Outcome(Status.OK, out)
@@ -341,7 +342,9 @@ class SecureDevice:
         status, grant = self._check(fields, {GrantOp.REKEY})
         if status != Status.OK:
             return Outcome(status)
-        self._commit(replace(self.record, gen=grant.gen_to, controller=grant.controller, op_key=bytes(op_key)))
+        # A rekey abandons a tag release in progress: its stage 1 can never follow.
+        self._commit(replace(self.record, gen=grant.gen_to, controller=grant.controller, op_key=bytes(op_key),
+                             pending_override=None, pending_controller=b""))
         return Outcome(Status.OK, {"gen": self.record.gen}, rekeyed=self.role == NodeRole.TAG)
 
     def _release(self, fields: dict[str, Any]) -> Outcome:
@@ -380,6 +383,8 @@ class SecureDevice:
         if self.role != NodeRole.BRIDGE:
             return Outcome(Status.UNSUPPORTED)
         assert self.session is not None
+        if self.session.link != Link.SERIAL:
+            return Outcome(Status.NOT_OWNER)  # the maintenance port only, never over the mesh
         proof = fields.get("proof")
         if self.record.state != OwnerState.OWNED or len(self.record.op_key) != OP_KEY_LEN:
             return Outcome(Status.NOT_OWNER)
@@ -392,13 +397,17 @@ class SecureDevice:
         return Outcome(Status.OK)
 
     def _recommission(self, fields: dict[str, Any]) -> Outcome:
-        """Bridge over local USB: owned (MAINT_AUTH + MAINT grant) or released/locked (physical presence)."""
+        """Bridge over local USB: owned (MAINT_AUTH + MAINT grant) or released/locked (physical presence);
+        an unowned bridge keeps its label (INVALID)."""
         if self.role != NodeRole.BRIDGE:
             return Outcome(Status.UNSUPPORTED)
         assert self.session is not None
         if self.session.link != Link.SERIAL:
             return Outcome(Status.NOT_OWNER)  # never over the mesh
         r = self.record
+        if r.state == OwnerState.UNOWNED:
+            self.challenge = None
+            return Outcome(Status.INVALID)  # nothing to recommission: the label's secret stays valid
         fresh = self._rng(SETUP_SECRET_LEN)
         if r.state == OwnerState.OWNED:
             if not self.session.maint_ok:

@@ -26,6 +26,21 @@ What this layer does:
 
 Events are handed to ``on_event`` as raw frames; retained-event semantics live in
 :class:`~cremind_tag.gateway.client.GatewayClient`.
+
+**Protocol v2 secure sessions** (docs/connect-setup.md §3.2, §5), with
+``secure=SecureOptions(...)``: after every HELLO the link sends the plaintext
+``IDENTIFY`` (checking the device is the pinned one, when one is pinned), opens
+a Noise IK session with ``SECURE_OPEN``, and from then on every request goes
+out as a ``SECURE_DATA`` frame carrying the sealed ``type | flags |
+request_id | CBOR`` message; every sealed response and event is opened and
+handled exactly like a plaintext frame, so the client above never notices.
+The outer frame of a sealed message has ``request_id = 0`` and ``flags = 0``;
+the inner header is authoritative (§5). The session is installed while the
+``SECURE_OPEN`` answer is handled, before the sealed retained events the
+device sends right after it. A frame that does not open — or the device's
+plaintext refusal (a ``SECURE_DATA`` *response* ``{status}``) — ends the
+session: the link resynchronises (HELLO, IDENTIFY, SECURE_OPEN) and re-sends
+what was pending with the same payloads, so the same ``op_id``\\ s.
 """
 
 from __future__ import annotations
@@ -42,17 +57,21 @@ from typing import Any
 from ..protocol import cbor_msgs
 from ..protocol.ids import (
     PROTO_VERSION,
+    SECURE_PROTO_VERSION,
     SERIAL_CRC_LEN,
     SERIAL_DEFAULT_CREDITS,
     SERIAL_HEADER_LEN,
     SERIAL_MAX_FRAME,
+    Link,
     SerialFlag,
     SerialMsg,
     Status,
 )
 from ..protocol.serial_frame import Frame
+from ..secure.channel import SecureChannel, SecureChannelError
+from ..secure.messages import SecureFrameError, SecureMessage
 from .errors import FrameTooLargeError, GatewayDisconnected, GatewayError, GatewayTimeout, ProtocolError, StatusError
-from .results import HelloInfo, to_status
+from .results import HelloInfo, IdentifyInfo, to_status
 from .transport import SerialTransport, TransportClosed
 
 log = logging.getLogger(__name__)
@@ -64,6 +83,30 @@ HOST_WINDOW = 64  # frames the device may send before the host's next grant
 TransportFactory = Callable[[str], SerialTransport]
 EventSink = Callable[[Frame, int | None], None]
 SessionSink = Callable[[HelloInfo, "HelloInfo | None"], None]
+# Sealing adds the inner header (4), the Poly1305 tag (16) and the CBOR wrapper.
+SECURE_OVERHEAD = 32
+
+
+class WrongDeviceError(ProtocolError):
+    """The device on this port is not the one this link is pinned to."""
+
+
+@dataclass(frozen=True)
+class SecureOptions:
+    """A v2 secure session toward the device (docs/connect-setup.md §3.2).
+
+    ``controller_priv`` is the worker's X25519 key (the Noise initiator's
+    static key). ``expect_device_id`` / ``expect_ik`` pin the device: a
+    different one on the port is refused (:class:`WrongDeviceError`) before
+    any secret is sent. ``role`` is the role the device must report.
+    ``on_identify`` sees every IDENTIFY answer (its fresh challenge included).
+    """
+
+    controller_priv: bytes
+    expect_device_id: bytes | None = None
+    expect_ik: bytes | None = None
+    role: int | None = None
+    on_identify: Callable[[IdentifyInfo], None] | None = None
 
 
 @dataclass(eq=False)
@@ -99,6 +142,7 @@ class SerialLink:
         transport_factory: TransportFactory | None = None,
         on_event: EventSink | None = None,
         on_session: SessionSink | None = None,
+        secure: SecureOptions | None = None,
     ) -> None:
         if not SERIAL_DEFAULT_CREDITS <= host_window <= SERIAL_DEFAULT_CREDITS + 255:
             raise ValueError("host_window out of range")
@@ -141,8 +185,16 @@ class SerialLink:
         self._awaiting_hello = False
         self._grant_ping_outstanding = False
         self._session: HelloInfo | None = None
+        self._secure = secure
+        self._channel: SecureChannel | None = None
+        self._identify: IdentifyInfo | None = None
+        # One plaintext setup request at a time during the handshake (IDENTIFY, SECURE_OPEN).
+        self._aux_rid: int | None = None
+        self._aux_msg: SerialMsg | None = None
+        self._aux_future: asyncio.Future[Frame] | None = None
+        self._aux_on_answer: Callable[[Frame], None] | None = None
         self.stats: dict[str, int] = {"resyncs": 0, "timeouts": 0, "reconnects": 0, "unmatched": 0,
-                                      "grant_pings": 0, "frames_rx": 0, "frames_tx": 0}
+                                      "grant_pings": 0, "frames_rx": 0, "frames_tx": 0, "secure_failures": 0}
 
     # -- properties ------------------------------------------------------------
 
@@ -174,6 +226,24 @@ class SerialLink:
     @property
     def max_frame(self) -> int:
         return self._max_frame
+
+    @property
+    def identify(self) -> IdentifyInfo | None:
+        """The device's latest IDENTIFY answer (secure links only)."""
+        return self._identify
+
+    @property
+    def secure(self) -> bool:
+        return self._secure is not None
+
+    @property
+    def handshake_hash(self) -> bytes | None:
+        """The current Noise session's handshake hash (proofs bind to it)."""
+        return self._channel.handshake_hash if self._channel is not None and self._channel.open else None
+
+    @property
+    def channel(self) -> SecureChannel | None:
+        return self._channel
 
     def transport_stats(self) -> dict[str, int]:
         return self._transport.stats() if self._transport is not None else {}
@@ -240,6 +310,24 @@ class SerialLink:
 
     def _on_frame(self, frame: Frame) -> None:
         self.stats["frames_rx"] += 1
+        if frame.type == SerialMsg.SECURE_DATA and self._secure is not None:
+            inner = self._unseal(frame)
+            if inner is None:
+                self._account(frame)
+                self._maybe_grant()
+                return
+            frame = inner
+        elif (frame.flags & SerialFlag.RESPONSE and self._aux_future is not None
+              and frame.request_id == self._aux_rid and frame.type == self._aux_msg):
+            self._account(frame)
+            if not self._aux_future.done():
+                if self._aux_on_answer is not None:
+                    try:
+                        self._aux_on_answer(frame)  # e.g. install the session before the next frame
+                    except Exception:
+                        log.exception("%s: %s answer handler failed", self.label, frame.type)
+                self._aux_future.set_result(frame)
+            return
         if frame.flags & SerialFlag.RESPONSE:
             if frame.type == SerialMsg.HELLO:  # exempt from credits; a late answer to an old HELLO is ignored
                 future = self._hello_future
@@ -269,6 +357,47 @@ class SerialLink:
         else:
             self.stats["unmatched"] += 1
         self._maybe_grant()
+
+    def _unseal(self, frame: Frame) -> Frame | None:
+        """The inner frame of a ``SECURE_DATA`` frame, or ``None`` after ending
+        a session that failed (a plaintext refusal, a frame that does not open)."""
+        try:
+            fields = cbor_msgs.decode_map(frame.payload)
+        except cbor_msgs.CborError:
+            fields = {}
+        data = fields.get("data")
+        channel = self._channel
+        refused = bool(frame.flags & SerialFlag.RESPONSE)  # the device answers a failed session in plaintext
+        if refused or not isinstance(data, bytes) or channel is None or not channel.open:
+            status = fields.get("status")
+            log.info("%s: secure session refused (%s); resynchronising", self.label,
+                     Status(status).name if isinstance(status, int) and status in Status._value2member_map_ else status)
+            self.stats["secure_failures"] += 1
+            self._channel = None
+            self._schedule_resync("secure session refused")
+            return None
+        try:
+            msg = channel.unseal(data)
+        except (SecureChannelError, SecureFrameError) as exc:  # bad ciphertext, or a malformed inner header
+            log.warning("%s: a sealed frame did not open (%s); resynchronising", self.label, exc)
+            self.stats["secure_failures"] += 1
+            self._channel = None
+            self._schedule_resync("secure frame failed")
+            return None
+        try:
+            mtype = SerialMsg(msg.type)
+        except ValueError:
+            mtype = msg.type  # type: ignore[assignment]  # unknown inner type: counted as unmatched below
+        return Frame(mtype, msg.request_id, msg.payload, msg.flags, frame.credits, frame.version)
+
+    def _seal(self, msg: SerialMsg, rid: int, payload: bytes, grant: int) -> Frame:
+        channel = self._channel
+        if self._secure is None or msg == SerialMsg.HELLO:
+            return Frame(msg, rid, payload, 0, grant)
+        if channel is None or not channel.open:
+            raise GatewayDisconnected(f"{self.label}: no secure session")
+        sealed = channel.seal(SecureMessage(int(msg), 0, rid, payload))
+        return Frame(SerialMsg.SECURE_DATA, 0, cbor_msgs.encode_map({"data": sealed}), 0, grant)
 
     def _account(self, frame: Frame) -> None:
         if self._awaiting_hello:
@@ -331,6 +460,13 @@ class SerialLink:
             self._outbox.popleft()
             rid = self._alloc_rid()
             grant = min(self._owed, 255)
+            try:
+                # Sealed here, at send time: nonces must follow the wire order.
+                out = self._seal(req.msg, rid, req.payload, grant)
+            except GatewayError:
+                self._outbox.appendleft(req)
+                self._schedule_resync("no secure session")
+                continue
             self._owed -= grant
             self._credits -= 1
             req.request_ids.append(rid)
@@ -338,7 +474,7 @@ class SerialLink:
             req.attempts += 1
             req.sent_generation = self._generation
             try:
-                await transport.send(Frame(req.msg, rid, req.payload, 0, grant))
+                await transport.send(out)
             except TransportClosed as exc:
                 if transport is self._transport:
                     self._connection_lost(exc)
@@ -348,7 +484,7 @@ class SerialLink:
 
     def _new_request(self, msg: SerialMsg, payload: bytes, timeout: float, attempts: int,
                      internal: bool = False) -> _Request:
-        size = SERIAL_HEADER_LEN + len(payload) + SERIAL_CRC_LEN
+        size = SERIAL_HEADER_LEN + len(payload) + SERIAL_CRC_LEN + (SECURE_OVERHEAD if self._secure else 0)
         if size > self._max_frame:
             raise FrameTooLargeError(f"{msg.name} frame of {size} bytes exceeds max_frame {self._max_frame}")
         loop = asyncio.get_running_loop()
@@ -454,8 +590,14 @@ class SerialLink:
         if self._transport is None:
             raise GatewayDisconnected(f"{self.label} {self.url} is not connected")
         self._ready.clear()
+        self._channel = None  # HELLO ends any secure session on the device too
         try:
             hello = await self._handshake()
+            if self._secure is not None:
+                await self._secure_open()
+                self._ready.set()
+                self._outbox_changed.set()
+                self._credit_changed.set()
         except GatewayError as exc:
             self._connection_lost(exc)
             raise
@@ -486,6 +628,100 @@ class SerialLink:
             self._awaiting_hello = False
         raise GatewayTimeout(f"{self.label} {self.url}: no HELLO response")
 
+    async def _aux_request(self, msg: SerialMsg, fields: dict[str, Any], *,
+                           on_answer: Callable[[Frame], None] | None = None,
+                           attempts: int | None = None) -> dict[str, Any]:
+        """A plaintext request of the secure handshake, sent while the link is
+        not ready (so outside the outbox). Costs one device credit.
+        ``on_answer`` runs inside the frame handler, before the next frame."""
+        transport = self._transport
+        if transport is None:
+            raise GatewayDisconnected("not connected")
+        payload = cbor_msgs.encode_request(msg, fields)
+        loop = asyncio.get_running_loop()
+        for attempt in range(1, (attempts or self.attempts) + 1):
+            if self._credits < 1:
+                raise GatewayTimeout(f"{msg.name}: no credit during the secure handshake")
+            rid = self._alloc_rid()
+            future: asyncio.Future[Frame] = loop.create_future()
+            self._aux_rid, self._aux_msg, self._aux_future = rid, msg, future
+            self._aux_on_answer = on_answer
+            grant = min(self._owed, 255)
+            self._owed -= grant
+            self._credits -= 1
+            try:
+                await transport.send(Frame(msg, rid, payload, 0, grant))
+                frame = await asyncio.wait_for(future, self.request_timeout)
+            except TimeoutError:
+                log.info("%s: %s attempt %d timed out", self.label, msg.name, attempt)
+                continue
+            except TransportClosed as exc:
+                raise GatewayDisconnected(str(exc)) from None
+            finally:
+                self._aux_rid, self._aux_msg, self._aux_future = None, None, None
+                self._aux_on_answer = None
+            try:
+                return cbor_msgs.decode_response(msg, frame.payload)
+            except cbor_msgs.CborError as exc:
+                raise ProtocolError(f"{msg.name} response: {exc}") from None
+        raise GatewayTimeout(f"{self.label} {self.url}: no {msg.name} response")
+
+    async def _secure_open(self) -> None:
+        """IDENTIFY, pin check, SECURE_OPEN (docs/connect-setup.md §5)."""
+        opts = self._secure
+        assert opts is not None
+        fields = await self._aux_request(SerialMsg.IDENTIFY, {})
+        status = to_status(fields["status"])
+        if status == Status.UNSUPPORTED:
+            raise ProtocolError(f"{self.label} {self.url} runs protocol v1 firmware (no IDENTIFY)")
+        if status != Status.OK:
+            raise StatusError(SerialMsg.IDENTIFY, status, fields.get("detail"), fields.get("text"))
+        try:
+            ident = IdentifyInfo.from_fields(fields)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProtocolError(f"IDENTIFY response: {exc}") from None
+        if ident.proto < SECURE_PROTO_VERSION:
+            raise ProtocolError(f"{self.label} speaks secure protocol {ident.proto}")
+        if opts.role is not None and ident.role != opts.role:
+            raise WrongDeviceError(f"{self.label} {self.url}: the device reports role {ident.role}")
+        if ((opts.expect_device_id is not None and ident.device_id != opts.expect_device_id)
+                or (opts.expect_ik is not None and ident.ik != opts.expect_ik)):
+            raise WrongDeviceError(f"{self.label} {self.url}: another device is on this port")
+        self._identify = ident
+        if opts.on_identify is not None:
+            try:
+                opts.on_identify(ident)
+            except Exception:
+                log.exception("%s: identify callback failed", self.label)
+        channel = SecureChannel(opts.controller_priv, ident.ik, ident.device_id, Link.SERIAL)
+        failure: list[str] = []
+
+        def install(frame: Frame) -> None:
+            # Right here, before the reader handles the next frame: the device re-sends its
+            # retained events sealed in the new session immediately after this answer.
+            try:
+                fields = cbor_msgs.decode_response(SerialMsg.SECURE_OPEN, frame.payload)
+            except cbor_msgs.CborError as exc:
+                failure.append(str(exc))
+                return
+            if to_status(fields["status"]) == Status.OK and isinstance(fields.get("data"), bytes):
+                try:
+                    channel.finish(fields["data"])
+                except SecureChannelError as exc:
+                    failure.append(str(exc))
+                    return
+                self._channel = channel
+
+        # One attempt: a repeated message 1 would open a second session (a new ephemeral key each time).
+        answer = await self._aux_request(SerialMsg.SECURE_OPEN, {"data": channel.message1()}, on_answer=install,
+                                         attempts=1)
+        status = to_status(answer["status"])
+        if status != Status.OK or not isinstance(answer.get("data"), bytes):
+            raise StatusError(SerialMsg.SECURE_OPEN, status, answer.get("detail"), answer.get("text"))
+        if failure or self._channel is not channel:
+            self._channel = None
+            raise ProtocolError(f"secure session: {failure[0] if failure else 'not established'}")
+
     def _install_session(self, frame: Frame) -> HelloInfo:
         """Accept a HELLO answer and start the new session (runs inside the frame handler)."""
         hello = self._accept_hello(frame)
@@ -498,9 +734,11 @@ class SerialLink:
         for req in unanswered:
             req.sent.clear()
         self._outbox = deque(unanswered)
-        self._ready.set()
-        self._outbox_changed.set()
-        self._credit_changed.set()
+        if self._secure is None:
+            # A secure link becomes ready only once its session is open (_secure_open).
+            self._ready.set()
+            self._outbox_changed.set()
+            self._credit_changed.set()
         if self._on_session is not None:
             try:
                 self._on_session(hello, previous)

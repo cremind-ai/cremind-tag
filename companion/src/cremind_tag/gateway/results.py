@@ -232,3 +232,35 @@ class FlashTestResult:
         items = tuple(FlashTestItem(i.get("offset", 0), to_status(i.get("status", 0)))
                       for i in fields.get("items", []))
         return cls(to_status(fields["status"]), fields.get("flash_size"), items)
+
+
+@dataclass(frozen=True, slots=True)
+class IdentifyInfo:
+    """The plaintext ``IDENTIFY`` answer of a v2 device (docs/connect-setup.md §5).
+
+    ``challenge`` is single use: it is valid until the device's next IDENTIFY,
+    grant check or reboot. ``authority_id`` is present when the device is owned.
+    """
+
+    proto: int
+    role: int
+    device_id: bytes
+    ik: bytes
+    fw: str
+    build: str
+    board: int
+    owner_state: int
+    gen: int
+    challenge: bytes
+    authority_id: bytes | None = None
+
+    @property
+    def owned(self) -> bool:
+        return self.owner_state == 1
+
+    @classmethod
+    def from_fields(cls, fields: Mapping[str, Any]) -> IdentifyInfo:
+        return cls(int(fields["proto"]), int(fields["role"]), bytes(fields["device_id"]), bytes(fields["ik"]),
+                   str(fields.get("fw") or ""), str(fields.get("build") or ""), int(fields.get("board") or 0),
+                   int(fields["owner_state"]), int(fields["gen"]), bytes(fields["challenge"]),
+                   bytes(fields["authority_id"]) if fields.get("authority_id") else None)

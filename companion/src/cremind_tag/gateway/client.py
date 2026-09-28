@@ -62,9 +62,9 @@ from ..protocol.ids import LAYOUT_HARD_MAX, MESH_DEFAULT_TTL, TAG_KEY_LEN, Seria
 from ..protocol.serial_frame import Frame
 from .errors import GatewayError, StatusError
 from .events import GatewayEvent, SessionStarted, parse_event
-from .link import DEFAULT_ATTEMPTS, HOST_WINDOW, REQUEST_TIMEOUT_S, SerialLink, TransportFactory
+from .link import DEFAULT_ATTEMPTS, HOST_WINDOW, REQUEST_TIMEOUT_S, SecureOptions, SerialLink, TransportFactory
 from .opid import OpIdGenerator
-from .results import Ack, BridgeInfo, DeviceInfo, HelloInfo, NodeInfo, to_status
+from .results import Ack, BridgeInfo, DeviceInfo, HelloInfo, IdentifyInfo, NodeInfo, to_status
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +165,7 @@ class GatewayClient:
         handler_backoff: tuple[float, float] = (0.5, 30.0),
         op_ids: OpIdGenerator | None = None,
         transport_factory: TransportFactory | None = None,
+        secure: SecureOptions | None = None,
     ) -> None:
         self.url = url
         self.ack_events = ack_events
@@ -172,7 +173,7 @@ class GatewayClient:
         self._op_ids = op_ids or OpIdGenerator()
         self.link = SerialLink(url, name=name, label="gateway", request_timeout=request_timeout, attempts=attempts,
                                reconnect=reconnect, host_window=host_window, transport_factory=transport_factory,
-                               on_event=self._on_event_frame, on_session=self._on_session)
+                               on_event=self._on_event_frame, on_session=self._on_session, secure=secure)
         self._handlers: list[tuple[EventHandler, EventTypes]] = []
         self._observers: set[EventSubscription | EventWaiter] = set()
         self._pipeline: asyncio.Queue[GatewayEvent] = asyncio.Queue()
@@ -484,6 +485,62 @@ class GatewayClient:
         op = self._op(op_id)
         return await self._ack(SerialMsg.TAG_COMMAND,
                                {"op_id": op, "bridge": bridge, "tag_id": tag_id, "epoch": epoch, "cmd": int(cmd)}, op)
+
+    # -- protocol v2 (docs/connect-setup.md §5; a secure link) ------------------------
+
+    @property
+    def identity(self) -> IdentifyInfo | None:
+        """The gateway's latest ``IDENTIFY`` answer (secure links only)."""
+        return self.link.identify
+
+    async def status(self) -> dict[str, Any]:
+        """``STATUS``: ownership, generation, ``controller_match`` and a fresh single-use ``challenge``."""
+        return await self._checked(SerialMsg.STATUS)
+
+    async def claim(self, grant: bytes, sig: bytes) -> dict[str, Any]:
+        """``CLAIM`` (an unowned gateway, over its own USB port); the answer's ``status`` is not checked."""
+        return await self.link.request(SerialMsg.CLAIM, {"grant": grant, "sig": sig})
+
+    async def recover(self, grant: bytes, sig: bytes) -> dict[str, Any]:
+        """``RECOVER``: an owned gateway takes this link's controller key."""
+        return await self.link.request(SerialMsg.RECOVER, {"grant": grant, "sig": sig})
+
+    async def release(self, grant: bytes, sig: bytes) -> dict[str, Any]:
+        """``RELEASE`` of the gateway itself: mesh, CDB and assignments wiped, generation kept."""
+        return await self.link.request(SerialMsg.RELEASE, {"grant": grant, "sig": sig})
+
+    async def provision_v2(self, uuid: bytes, static_oob: bytes, name: str | None = None, *,
+                           op_id: int | None = None) -> Ack:
+        """``PROVISION`` of a v2 bridge with its static OOB value (§3.4); a ``Provisioned`` event follows."""
+        op = self._op(op_id)
+        fields: dict[str, Any] = {"op_id": op, "uuid": uuid, "static_oob": static_oob}
+        if name:
+            fields["name"] = name
+        return await self._ack(SerialMsg.PROVISION, fields, op)
+
+    async def discover(self, *, bridge: int, duration_s: int, tag_id: int, op_id: int | None = None) -> Ack:
+        """``DISCOVER``: bridges listen for a v2 tag in setup mode (``bridge`` 0 = every bridge,
+        ``tag_id`` 0 = any); ``Discovered`` events follow."""
+        op = self._op(op_id)
+        return await self._ack(SerialMsg.DISCOVER, {"op_id": op, "bridge": bridge, "duration_s": duration_s,
+                                                    "tag_id": tag_id}, op)
+
+    async def tunnel_open(self, *, bridge: int, tag_id: int, duration_s: int, op_id: int | None = None) -> int:
+        """``TUNNEL_OPEN`` to a bridge's own endpoint (``tag_id`` 0) or through it to a tag; returns the
+        tunnel id. ``TunnelEvent``\\ s follow (``OPEN`` with the endpoint's ``ident2`` first)."""
+        op = self._op(op_id)
+        response = await self.link.request(SerialMsg.TUNNEL_OPEN, {"op_id": op, "bridge": bridge, "tag_id": tag_id,
+                                                                   "duration_s": duration_s})
+        status = to_status(response["status"])
+        if status not in (Status.OK, Status.ACCEPTED):
+            raise StatusError(SerialMsg.TUNNEL_OPEN, status, response.get("detail"), response.get("text"))
+        return int(response["tunnel"])
+
+    async def tunnel_send(self, tunnel: int, data: bytes) -> None:
+        await self._checked(SerialMsg.TUNNEL_SEND, {"tunnel": tunnel, "data": data})
+
+    async def tunnel_close(self, tunnel: int) -> None:
+        await self._checked(SerialMsg.TUNNEL_CLOSE, {"tunnel": tunnel})
 
 
 def matches(event_type: type[GatewayEvent], **fields: Any) -> Callable[[GatewayEvent], bool]:

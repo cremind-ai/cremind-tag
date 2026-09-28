@@ -1,0 +1,201 @@
+name: Cremind Connect
+
+# Builds Cremind Connect (the PyInstaller bundle of the companion) and its
+# installers on Windows x64, macOS arm64 + x64 and Linux x64, smoke-runs every
+# bundle, signs when the signing secrets exist, and uploads the installers.
+# A tag connect-vX.Y.Z also attaches them to a DRAFT GitHub release, which a
+# maintainer reviews and publishes (docs/connect-packaging.md).
+
+on:
+  push:
+    branches: [main]
+    tags: ["connect-v*"]
+    paths: ["companion/**", ".github/workflows/connect.yml"]
+  pull_request:
+    paths: ["companion/**", ".github/workflows/connect.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: windows-x64 }
+          - { os: macos-14, target: macos-arm64 }
+          # Intel build. GitHub has been retiring macos-13; if the label is gone, use its Intel successor
+          # (e.g. macos-15-intel) — the target name stays macos-x64.
+          - { os: macos-13, target: macos-x64 }
+          - { os: ubuntu-22.04, target: linux-x64 }  # the oldest glibc the Linux bundle supports
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: companion
+    env:
+      # Secrets are empty strings when not configured; every signing step checks them.
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+
+      - name: Sync the companion with the package group (PyInstaller)
+        run: uv sync --group package --locked
+
+      - name: Connect tests
+        run: uv run pytest tests/connect -q
+
+      - name: Version
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/connect-v* ]]; then
+            version="${GITHUB_REF#refs/tags/connect-v}"
+          else
+            version="$(uv run python -c 'import cremind_tag; print(cremind_tag.__version__)').dev${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cremind Connect $version"
+
+      - name: Build the bundle and smoke-run it (version, status --json)
+        run: uv run python packaging/build_connect.py --version "${{ steps.v.outputs.version }}" --smoke
+
+      # ---------------------------------------------------------------- Windows
+
+      - name: Sign the executable (Windows)
+        if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "connect-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+                       Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd sha256 /td sha256 `
+            /tr http://timestamp.digicert.com /d "Cremind Connect" dist\connect\cremind-connect\cremind-connect.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item $pfx
+
+      - name: Inno Setup (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
+
+      # ---------------------------------------------------------------- macOS
+
+      - name: Sign the app (macOS)
+        if: runner.os == 'macOS' && env.APPLE_CERT_P12_BASE64 != ''
+        run: |
+          keychain="$RUNNER_TEMP/connect-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          echo "$APPLE_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/connect-signing.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/connect-signing.p12" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/connect-signing.p12"
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          test -n "$identity"
+          echo "CONNECT_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          app="dist/connect/Cremind Connect.app"
+          # Inner Mach-O files first, then the executable and the app (hardened runtime, secure timestamp).
+          find "$app/Contents" -type f ! -path "*/MacOS/cremind-connect" -print0 |
+            while IFS= read -r -d '' f; do
+              if file -b "$f" | grep -q "Mach-O"; then
+                codesign --force --timestamp --options runtime --sign "$identity" "$f"
+              fi
+            done
+          codesign --force --timestamp --options runtime --entitlements packaging/macos/entitlements.plist \
+            --sign "$identity" "$app/Contents/MacOS/cremind-connect"
+          codesign --force --timestamp --options runtime --entitlements packaging/macos/entitlements.plist \
+            --sign "$identity" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      # ---------------------------------------------------------------- installers
+
+      - name: Build the installers
+        run: uv run python packaging/build_connect.py --version "${{ steps.v.outputs.version }}" --skip-build --installer
+
+      - name: Sign the installer (Windows)
+        if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "connect-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+                       Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          Get-ChildItem dist\connect\installers\*.exe | ForEach-Object {
+            & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd sha256 /td sha256 `
+              /tr http://timestamp.digicert.com /d "Cremind Connect installer" $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Remove-Item $pfx
+
+      - name: Sign and notarize the disk image (macOS)
+        if: runner.os == 'macOS' && env.APPLE_CERT_P12_BASE64 != '' && env.APPLE_ID != ''
+        run: |
+          for dmg in dist/connect/installers/*.dmg; do
+            codesign --force --timestamp --sign "$CONNECT_SIGNING_IDENTITY" "$dmg"
+            xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" --wait
+            xcrun stapler staple "$dmg"
+          done
+
+      - name: Checksums
+        run: |
+          cd dist/connect/installers
+          for f in *; do
+            if command -v sha256sum > /dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi
+          done > "SHA256SUMS-${{ matrix.target }}.txt"
+          cat "SHA256SUMS-${{ matrix.target }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cremind-connect-${{ matrix.target }}
+          path: companion/dist/connect/installers/*
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/connect-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#connect-v}"
+          ls -l installers
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" installers/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" installers/* --repo "$GITHUB_REPOSITORY" --draft \
+              --title "Cremind Connect $version" \
+              --notes "Cremind Connect $version installers: Windows (per user), macOS (arm64, x64), Linux (.deb, tar.gz). Checksums in SHA256SUMS-*.txt. See docs/connect-packaging.md."
+          fi

@@ -21,7 +21,8 @@ Start here: [architecture](docs/architecture.md) ·
 [protocols](docs/protocol.md) · [security](docs/security.md) ·
 [font packs](docs/fontpack.md) · [connector API](docs/connector-api.md) ·
 [hardware matrix](docs/hardware/matrix.md) · [building](docs/building.md) ·
-[companion](docs/companion.md) · [releasing](docs/releasing.md).
+[companion](docs/companion.md) · [releasing](docs/releasing.md) ·
+[simple setup](docs/connect-setup.md) · [Cremind Connect packaging](docs/connect-packaging.md).
 
 ## Status
 

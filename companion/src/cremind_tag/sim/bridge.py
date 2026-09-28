@@ -46,6 +46,23 @@ result a session produces carries the tag's stored epoch (from its
 ``CHALLENGE`` or ``ERROR``; after ``AUTH_OK`` at least the session's epoch), and
 a ``RESULT`` answered from the tag's stored ACK is flagged
 ``RESULT_FLAG_DUPLICATE`` (§3.4).
+
+Protocol v2 (docs/connect-setup.md; the bridge runs it when it is given a
+:class:`~cremind_tag.secure.device.SecureDevice`): the mesh UUID is the
+``device_id``; the unprovisioned beacon carries OOB information "on box" and
+provisioning needs the static OOB derived from the current setup secret (the
+label's, or the fresh one a recommission armed); a released bridge is locked
+(no beacon) until it is recommissioned over USB. ``CAPS_STATUS`` is followed by
+``CAPS2_STATUS``. ``DISCOVER`` makes the bridge report v2 tags advertising setup
+mode (``DISCOVERED``, once per tag per ``DISCOVERED_MIN_INTERVAL_MS``, never an
+assigned tag). One mesh tunnel at a time (:mod:`cremind_tag.sim.tunnel`): to the
+bridge's own secure endpoint or relayed to a tag; a tunnel is refused ``BUSY``
+while another is open or a tag session runs, and no tag session starts while a
+tunnel is open. The maintenance port runs the v2 serial layer: an unowned (or
+released) bridge answers the v1 maintenance catalogue and ``FACTORY_SETUP`` in
+plaintext; an owned bridge answers ``FONT_*``, ``FLASH_TEST``, ``INFO`` and
+``REBOOT`` only inside a session that passed ``MAINT_AUTH``; ``RECOMMISSION``
+(USB only) leaves the mesh and returns a fresh setup payload.
 """
 
 from __future__ import annotations
@@ -55,7 +72,7 @@ import contextlib
 import logging
 import random
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..fontpack.format import FontPack
@@ -65,6 +82,7 @@ from ..protocol.ids import (
     BRIDGE_CONN_ATTEMPT_MS,
     BRIDGE_MAX_SUSPENDS_PER_MIN,
     BRIDGE_TAG_BACKOFF_MS,
+    DISCOVERED_MIN_INTERVAL_MS,
     LAYOUT_CHUNK_DATA_MAX,
     LAYOUT_DIGEST_LEN,
     LAYOUT_HARD_MAX,
@@ -75,6 +93,7 @@ from ..protocol.ids import (
     RESULT_FLAG_DUPLICATE,
     RESULT_FLAG_ESCALATED,
     SERIAL_MAX_FRAME,
+    SETUP_SECRET_LEN,
     TAG_ADV_WINDOW_MS,
     TAG_CTRL_MSG_MAX,
     TAG_PLANE_DATA_MAX,
@@ -83,7 +102,9 @@ from ..protocol.ids import (
     CtrlMsg,
     DeliveryStage,
     GattChr,
+    Link,
     NodeRole,
+    OwnerState,
     PlainMsg,
     RecordDir,
     RecordType,
@@ -102,10 +123,13 @@ from ..protocol.msgs import (
     MeshAssignDel,
     MeshAssignSet,
     MeshAssignStatus,
+    MeshCaps2Status,
     MeshCapsGet,
     MeshCapsStatus,
     MeshDeliveryResult,
     MeshDeliveryStage,
+    MeshDiscover,
+    MeshDiscovered,
     MeshHealthGet,
     MeshHealthStatus,
     MeshIdentify,
@@ -117,6 +141,10 @@ from ..protocol.msgs import (
     MeshResultAck,
     MeshTagCmd,
     MeshTagSeen,
+    MeshTunnelClose,
+    MeshTunnelData,
+    MeshTunnelOpen,
+    MeshTunnelUp,
     MessageError,
     PlainCredit,
     RecCmd,
@@ -127,15 +155,34 @@ from ..protocol.msgs import (
     TagCaps,
 )
 from ..render.reference import Panel, render_frame
+from ..secure import identity
+from ..secure.device import Outcome, SecureDevice
+from ..secure.messages import FRAG_CLOSE
 from .core import Pacer, SimClock, TaskSet
 from .device import DeviceEndpoint, Reply
 from .flash import MIB, FlashError, FontStore, SimFlash
 from .mesh import GATEWAY_ADDR, MeshNetwork
-from .radio import Advert, Air, ConnectFailed, GattLink, LinkLost
+from .radio import ADV_FLAG_SETUP, ADV_VERSION, ADV_VERSION_V2, Advert, Air, ConnectFailed, GattLink, LinkLost
+from .tunnel import BridgeTunnel
+from .v2 import (
+    MESH_OOB_ON_BOX,
+    SECURE_MESSAGES,
+    LinkSessions,
+    SecureSerial,
+    current_setup_secret,
+    device_state,
+    load_device_state,
+    outcome_fields,
+    setup_payload,
+)
 
 log = logging.getLogger(__name__)
 
 FW = (0, 1, 0)
+MAINT_CATALOGUE = frozenset({SerialMsg.PING, SerialMsg.INFO, SerialMsg.REBOOT, SerialMsg.FONT_BEGIN,
+                             SerialMsg.FONT_DATA, SerialMsg.FONT_COMMIT, SerialMsg.FONT_STATUS, SerialMsg.FONT_ABORT,
+                             SerialMsg.FLASH_TEST})
+"""The v1 maintenance-port catalogue (docs/protocol.md §1.6)."""
 CONN_INTERVAL_MS = 40.0  # 30–50 ms (§5.2 step 8)
 RECORDS_PER_EVENT = 4
 STEP_TIMEOUT_MS = 5000.0
@@ -151,7 +198,7 @@ NRF52840_SESSIONS = 2  # CONFIG_CTAG_BRIDGE_SESSIONS on the nRF52840 bridge (app
 NRF52832_SESSIONS = 1  # ... and on the nRF52832 bridge (apps/bridge/socs/nrf52832.conf)
 U16 = 0xFFFF
 
-BUSY_REASONS = frozenset({"busy_initiating", "busy_sessions", "busy_streaming"})
+BUSY_REASONS = frozenset({"busy_initiating", "busy_sessions", "busy_streaming", "busy_tunnel"})
 """Why an advertisement of a tag with work found the bridge unable to start an attempt (``_advert_decision``)."""
 
 
@@ -224,9 +271,9 @@ class SimBridge:
     def __init__(self, name: str, *, uuid: bytes, clock: SimClock, mesh: MeshNetwork, air: Air, rng: random.Random,
                  flash_size: int = 64 * MIB, board: int = Board.NRF52840_BRIDGE, faults: BridgeFaults | None = None,
                  bad_sectors: tuple[int, ...] = (), max_tags: int | None = None, sessions: int | None = None,
-                 quick_retry: bool = True) -> None:
+                 quick_retry: bool = True, secure: SecureDevice | None = None) -> None:
         self.name = name
-        self.uuid = uuid
+        self.uuid = secure.device_id if secure is not None else uuid  # v2: the mesh UUID is the device_id
         self.clock = clock
         self.mesh = mesh
         self.air = air
@@ -277,11 +324,58 @@ class SimBridge:
         self._sessions: dict[int, _BridgeSession] = {}
         self._tasks = TaskSet(f"bridge {name}")
         self._flash_tests: dict[int, dict[str, Any]] = {}
-        self.maint = DeviceEndpoint(f"bridge {name} maint", self._maint, supported=(
-            SerialMsg.PING, SerialMsg.INFO, SerialMsg.REBOOT, SerialMsg.FONT_BEGIN, SerialMsg.FONT_DATA,
-            SerialMsg.FONT_COMMIT, SerialMsg.FONT_STATUS, SerialMsg.FONT_ABORT, SerialMsg.FLASH_TEST))
+        # Protocol v2 (docs/connect-setup.md): identity, ownership, tunnels, discovery, the secure maintenance port.
+        self.secure = secure
+        self.sessions = LinkSessions(secure) if secure is not None else None
+        self._fw = secure.keys.fw if secure is not None else FW
+        self._adv_versions = (ADV_VERSION, ADV_VERSION_V2) if secure is not None else (ADV_VERSION,)
+        self.tunnel: BridgeTunnel | None = None
+        self._discover_until = 0.0
+        self._discover_tag = 0
+        self._discovered_at: dict[int, float] = {}
+        self.on_state_change: list[Any] = []  # callables(): the simulator saves its state file
+        supported = set(MAINT_CATALOGUE)
+        if secure is not None:
+            supported |= {SerialMsg.IDENTIFY, SerialMsg.SECURE_OPEN, SerialMsg.SECURE_DATA, SerialMsg.FACTORY_SETUP,
+                          SerialMsg.EVENT_ACK} | SECURE_MESSAGES
+        self.maint = DeviceEndpoint(f"bridge {name} maint", self._maint, supported=supported)
+        if self.sessions is not None:
+            self.maint.secure = SecureSerial(self.sessions, fw=".".join(map(str, self._fw)),
+                                             plaintext=self._maint_plaintext, handler=self._maint_secure)
 
     # -- identity and lifecycle ------------------------------------------------------
+
+    @property
+    def v2(self) -> bool:
+        return self.secure is not None
+
+    def _changed(self) -> None:
+        for callback in self.on_state_change:
+            callback()
+
+    def setup_payload(self) -> Any:
+        """v2: the setup payload the bridge pairs with now (``SetupPayload``), ``None`` without a secret."""
+        return setup_payload(self.secure) if self.secure is not None else None
+
+    def beaconing(self) -> bool:
+        """Sends unprovisioned beacons (answers ``SCAN_UNPROV``, can be provisioned): v2 needs a setup secret and
+        no lock (a released bridge waits for its recommissioning)."""
+        if self.provisioned:
+            return False
+        if self.secure is None:
+            return True
+        return not self.secure.record.locked and current_setup_secret(self.secure) is not None
+
+    def beacon_oob(self) -> int:
+        return MESH_OOB_ON_BOX if self.secure is not None else 0
+
+    def static_oob_matches(self, value: bytes | None) -> bool:
+        """The provisioner's static OOB authenticates against ours (connect-setup.md 3.4); a v1 bridge offers
+        no static OOB at all."""
+        if self.secure is None or value is None:
+            return False
+        secret = current_setup_secret(self.secure)
+        return secret is not None and identity.equal(value, identity.static_oob(secret, self.secure.device_id))
 
     @property
     def provisioned(self) -> bool:
@@ -339,6 +433,10 @@ class SimBridge:
         for jobs in self.jobs.values():
             for job in jobs:
                 job.in_session = False
+        if self.sessions is not None:  # v2: sessions, the challenge, the tunnel and discovery are RAM
+            self.sessions.clear()
+            self.tunnel = None
+            self._discover_until = 0.0
 
     # -- provisioning (driven by the simulated gateway) -----------------------------------
 
@@ -362,6 +460,15 @@ class SimBridge:
         self.history.clear()
         self.jobs.clear()
         self._xfer = None
+        if self.tunnel is not None:
+            self.tunnel.close(Status.CANCELLED, notify=False)  # out of the mesh: nobody to tell
+        self._discover_until = 0.0
+
+    def _left_mesh(self) -> None:
+        """v2: a RELEASE (locked until recommissioned) or a RECOMMISSION made the bridge leave its mesh."""
+        self.counters["left_mesh"] += 1
+        self.reset_node()
+        self._changed()
 
     # -- mesh node interface -----------------------------------------------------------
 
@@ -406,9 +513,29 @@ class SimBridge:
             if event is not None:
                 event.set()
         elif isinstance(msg, MeshCapsGet):
-            self._send_later(self.caps_status())
+            if self.secure is not None:
+                self._tasks.spawn(self._send_caps(), "caps")
+            else:
+                self._send_later(self.caps_status())
         elif isinstance(msg, MeshHealthGet):
             self._send_later(self.health_status())
+        elif self.secure is not None and isinstance(msg, MeshTunnelOpen):
+            self._tunnel_open(msg)
+        elif self.secure is not None and isinstance(msg, MeshTunnelData):
+            tunnel = self.tunnel
+            if tunnel is not None and tunnel.tunnel == msg.tunnel:
+                tunnel.on_data(msg)
+            else:
+                self.counters["stray_tunnel_data"] += 1
+        elif self.secure is not None and isinstance(msg, MeshTunnelClose):
+            tunnel = self.tunnel
+            if tunnel is not None and tunnel.tunnel == msg.tunnel:
+                tunnel.close(Status.OK, notify=False)  # the gateway closed it
+        elif self.secure is not None and isinstance(msg, MeshDiscover):
+            now = self.clock.now_ms()
+            self._discover_until = now + msg.duration_s * 1000.0 if msg.duration_s else 0.0
+            self._discover_tag = msg.tag_id
+            self.counters["discover"] += 1
         elif isinstance(msg, MeshAssignSet):
             status = self._assign_set(msg)
             self._send_later(MeshAssignStatus(msg.tag_id, msg.epoch, status))
@@ -425,8 +552,114 @@ class SimBridge:
     def caps_status(self) -> MeshCapsStatus:
         pack_id = self.fontpack_id
         flags = (1 if pack_id is not None else 0) | (2 if self._links else 0)
-        return MeshCapsStatus(PROTO_VERSION, *FW, self.board, pack_id or bytes(8), min(self.flash.size // MIB, U16),
-                              self.max_tags, len(self.assignments), flags)
+        return MeshCapsStatus(PROTO_VERSION, *self._fw, self.board, pack_id or bytes(8),
+                              min(self.flash.size // MIB, U16), self.max_tags, len(self.assignments), flags)
+
+    def caps2_status(self) -> MeshCaps2Status:
+        assert self.secure is not None
+        record = self.secure.record
+        return MeshCaps2Status(self.secure.device_id, record.gen, int(record.state))
+
+    async def _send_caps(self) -> None:
+        """v2: ``CAPS2_STATUS`` right after ``CAPS_STATUS`` (connect-setup.md 6)."""
+        await self._mesh_send(self.caps_status())
+        await self._mesh_send(self.caps2_status())
+
+    # -- protocol v2: tunnels (connect-setup.md 6) -------------------------------------------
+
+    def _tunnel_open(self, msg: MeshTunnelOpen) -> None:
+        current = self.tunnel
+        if current is not None and current.tunnel == msg.tunnel:
+            return  # the same open again
+        if current is not None or self._links:
+            # One tunnel at a time, never while a tag session runs.
+            self.counters["tunnel_busy"] += 1
+            self._send_later(MeshTunnelUp(msg.tunnel, 0, FRAG_CLOSE, bytes([Status.BUSY])))
+            return
+        self.counters["tunnels"] += 1
+        self.tunnel = BridgeTunnel(self, msg.tunnel, msg.tag_id, msg.timeout_s)
+        self.tunnel.start()
+
+    def _tunnel_handler(self, dev: SecureDevice, msg: SerialMsg, fields: dict[str, Any]) -> Outcome:
+        """The own endpoint behind a tunnel: ``MAINT_AUTH`` belongs to the USB port (§4.2)."""
+        if msg == SerialMsg.MAINT_AUTH:
+            return Outcome(Status.NOT_OWNER)
+        return dev.handle(msg, fields)
+
+    def _relay_allowed(self, tag_id: int, now: float) -> bool:
+        """§5.2 steps 1-2 for a tunnel's connection attempt: one initiation at a time, room for the link, the
+        suspend rate limit."""
+        if self._initiating is not None or tag_id in self._links or len(self._links) >= self.max_sessions:
+            return False
+        while self._suspend_times and now - self._suspend_times[0] >= 60000.0:
+            self._suspend_times.popleft()
+        if len(self._suspend_times) >= BRIDGE_MAX_SUSPENDS_PER_MIN:
+            self.counters["rate_limited"] += 1
+            return False
+        return True
+
+    async def _relay_attempt(self, tunnel: BridgeTunnel) -> None:
+        """A tunnel to a tag: §5.2 steps 3-7 (as :meth:`_attempt`, without the per-tag back-off: the next
+        advertisement retries until the tunnel's idle timeout), then the relay."""
+        tag_id = tunnel.tag_id
+        me = asyncio.current_task()
+        try:
+            if self._sending:
+                deadline = self.clock.now_ms() + 500.0
+                while self._sending and self.clock.now_ms() < deadline:
+                    await self.clock.sleep_ms(20.0)
+                if self._sending:
+                    self.counters["deferred"] += 1
+                    return
+            started = self.clock.now_ms()
+            self._suspend_times.append(started)
+            self.counters["suspend_count"] += 1
+            if self._suspend_fails():
+                self.counters["suspend_fail"] += 1
+                return
+            self._suspended = True
+            self._resumed.clear()
+            link: GattLink | None = None
+            try:
+                link = await self.air.connect(self.name, tag_id, BRIDGE_CONN_ATTEMPT_MS)
+            except ConnectFailed:
+                pass
+            resumed = await self._resume()
+            suspend_ms = int(self.clock.now_ms() - started)
+            self.counters["suspend_max_ms"] = max(self.counters["suspend_max_ms"], suspend_ms)
+            self.counters["suspended_ms"] += suspend_ms
+            if self._initiating == tag_id:
+                self._initiating = None
+            if not resumed:
+                if link is not None:
+                    link.disconnect("bridge mesh resume failed")
+                return
+            if link is None:
+                self.counters["tunnel_connect_failed"] += 1
+                return
+            await tunnel.relay(link)
+        finally:
+            tunnel.relaying = False
+            if self._links.get(tag_id) is me:
+                del self._links[tag_id]
+                if self._initiating == tag_id:
+                    self._initiating = None
+
+    def _v2_advert(self, advert: Advert, rssi: int, now: float) -> None:
+        """Discovery (v2 tags in setup mode) and a waiting tunnel's connection attempt."""
+        tag_id = advert.tag_id
+        if (advert.version == ADV_VERSION_V2 and advert.flags & ADV_FLAG_SETUP and now < self._discover_until
+                and self._discover_tag in (0, tag_id) and tag_id not in self.assignments):
+            if now - self._discovered_at.get(tag_id, -DISCOVERED_MIN_INTERVAL_MS) >= DISCOVERED_MIN_INTERVAL_MS:
+                self._discovered_at[tag_id] = now
+                self.counters["discovered"] += 1
+                self._send_later(MeshDiscovered(tag_id, max(-128, min(127, rssi)), advert.flags))
+        tunnel = self.tunnel
+        if tunnel is not None and tunnel.wants(tag_id) and self._relay_allowed(tag_id, now):
+            tunnel.relaying = True
+            self._initiating = tag_id
+            self._links[tag_id] = self._tasks.spawn(self._relay_attempt(tunnel), f"tunnel relay {tag_id:08X}")
+            self.counters["max_links"] = max(self.counters["max_links"], len(self._links))
 
     def health_status(self) -> MeshHealthStatus:
         c = self.counters
@@ -651,7 +884,7 @@ class SimBridge:
         return self.provisioned and self.configured and not self._suspended
 
     def on_advert(self, data: bytes, rssi: int) -> None:
-        advert = Advert.parse(data)
+        advert = Advert.parse(data, self._adv_versions)
         if advert is None:
             return
         tag_id, now = advert.tag_id, self.clock.now_ms()
@@ -661,6 +894,8 @@ class SimBridge:
             self._tag_seen_at[tag_id] = now
             self._send_later(MeshTagSeen(tag_id, max(-128, min(127, rssi)), self.tag_battery.get(tag_id, 0),
                                          advert.flags))
+        if self.secure is not None:
+            self._v2_advert(advert, rssi, now)
         reason = self._advert_decision(tag_id, now)
         if reason is None or reason == "quick_retry":
             retry = reason == "quick_retry"
@@ -678,6 +913,8 @@ class SimBridge:
         session is initiated only while every open session's link is idle (its tag refreshing)."""
         if not self.jobs.get(tag_id) or tag_id not in self.assignments:
             return "no_work"
+        if self.tunnel is not None:
+            return "busy_tunnel"  # v2: no tag session while a tunnel is open
         if tag_id in self._links:
             return "connected"
         if self._initiating is not None:
@@ -837,17 +1074,19 @@ class SimBridge:
             case SerialMsg.HELLO:
                 if f.get("proto") != PROTO_VERSION:
                     return {"status": Status.VERSION_MISMATCH, "proto": PROTO_VERSION}
-                return {"status": Status.OK, "proto": PROTO_VERSION, "fw": ".".join(map(str, FW)), "build": "sim",
-                        "boot_id": self.boot_id, "caps": self._caps()}
+                return {"status": Status.OK, "proto": PROTO_VERSION, "fw": ".".join(map(str, self._fw)),
+                        "build": "sim", "boot_id": self.boot_id, "caps": self._caps()}
             case SerialMsg.PING:
                 return {"status": Status.OK, "uptime_s": self.uptime_s()}
             case SerialMsg.INFO:
                 counters = {k: min(int(v), 0xFFFFFFFF) for k, v in (self.counters + self.maint.counters).items()
                             if v >= 0}
-                return {"status": Status.OK, "fw": ".".join(map(str, FW)), "build": "sim", "boot_id": self.boot_id,
-                        "caps": self._caps(), "counters": counters}
+                return {"status": Status.OK, "fw": ".".join(map(str, self._fw)), "build": "sim",
+                        "boot_id": self.boot_id, "caps": self._caps(), "counters": counters}
             case SerialMsg.REBOOT:
                 return Reply({"status": Status.OK}, after=self.reboot)
+            case SerialMsg.FACTORY_SETUP:  # v2 only (a v1 port does not list it)
+                return self._factory_setup(f["data"])
             case SerialMsg.FONT_STATUS:
                 record = self.fonts.active()
                 out: dict[str, Any] = {"status": Status.OK, "flash_size": self.flash.size}
@@ -879,20 +1118,80 @@ class SimBridge:
             return {"status": exc.status, "text": str(exc)[:120]}
         return {"status": Status.UNSUPPORTED}
 
+    # -- maintenance port, protocol v2 (connect-setup.md 5.4) ----------------------------------
+
+    def _maint_plaintext(self, msg: SerialMsg) -> bool:
+        """An unowned (or released) bridge answers the v1 maintenance catalogue and FACTORY_SETUP in plaintext
+        (the factory installs fonts and the label secret before anyone owns it); an owned one nothing more
+        than the v2 link messages."""
+        assert self.secure is not None
+        if self.secure.record.state == OwnerState.OWNED:
+            return False
+        return msg in MAINT_CATALOGUE or msg in (SerialMsg.FACTORY_SETUP, SerialMsg.EVENT_ACK)
+
+    async def _maint_secure(self, msg: SerialMsg, f: dict[str, Any]) -> Reply | dict[str, Any]:
+        """A request inside a maintenance-port session: the v2 messages on the ``SecureDevice``; an owned
+        bridge's maintenance catalogue only after ``MAINT_AUTH``."""
+        assert self.sessions is not None
+        if msg == SerialMsg.FACTORY_SETUP:
+            return self._factory_setup(f["data"])
+        outcome: Outcome | None = None
+        changed = locked_out = False
+        with self.sessions.use(Link.SERIAL) as dev:
+            if msg in SECURE_MESSAGES:
+                before = dev.record
+                outcome = dev.handle(msg, f)
+                changed = dev.record is not before
+            else:
+                locked_out = (msg != SerialMsg.PING and dev.record.state == OwnerState.OWNED
+                              and not (dev.session is not None and dev.session.maint_ok))
+        if outcome is None:
+            if locked_out:
+                self.counters["maint_refused"] += 1
+                return {"status": Status.NOT_OWNER}
+            return await self._maint(msg, f)
+        if changed:
+            self._changed()  # persist, then acknowledge
+        if outcome.recommissioned or outcome.released:
+            self._left_mesh()  # RECOMMISSION / RELEASE: the bridge leaves its mesh (USB answers regardless)
+        return outcome_fields(outcome)
+
+    def _factory_setup(self, data: bytes) -> dict[str, Any]:
+        """``FACTORY_SETUP``: store the label's setup secret once (unowned, none stored yet)."""
+        dev = self.secure
+        if dev is None:
+            return {"status": Status.UNSUPPORTED}
+        if dev.record.state == OwnerState.OWNED:
+            return {"status": Status.NOT_OWNER}
+        if dev.keys.factory_secret is not None:
+            return {"status": Status.LOCKED}
+        if len(data) != SETUP_SECRET_LEN:
+            return {"status": Status.INVALID, "text": f"a setup secret is {SETUP_SECRET_LEN} bytes"}
+        dev.keys = replace(dev.keys, factory_secret=bytes(data))
+        self.counters["factory_setup"] += 1
+        self._changed()
+        return {"status": Status.OK}
+
     # -- persistence ------------------------------------------------------------------------
 
     def state(self) -> dict[str, Any]:
-        return {"uuid": self.uuid.hex(), "name": self.name, "addr": self.addr, "configured": self.configured,
-                "assignments": [{"tag_id": a.tag_id, "epoch": a.epoch, "key": a.key.hex(), "flags": a.flags}
-                                for a in self.assignments.values()],
-                "history": [{"tag_id": t, "epoch": e, "revision": h.revision, "digest": h.digest.hex(),
-                             "result": None if h.result is None else {
-                                 "status": int(h.result.status), "digest8": h.result.digest8.hex(),
-                                 "battery_mv": h.result.battery_mv, "timing": h.result.timing,
-                                 "stored_epoch": h.result.stored_epoch, "flags": h.result.flags}}
-                            for (t, e), h in self.history.items()]}
+        out: dict[str, Any] = {
+            "uuid": self.uuid.hex(), "name": self.name, "addr": self.addr, "configured": self.configured,
+            "assignments": [{"tag_id": a.tag_id, "epoch": a.epoch, "key": a.key.hex(), "flags": a.flags}
+                            for a in self.assignments.values()],
+            "history": [{"tag_id": t, "epoch": e, "revision": h.revision, "digest": h.digest.hex(),
+                         "result": None if h.result is None else {
+                             "status": int(h.result.status), "digest8": h.result.digest8.hex(),
+                             "battery_mv": h.result.battery_mv, "timing": h.result.timing,
+                             "stored_epoch": h.result.stored_epoch, "flags": h.result.flags}}
+                        for (t, e), h in self.history.items()]}
+        if self.secure is not None:
+            out["v2"] = device_state(self.secure)  # identity key, label secret, ctag/br/own
+        return out
 
     def load_state(self, data: dict[str, Any]) -> None:
+        if self.secure is not None:
+            load_device_state(self.secure, data.get("v2"))
         if data.get("addr") is not None:
             self.provision(int(data["addr"]))
             if data.get("configured"):

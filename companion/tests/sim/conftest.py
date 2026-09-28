@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -14,6 +17,21 @@ from cremind_tag.protocol.layout import Glyph, Glyphs, Icon, Layout, Rect, encod
 
 REPO = Path(__file__).resolve().parents[3]
 FIXTURES = REPO / "protocol" / "fixtures"
+
+
+def _load(name: str) -> ModuleType:
+    """A helper module of this directory (``--import-mode=importlib`` puts none on ``sys.path``)."""
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parent / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+v2host = _load("v2host")  # the host-side protocol v2 driver of the test_v2_* modules
 
 
 @pytest.fixture(scope="session")

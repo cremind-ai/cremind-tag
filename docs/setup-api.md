@@ -180,5 +180,5 @@ spaces, UTF-8 (`json.dumps(body, sort_keys=True, separators=(",", ":"))`).
   grant that an open operation of this worker needs, for the binding's current
   generation, with `controller` = this worker's controller key.
 - `vault` entries are JSON objects of the worker's own design (roots, `mk`,
-  assignments, epoch floors, the controller key under `device_id` `"worker"`);
+  assignments, epoch floors; never a controller key);
   Cremind encrypts them at rest (connect-setup.md §10) and never interprets them.

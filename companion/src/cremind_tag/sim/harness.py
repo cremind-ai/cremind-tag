@@ -41,8 +41,14 @@ def run_scenario[T](coro: Coroutine[Any, Any, T], timeout: float = 60.0) -> T:
 
 
 def make_config(*, fontpack: bytes | None, tags: int = 1, bridges: int = 1, seed: int = 1, time_scale: float = 200.0,
-                assign: bool = True, panel: int = Panel.UC8176_420_BW, **overrides: Any) -> SimConfig:
-    tag_specs = [TagSpec.generate(seed, i, panel=panel) for i in range(tags)]
+                assign: bool = True, panel: int = Panel.UC8176_420_BW, protocol: int = 1,
+                **overrides: Any) -> SimConfig:
+    """A world of ``bridges`` provisioned bridges and ``tags`` tags. ``protocol=2``: a v2 world whose devices
+    start unowned; its bridges start unprovisioned and nothing is assigned (a worker pairs everything)."""
+    tag_specs = [TagSpec.generate(seed, i, panel=panel, protocol=protocol) for i in range(tags)]
+    if protocol >= 2:
+        return SimConfig(seed=seed, time_scale=time_scale, fontpack=fontpack, protocol=protocol,
+                         bridges=[BridgeSpec(provisioned=False) for _ in range(bridges)], tags=tag_specs, **overrides)
     assignments = [Assign(t.tag_id, i % max(1, bridges), 1) for i, t in enumerate(tag_specs)] if assign else []
     return SimConfig(seed=seed, time_scale=time_scale, fontpack=fontpack,
                      bridges=[BridgeSpec() for _ in range(bridges)], tags=tag_specs, assignments=assignments,

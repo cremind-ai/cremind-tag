@@ -2,14 +2,16 @@
 
 - :class:`Advert` is the tag's legacy advertising payload (Flags + Manufacturer
   Specific Data, §5.1), encoded to its on-air AD bytes and parsed back by the
-  scanner.
+  scanner. A v2 tag sends ``ver`` 2 with the ``SETUP``/``OWNED`` flags
+  (connect-setup.md 7.1); a v1 bridge parses only ``ver`` 1.
 - :class:`Air` hands every advertisement to the bridges that are scanning (a
   bridge whose mesh is suspended is not), and connects a central to a tag that is
   inside its advertising window: the connection completes at the tag's next
   advertising event, or fails after the attempt timeout.
 - :class:`GattLink` is one connection: ATT values in each direction (the CAPS
   read, CTRL writes/indications, DATA writes without response, STATUS
-  notifications) and a disconnect that either side can trigger. Values are at
+  notifications; v2: the IDENT read, PAIR writes/indications) and a disconnect
+  that either side can trigger. Values are at
   most ``ATT_VALUE_MAX`` bytes (ATT MTU 23), so the real fragmentation layer runs
   on every message. Connection-event pacing is applied by the bridge (at most 4
   records per connection event, §5.2 step 8).
@@ -32,11 +34,14 @@ from ..protocol.ids import ATT_VALUE_MAX, MESH_COMPANY_ID, TAG_ADV_INTERVAL_MS, 
 from .core import SimClock
 
 ADV_VERSION = 1
+ADV_VERSION_V2 = 2  # a v2 tag (connect-setup.md 7.1): same layout, new flag bits
 _MSD = struct.Struct("<HBIBH")  # company, ver, tag_id, flags, disp_rev
 
 ADV_FLAG_RESULT_PENDING = 0x01
 ADV_FLAG_LOW_BATTERY = 0x02
 ADV_FLAG_UNKNOWN_STATE = 0x04
+ADV_FLAG_SETUP = 0x08  # v2: unowned or released, pairing possible
+ADV_FLAG_OWNED = 0x10  # v2: owned
 
 
 class LinkLost(ConnectionError):
@@ -52,14 +57,15 @@ class Advert:
     tag_id: int
     flags: int
     disp_rev: int  # low 16 bits of the displayed revision
+    version: int = ADV_VERSION  # the MSD ``ver`` byte: 1, or 2 for a v2 tag
 
     def to_bytes(self) -> bytes:
-        msd = _MSD.pack(MESH_COMPANY_ID, ADV_VERSION, self.tag_id, self.flags, self.disp_rev & 0xFFFF)
+        msd = _MSD.pack(MESH_COMPANY_ID, self.version, self.tag_id, self.flags, self.disp_rev & 0xFFFF)
         return bytes([2, 0x01, 0x06, len(msd) + 1, 0xFF]) + msd
 
     @classmethod
-    def parse(cls, data: bytes) -> Advert | None:
-        """Our advertisement, or ``None`` for anything else."""
+    def parse(cls, data: bytes, versions: tuple[int, ...] = (ADV_VERSION,)) -> Advert | None:
+        """Our advertisement of one of ``versions`` (a v1 bridge knows only 1), or ``None`` for anything else."""
         pos = 0
         while pos + 1 < len(data):
             length = data[pos]
@@ -68,8 +74,8 @@ class Advert:
             ad_type, body = data[pos + 1], data[pos + 2 : pos + 1 + length]
             if ad_type == 0xFF and len(body) == _MSD.size:
                 company, version, tag_id, flags, disp_rev = _MSD.unpack(body)
-                if company == MESH_COMPANY_ID and version == ADV_VERSION:
-                    return cls(tag_id, flags, disp_rev)
+                if company == MESH_COMPANY_ID and version in versions:
+                    return cls(tag_id, flags, disp_rev, version)
             pos += 1 + length
         return None
 

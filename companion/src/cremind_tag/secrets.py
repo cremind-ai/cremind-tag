@@ -221,6 +221,24 @@ def tag_key(tag_id: int) -> str:
     return f"tag:{tag_id:08X}"
 
 
+TAG_ROOT_PREFIX = "tagroot:"
+V2_KEY_LEN = 32
+
+
+def tag_root_key(tag_id: int) -> str:
+    return f"{TAG_ROOT_PREFIX}{tag_id:08X}"
+
+
+def _key_bytes(value: str, what: str) -> bytes:
+    try:
+        raw = bytes.fromhex(value)
+    except ValueError:
+        raise SecretStoreError(f"the {what} is corrupt") from None
+    if len(raw) != V2_KEY_LEN:
+        raise SecretStoreError(f"the {what} has the wrong length")
+    return raw
+
+
 def credential_key(name: str) -> str:
     return f"credential:{name}"
 
@@ -304,8 +322,49 @@ class SecretStore:
         return self.backend.delete(tag_key(tag_id))
 
     def k_epoch(self, tag_id: int, epoch: int, ref: str | None = None) -> bytes:
-        """``K_epoch`` for ``(tag, epoch)`` (docs/protocol.md §5.4); never persisted."""
+        """``K_epoch`` for ``(tag, epoch)`` (docs/protocol.md §5.4); never persisted. A v2 tag's reference
+        names its operational root, and the key is ``K_epoch`` v2 (docs/connect-setup.md §3.5)."""
+        if ref is not None and self._check_ref(ref).startswith(TAG_ROOT_PREFIX):
+            from .secure.identity import k_epoch_v2
+
+            return k_epoch_v2(self.get_tag_root(tag_id, ref), tag_id, epoch)
         return derive_k_epoch(self.get_tag_secret(tag_id, ref), tag_id, epoch)
+
+    # -- v2 keys (docs/connect-setup.md §3.5) -------------------------------------------
+
+    def set_tag_root(self, tag_id: int, root: bytes) -> str:
+        """Store a v2 tag's operational root (32 bytes); returns the reference kept as its ``secret_ref``."""
+        if len(root) != V2_KEY_LEN:
+            raise SecretStoreError(f"a tag root must be {V2_KEY_LEN} bytes")
+        key = tag_root_key(tag_id)
+        self.backend.set(key, root.hex())
+        log.info("secrets: stored the root of tag %08X", tag_id)
+        return self.ref(key)
+
+    def get_tag_root(self, tag_id: int, ref: str | None = None) -> bytes:
+        key = self._check_ref(ref) if ref is not None else tag_root_key(tag_id)
+        value = self.backend.get(key)
+        if value is None:
+            raise SecretNotFoundError(f"no root for tag {tag_id:08X} in {self.backend.describe()}")
+        return _key_bytes(value, f"root of tag {tag_id:08X}")
+
+    def delete_tag_root(self, tag_id: int) -> bool:
+        return self.backend.delete(tag_root_key(tag_id))
+
+    def set_key(self, name: str, value: bytes) -> str:
+        """A named 32-byte key (``mk:<device_id>``, ``staged:<…>``); returns its reference."""
+        if len(value) != V2_KEY_LEN:
+            raise SecretStoreError(f"key {name} must be {V2_KEY_LEN} bytes")
+        key = f"key:{name}"
+        self.backend.set(key, value.hex())
+        return self.ref(key)
+
+    def get_key(self, name: str) -> bytes | None:
+        value = self.backend.get(f"key:{name}")
+        return None if value is None else _key_bytes(value, f"key {name}")
+
+    def delete_key(self, name: str) -> bool:
+        return self.backend.delete(f"key:{name}")
 
     # -- connector credentials -------------------------------------------------
 

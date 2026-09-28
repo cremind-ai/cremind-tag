@@ -97,6 +97,8 @@ class DaemonOptions:
     clock: Callable[[], float] = time.time
     gateway_options: dict[str, Any] = field(default_factory=dict)
     write_status: bool = True
+    gateway_hw_id: str | None = None
+    """A fixed inventory id for the gateway (a protocol v2 worker: ``gw-<device_id>``)."""
 
     @classmethod
     def from_config(cls, config: Config, *, gateway_url: str | None = None, fontpack: Path | None = None,
@@ -160,6 +162,9 @@ class DaemonService:
         self.hardware: HardwareWorker | None = None
         self.senders: dict[str, OutboxSender] = {}
         self.clients: list[ConnectorClient] = []
+        self.agent: Any = None
+        """A Cremind Connect worker's agent (:class:`cremind_tag.connect.agent.ConnectAgent`): runs
+        ``run_operation`` commands and adds live generations to heartbeats; ``None`` elsewhere."""
         self.failed_credentials: dict[str, str] = {}
         self.credential_warnings: dict[str, str] = {}  # TLS problems, retried slowly
         self._tasks: list[asyncio.Task[Any]] = []
@@ -414,9 +419,12 @@ class DaemonService:
         """Every session: the gateway's id (from its USB serial number now that the port is open) and row."""
         if self.gateway_url is None:
             return
-        from ..cli._hardware import gateway_hw_id
+        if self.options.gateway_hw_id is not None:
+            self.gateway_hw_id = self.options.gateway_hw_id
+        else:
+            from ..cli._hardware import gateway_hw_id
 
-        self.gateway_hw_id = gateway_hw_id(self.gateway_url)
+            self.gateway_hw_id = gateway_hw_id(self.gateway_url)
         hello = event.hello
         board = hello.caps.board if isinstance(hello.caps.board, int) else None
         self.db.upsert_gateway(GatewayRecord(self.gateway_hw_id, port=self.gateway_url, boot_id=hello.boot_id,

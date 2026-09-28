@@ -23,7 +23,8 @@ the scheduler's comparisons):
 - ``revisions`` — every composed screen: layout, digests, the deliveries it
   shows, the ``op_id`` persisted BEFORE the ``DELIVER_LAYOUT`` that uses it,
   attempts and the retry time (v3: ``not_found_count``, consecutive
-  ``EVT_RESULT NOT_FOUND`` answers, docs/protocol.md §10).
+  ``EVT_RESULT NOT_FOUND`` answers, docs/protocol.md §10; v5: the
+  ``setup_code`` purpose, a removed tag's last screen).
 - ``outbox`` — receipts, accepted acknowledgements, previews and command
   results, kept until Cremind confirms them.
 - ``commands`` — hardware commands, persisted before they are claimed; the
@@ -36,6 +37,7 @@ the scheduler's comparisons):
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from ..store.db import Database, Migration
@@ -214,10 +216,63 @@ ALTER TABLE tag_views ADD COLUMN epoch_floor INTEGER NOT NULL DEFAULT 0
     CHECK (epoch_floor BETWEEN 0 AND 4294967295);
 """
 
+_REVISION_COLUMNS = (
+    "tag_id, revision, epoch, bridge_addr, fontpack_id, purpose, layout, layout_digest, content_key, frame_digest,"
+    " delivery_ids, pending_delivery_ids, preview_png, op_id, state, last_stage, attempts, uncertain_count,"
+    " next_attempt_ts, last_status, detail, timing, created_at, created_ts, sent_at, sent_ts, finished_at,"
+    " not_found_count")
+
+
+def _v5_setup_code_purpose(conn: sqlite3.Connection) -> None:
+    """Revisions may have the ``setup_code`` purpose (a removed tag's last screen, docs/connect-setup.md §5.1).
+    SQLite cannot change a CHECK constraint in place: the table is rebuilt and its rows copied (no foreign
+    key refers to it). Statement by statement, so it stays inside the migration's transaction."""
+    conn.execute("""
+CREATE TABLE revisions_v5 (
+    tag_id               INTEGER NOT NULL,
+    revision             INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 4294967295),
+    epoch                INTEGER NOT NULL,
+    bridge_addr          INTEGER,
+    fontpack_id          TEXT,
+    purpose              TEXT NOT NULL DEFAULT 'screen'
+                         CHECK (purpose IN ('screen', 'blank', 'identify', 'refresh', 'setup_code')),
+    layout               BLOB NOT NULL,
+    layout_digest        TEXT NOT NULL,
+    content_key          TEXT NOT NULL,
+    frame_digest         TEXT,
+    delivery_ids         TEXT NOT NULL DEFAULT '[]',
+    pending_delivery_ids TEXT NOT NULL DEFAULT '[]',
+    preview_png          BLOB,
+    op_id                INTEGER NOT NULL,
+    state                TEXT NOT NULL
+                         CHECK (state IN ('pending', 'sent', 'displayed', 'superseded', 'failed', 'uncertain')),
+    last_stage           TEXT,
+    attempts             INTEGER NOT NULL DEFAULT 0,
+    uncertain_count      INTEGER NOT NULL DEFAULT 0,
+    next_attempt_ts      REAL NOT NULL DEFAULT 0,
+    last_status          TEXT,
+    detail               TEXT,
+    timing               TEXT,
+    created_at           TEXT NOT NULL,
+    created_ts           REAL NOT NULL,
+    sent_at              TEXT,
+    sent_ts              REAL,
+    finished_at          TEXT,
+    not_found_count      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tag_id, revision)
+)""")
+    conn.execute(f"INSERT INTO revisions_v5 ({_REVISION_COLUMNS}) SELECT {_REVISION_COLUMNS} FROM revisions")
+    conn.execute("DROP TABLE revisions")
+    conn.execute("ALTER TABLE revisions_v5 RENAME TO revisions")
+    conn.execute("CREATE INDEX ix_revisions_state ON revisions(state, next_attempt_ts)")
+    conn.execute("CREATE UNIQUE INDEX ix_revisions_op ON revisions(op_id)")
+
+
 QUEUE_MIGRATIONS: tuple[Migration, ...] = (
     Migration(2, "delivery_queue", _V2_QUEUE),
     Migration(3, "revision_not_found_count", _V3_NOT_FOUND),
     Migration(4, "tag_view_epoch_floor", _V4_EPOCH_FLOOR),
+    Migration(5, "revision_setup_code_purpose", _v5_setup_code_purpose),
 )
 """The queue's schema versions (append new ones; never edit an applied migration)."""
 

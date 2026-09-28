@@ -289,6 +289,51 @@ def test_removed_bridge_is_locked_until_local_recommission() -> None:
     assert _pair(auth, br, w, SetupPayload.unpack(fields["data"]).secret, bytes([7]) * 32)[0] == Status.OK
 
 
+def test_status_names_the_owner_only_to_the_pinned_controller() -> None:
+    auth, tag, w = Authority.new(), _device(NodeRole.TAG), Worker()
+    assert tag.keys.factory_secret is not None
+    assert _pair(auth, tag, w, tag.keys.factory_secret, bytes([3]) * 32)[0] == Status.OK
+    _, mine = Worker.call(tag, w.connect(tag, Link.TUNNEL), SerialMsg.STATUS, {})
+    assert mine["owner"] == auth.owner and mine["controller_match"] is True
+    _, foreign = Worker.call(tag, Worker().connect(tag, Link.TUNNEL), SerialMsg.STATUS, {})
+    assert "owner" not in foreign and foreign["controller_match"] is False
+    assert foreign["authority_id"] == identity.authority_id(auth.pub)  # which server: still told
+
+
+def test_maintenance_and_recommission_rules() -> None:
+    auth, br, w = Authority.new(), _device(NodeRole.BRIDGE), Worker()
+    assert br.keys.factory_secret is not None
+    # An unowned bridge keeps its label: nothing to recommission.
+    ch = w.connect(br, Link.SERIAL)
+    assert Worker.call(br, ch, SerialMsg.RECOMMISSION, {})[0] == Status.INVALID
+    assert br.record.state == OwnerState.UNOWNED
+    mk = bytes([5]) * 32
+    assert _pair(auth, br, w, br.keys.factory_secret, mk)[0] == Status.OK
+    # MAINT_AUTH is for the USB maintenance port only, never over a mesh tunnel.
+    ch = w.connect(br, Link.TUNNEL)
+    assert Worker.call(br, ch, SerialMsg.MAINT_AUTH, {"proof": ch.maint_proof(mk)})[0] == Status.NOT_OWNER
+
+
+def test_rekey_abandons_a_pending_tag_release() -> None:
+    auth, tag, old = Authority.new(), _device(NodeRole.TAG), Worker()
+    assert tag.keys.factory_secret is not None
+    assert _pair(auth, tag, old, tag.keys.factory_secret, bytes([3]) * 32)[0] == Status.OK
+    ch = old.connect(tag, Link.TUNNEL)
+    grant, sig = auth.grant(tag, GrantOp.RELEASE, old.pub, _challenge(tag, ch))
+    assert Worker.call(tag, ch, SerialMsg.RELEASE, {"grant": grant, "sig": sig, "release_stage": 0})[0] == Status.OK
+    # A recovery rekeys the tag onto a new computer...
+    new = Worker()
+    ch2 = new.connect(tag, Link.TUNNEL)
+    grant, sig = auth.grant(tag, GrantOp.REKEY, new.pub, _challenge(tag, ch2))
+    status, _ = Worker.call(tag, ch2, SerialMsg.REKEY, {"grant": grant, "sig": sig, "op_key": bytes([9]) * 32})
+    assert status == Status.OK and tag.record.pending_override is None
+    # ...so the old computer can no longer finish its release, even with a valid grant for itself.
+    ch = old.connect(tag, Link.TUNNEL)
+    grant, sig = auth.grant(tag, GrantOp.RELEASE, old.pub, _challenge(tag, ch))
+    status, _ = Worker.call(tag, ch, SerialMsg.RELEASE, {"grant": grant, "sig": sig, "release_stage": 1})
+    assert status == Status.INVALID and tag.record.state == OwnerState.OWNED
+
+
 def test_generation_never_rewinds_through_records() -> None:
     rec = OwnerRecord(OwnerState.OWNED, 7, b"a" * 32, b"o" * 16, b"c" * 32, b"k" * 32)
     assert OwnerRecord.from_json(rec.to_json()) == rec

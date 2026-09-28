@@ -39,10 +39,12 @@ cremind-tag mesh nodes
 | `--state FILE` | – | JSON state: the gateway CDB, bridge assignments and delivery history, tag NVS |
 | `--assign/--no-assign` | assign | assign tags round-robin to the bridges at epoch 1 |
 | `--register` | off | add the simulated gateway, bridges and tags (with their secrets) to the local inventory and secret store, so `tag assign`, `tag command` and the daemon work against the simulator |
+| `--protocol` | 1 | 2: factory-fresh protocol v2 hardware for Cremind Connect ([Protocol v2](#protocol-v2)) |
 
 `--register` writes simulated secrets into the configured secret store (the OS
 keyring by default). Use a separate data directory and `CREMIND_TAG_SECRETS_BACKEND=file`
-if that is unwanted.
+if that is unwanted. It never registers v2 hardware (v2 devices are paired, not
+enrolled).
 
 Bridge maintenance ports accept `cremind-tag bridge ... --url socket://127.0.0.1:7778`
 (font installation, `FONT_STATUS`, `FLASH_TEST`).
@@ -235,6 +237,197 @@ firmware should do the same unless the protocol document says otherwise.
 - Security: nonces come from seeded streams, so a simulated session is
   predictable by design.
 
+## Protocol v2
+
+The simulator runs protocol v2 ([connect-setup.md](connect-setup.md)) so a Cremind
+Connect worker can be tested end to end without hardware. v1 stays the default
+and is unchanged; v2 is a per-world and per-device switch.
+
+```bash
+cremind-tag sim run --protocol 2 --bridges 2 --tags 3 --state sim-v2.json --pack path/to/pack.ctfp
+```
+
+starts an unowned gateway, unprovisioned unowned bridges and unowned tags, all
+as they leave the factory, and prints each bridge's and tag's **setup code** and
+QR text (their labels; also under `"setup_codes"` in the state file, which is
+written at start). Nothing is assigned: a worker claims the gateway, pairs the
+bridges and tags from their codes and assigns the tags itself. In v2 mode
+`--bridges` and `--unprovisioned` both add factory-fresh bridges and
+`--assign` has no effect.
+
+Programmatic use:
+
+```python
+from cremind_tag.sim import BridgeSpec, SimConfig, Simulator, TagSpec
+from cremind_tag.sim.harness import make_config
+
+config = SimConfig(seed=7, time_scale=300, protocol=2, fontpack=pack,
+                   bridges=[BridgeSpec(provisioned=False)],            # BridgeSpec(protocol=1): a v1 bridge
+                   tags=[TagSpec.generate(7, 0, protocol=2)])           # identity + label from the seed
+config = make_config(fontpack=pack, tags=2, bridges=1, protocol=2)      # the same, shorter
+async with Simulator(config) as sim:
+    sim.setup_codes()        # [{role, name, device_id, short_id, owner_state, code, qr}, ...]
+    sim.gateway_identity()   # {device_id, owner_state, gen}
+    sim.gateway.secure       # the reference SecureDevice (secure.device); .record is the ownership record
+```
+
+`SimConfig.protocol = 2` makes the gateway a v2 gateway and every bridge whose
+`BridgeSpec.protocol` is `None` a v2 bridge; a tag is v2 when its `TagSpec` is
+(`protocol=2`, with its `DeviceKeys`; its `tag_id` is its `short_id` and it has
+no enrollment secret, so it cannot be pre-assigned). `BridgeSpec(labelled=False)`
+is a bridge that left the factory without a setup secret (`FACTORY_SETUP`
+stores one). `tests/sim/v2host.py` is a minimal host-side v2 driver (the
+worker's side of every session is `secure.channel.SecureChannel`); the
+`tests/sim/test_v2_*.py` scenarios show every flow.
+
+### What is modelled
+
+Every v2 device runs the reference secure endpoint
+(`cremind_tag.secure.device.SecureDevice`): the ownership record, single-use
+challenges, Noise IK as responder, the grant rules, setup, root and maintenance
+proofs, the release stages. The simulator adds the links around it.
+
+**Serial v2 (gateway, bridge maintenance port).** Plaintext answers only for
+`HELLO`, `PING`, `IDENTIFY`, `SECURE_OPEN`, `SECURE_DATA` (plus, on an unowned
+bridge, its maintenance catalogue); every other plaintext request answers
+`AUTH_REQUIRED`. `SECURE_DATA` frames carry one sealed secure message
+(`type | flags | request_id | CBOR`) each, in both directions; answers and
+events are sealed right before they are written, so the Noise nonces follow the
+wire order, and a message queued for a replaced session is dropped. A frame that
+does not decrypt (or arrives without a session) drops the session and answers a
+plaintext `SECURE_DATA` response `{status: AUTH_REQUIRED}`. `HELLO` and a reopened
+port drop the session; after `SECURE_OPEN` the retained events are re-sent inside
+the new session.
+
+**Gateway.** The §4.2 access table inside a session: unowned: `INFO`, `PING`,
+`STATUS`, `CLAIM`; owned and the pinned controller: everything (v1 catalogue and
+v2); owned and another controller: `INFO`, `PING`, `STATUS`, `RECOVER`; anything
+else `NOT_OWNER`. `CLAIM`, `RECOVER`, `RELEASE` and `STATUS` on the reference
+device; a lost `CLAIM` answer is reconciled from `STATUS`. `RELEASE` wipes the
+CDB, the assignments and the retained events, keeps the generation and reboots
+the gateway once its answer is out. `PROVISION` of a v2 bridge needs
+`static_oob = identity.static_oob(setup secret, device_id)`. `DISCOVER` → mesh
+`DISCOVER` → `EVT_DISCOVERED`. Tunnels: `TUNNEL_OPEN` → mesh `TUNNEL_OPEN`;
+`TUNNEL_SEND` messages as ≤ 150-byte `TUNNEL_DATA` fragments under the
+one-outstanding segmented-send rule; `TUNNEL_UP` fragments reassembled into
+`EVT_TUNNEL` `OPEN` (the endpoint's `ident2`), `DATA`, `CLOSED {status}`. Where the
+protocol text leaves a choice, the simulated gateway follows the gateway
+firmware (`apps/gateway/src/core/gw_secure.c`, `gw_tunnel.c`).
+
+**Bridge.** The mesh UUID is the `device_id`; the unprovisioned beacon carries OOB
+information "on box" (`0x0800`); `CAPS2_STATUS` follows `CAPS_STATUS` (the
+inventory's and `EVT_BRIDGE_INFO`'s `caps` gain `device_id`, `gen`,
+`owner_state`). One tunnel at a time: `tag_id` 0 ends at the bridge's own
+secure endpoint (`ident2` first, then `PairKind` messages: `PAIR` stores `mk`,
+`REKEY` moves the controller and `mk`, `RELEASE` answers, then the bridge leaves
+the mesh, locked); any other `tag_id` is relayed to the tag, which the bridge
+connects to at its next advertisement with the §5.2 initiation rules (its own
+mesh sends first, the suspend rate limit, a bounded connection attempt), reading
+`IDENT` and relaying `PAIR` both ways. Discovery reports v2 tags advertising
+setup mode. Maintenance port v2: an unowned or released bridge answers the v1
+catalogue and `FACTORY_SETUP` in plaintext; an owned one answers `FONT_*`,
+`FLASH_TEST`, `INFO` and `REBOOT` only in a session that passed `MAINT_AUTH`;
+`RECOMMISSION` (USB only; owned: `MAINT_AUTH` and a `MAINT` grant; released: no
+grant) returns a fresh setup payload and leaves the mesh.
+
+**Tag.** `tag_id = short_id`; advertising `ver` 2 with `SETUP` (unowned,
+released) or `OWNED`; `IDENT` with a challenge drawn once per connection; `PAIR`
+(fragmented like `CTRL`, ≤ `PAIR_MSG_MAX`) running the reference endpoint over
+`Link.TUNNEL`; frame sessions on `K_epoch` v2 from the root (none before a
+pairing: a tag shows nothing until a worker pairs and assigns it); `REKEY` and
+`RELEASE` stage 1 make every older key fail; `RELEASE` stage 0/1 as the reference;
+three wrong setup proofs in a row end the session and skip the next wake window.
+
+### Rules the simulator had to choose (v2)
+
+- **SECURE_DATA framing.** Every sealed frame, host or device, is
+  `type SECURE_DATA, flags 0, {data}`, `request_id 0` (the device accepts any outer
+  `request_id` from the host and ignores it); the answer to a sealed request is the
+  device's own sealed frame (inner flags `RESPONSE`, the inner `request_id`
+  echoed), a sealed event has inner flags `EVENT`. The only outer
+  `RESPONSE`-flagged `SECURE_DATA` frame is the plaintext failure answer
+  `{status: AUTH_REQUIRED}` (no session, or the frame did not decrypt: the session
+  is gone). A sealed message shorter than a secure-message header, or one the host
+  flags `RESPONSE` or `EVENT`, gets no answer (the session stays).
+- **Events** flow only into a session of the pinned controller of an owned
+  gateway (another controller's session could read the owner's results); an
+  unowned or foreign session gets answers only. After `CLAIM` or `RECOVER` the
+  retained events start flowing in that same session. `EVENT_ACK` is sealed.
+- `SECURE_OPEN` with a message 1 that does not verify answers `AUTH_FAILED`; any
+  previous session is gone either way. Inside a gateway session the bridge and
+  tag messages (`PAIR`, `REKEY`, `MAINT_AUTH`, `RECOMMISSION`, `FACTORY_SETUP`) and
+  the link messages answer `UNSUPPORTED`, before the access table.
+- **Provisioning a bridge** fails with **`SECURITY_CONFIG`** in `EVT_PROVISIONED`
+  (`addr` 0) for a missing or wrong `static_oob` and for a bridge that offers no
+  static OOB (v1); the bridge stays unprovisioned and keeps beaconing. The static
+  OOB derives from the secret the bridge pairs with now: the fresh one a
+  `RECOMMISSION` armed, else the label's (also for an owned bridge that a
+  `REMOVE_NODE` took out of the mesh). A locked bridge (released, awaiting
+  `RECOMMISSION`) or one without a setup secret sends no beacon, and `PROVISION`
+  of it ends `NOT_FOUND`.
+- **Tunnels at the gateway.** `TUNNEL_OPEN` answers `OK` with the `tunnel` id
+  (idempotent by `op_id`, the id remembered) and `EVT_TUNNEL OPEN` follows when the
+  endpoint answers; `duration_s` is 1..255 (the mesh `timeout_s` byte); one tunnel
+  per bridge and at most `MAX_BRIDGES` (`BUSY`, not remembered). `TUNNEL_SEND`
+  takes one message at a time: `OK` once taken, `BUSY` while the previous one is
+  still being sent, `NOT_FOUND` for an unknown tunnel, `INVALID` for an empty and
+  `TOO_LARGE` for a longer than `TUNNEL_MSG_MAX` message (a message may go before
+  the `OPEN` event: the bridge holds it until the tag is connected).
+  `TUNNEL_CLOSE` answers `OK` with no event and sends the mesh `TUNNEL_CLOSE` at
+  once (a message still in flight is dropped). The gateway ends a tunnel itself
+  (`EVT_TUNNEL CLOSED TIMEOUT` and a mesh `TUNNEL_CLOSE`) when a fragment cannot be
+  sent or nothing moved for `duration_s` + 5 s; a mesh `TUNNEL_OPEN` that cannot
+  be sent is left to that timer.
+- **Tunnels at the bridge.** A new tunnel is closed `BUSY` (`TUNNEL_UP` with the
+  close bit) while the bridge holds one or a tag session runs, and no tag session
+  starts while a tunnel is open (advert decision `busy_tunnel`). Closing statuses: `TIMEOUT` (idle for `timeout_s`),
+  `DISCONNECTED` (the tag dropped the link), `OK` (the worker's `PairKind.CLOSE`, a
+  `RELEASE`), `INVALID` (a message a tag cannot take), `UNSUPPORTED` (a tag without
+  `IDENT`). A mesh `TUNNEL_CLOSE` ends it silently.
+- **Endpoint `PairKind.CLOSE`** (up the tunnel, as a `DATA` message): `AUTH_FAILED`
+  (a handshake that does not verify), `AUTH_REQUIRED` (a transport message
+  without a session or that does not decrypt; the session is gone), `INVALID`
+  (malformed), `LOCKED` (a tag's third wrong proof, then it disconnects). The
+  tunnel stays open after an endpoint `CLOSE`: the worker may handshake again. A
+  worker's `CLOSE` ends the session and the tunnel: the bridge closes it itself
+  (`OK`; a tag drops the link), so a `TUNNEL_CLOSE` right behind it may find the
+  tunnel gone already (`NOT_FOUND`, harmless).
+- **Sessions are per link on a bridge**: its USB port and its tunnel endpoint each
+  keep one; the challenge is the device's. `MAINT_AUTH` and `RECOMMISSION` over a
+  tunnel answer `NOT_OWNER` (USB only).
+- **DISCOVER**: `duration_s` 0 stops a discovery, above `DISCOVER_MAX_S` is
+  `INVALID`; `bridge` 0 is every configured bridge (`ACCEPTED` even when there is
+  none). The gateway keeps a window per bridge (`duration_s` + 2 s) and drops a
+  `DISCOVERED` outside it. A bridge reports a tag at most once per
+  `DISCOVERED_MIN_INTERVAL_MS` and never one it has an assignment for; the gateway
+  applies the interval again per (bridge, tag).
+- **Gateway `RELEASE`**: the CDB, the assignments and the retained events are
+  gone before the answer; after it the gateway reboots (new `boot_id`, the port
+  re-enumerates, every RAM state ends), as the firmware does. The bridges of the
+  old network keep their mesh state: orphans whose mesh messages the gateway
+  ignores and whose addresses it skips when provisioning.
+- **Bridge maintenance port**: `PING` is always answered; `FACTORY_SETUP` answers
+  `LOCKED` once a secret is stored, `NOT_OWNER` on an owned bridge, `INVALID` for a
+  secret that is not 10 bytes, and works in plaintext or inside a session.
+- **Tags**: a connection is either a frame session or a pairing session, never
+  both; the pairing session ends with the connection. A frame session with a tag
+  that holds no root fails `AUTH_FAILED` (it counts towards the v1 three-failures
+  pause). A tag `RELEASE` keeps the display record and the stored epoch (epochs
+  only grow; a new owner's first assignment must exceed it, which `STALE_EPOCH`
+  reports).
+- `REKEY` and `RELEASE` of a bridge or tag are accepted from any controller whose
+  grant is valid (the reference device's rule; recovery rekeys with a new
+  controller). The v2 firmware version reported is 0.2.0.
+
+### What is not modelled (v2)
+
+The mesh provisioning protocol itself (the static OOB value is compared, not
+run through the ECDH/confirmation exchange); loss or reordering of tunnel
+fragments; the firmware's secure-heap and RAM budgets; physical factory reset;
+record CRC corruption and the generation floor; the tag's UICR identity blob.
+Challenges, fresh setup secrets and Noise ephemerals come from seeded streams
+(a simulated session is predictable by design).
+
 ## State file
 
 `--state FILE` (or `SimConfig.state_file`) keeps, as JSON: the gateway CDB and
@@ -242,3 +435,10 @@ its assignment bookkeeping, each bridge's provisioning, assignment table (with
 `K_epoch`) and delivery history, and each tag's NVS (display record and stored
 epoch). It is written after provisioning changes and on exit, and read at start.
 Font packs are not stored; they are installed again from `--pack`.
+
+For v2 devices each entry also has `"v2": {"keys", "owner"}` (the identity key
+and label secret, and the ownership record) and the file has
+`"setup_codes"` (the current labels, informational, never read back). A v2 world
+writes the file at start, and again after every ownership change. A stored
+bridge or tag identity is only adopted by the same device; a stored gateway
+identity replaces the seeded one.

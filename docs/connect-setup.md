@@ -187,7 +187,10 @@ proof_d = HMAC(k_setup, "D" ‖ h ‖ proof_s)[0:16]             # device -> wor
 `h` is the Noise handshake hash. `proof_s` binds the physical label to the
 proposed authority, owner, controller and this session; `proof_d` proves the
 device on the other end holds the label's secret. Three wrong proofs in a row
-make a tag skip its next wake window (anti-brute-force pacing, as v1).
+make a tag skip its next wake window (anti-brute-force pacing, as v1). A
+bridge needs no pacing of its own: its `PAIR` endpoint is reachable only
+through a mesh it joined with the label's static OOB (§3.4), and `MAINT_AUTH`
+only over its USB port.
 
 ### 3.4 Mesh static OOB (bridges)
 
@@ -199,7 +202,9 @@ Bridges and gateways build with `CONFIG_BT_MESH_OOB_AUTH_REQUIRED=y` and
 `CONFIG_BT_MESH_ECDH_P256_HMAC_SHA256_AES_CCM=y`; the bridge offers only
 static OOB (32 bytes), the gateway provisions only with the value the worker
 supplies, and any other authentication method is refused. There is no
-fallback to unauthenticated provisioning.
+fallback to unauthenticated provisioning. A provisioning that fails its
+authentication (a wrong or missing static OOB) ends `EVT_PROVISIONED
+{status: SECURITY_CONFIG, addr: 0}` — final, never retried as a timeout.
 
 ### 3.5 Operational keys
 
@@ -271,7 +276,7 @@ so corruption can never rewind a generation.
 | Gateway, owned, session from the pinned controller | everything (v1 catalogue + v2) |
 | Gateway, owned, other controller | `INFO`, `PING`, `STATUS`, `RECOVER` |
 | Bridge/tag, unowned or released | `STATUS`, `PAIR` |
-| Bridge/tag, owned, pinned controller (bridge) / any controller with a grant (tag) | `STATUS`, `REKEY`, `RELEASE`, `MAINT_AUTH` (bridge USB), `RECOMMISSION` (bridge, after `MAINT_AUTH`) |
+| Bridge/tag, owned, any controller with a grant (the grant names the controller; a recovery rekeys from a new one) | `STATUS`, `REKEY`, `RELEASE`; bridge USB maintenance port only: `MAINT_AUTH`, then `RECOMMISSION` |
 
 Everything else answers `AUTH_REQUIRED` (no session) or `NOT_OWNER` (session,
 not permitted). A v1 request sent in plaintext to a v2 gateway answers
@@ -301,7 +306,8 @@ unchanged. New plaintext messages:
 | 0x07 | `SECURE_OPEN` | `{data: noise msg1}` → `{status, data: noise msg2}`; replaces any session |
 | 0x08 | `SECURE_DATA` | `{data: ciphertext}` carrying one secure message (§3.2), both directions |
 
-`challenge` is fresh per `IDENTIFY`, valid until the next `IDENTIFY`, grant check
+`challenge` is drawn fresh by every `IDENTIFY`, `STATUS` and `IDENT` read,
+valid until the next draw, grant check
 or reboot. `authority_id` is present when owned. `HELLO` drops the secure
 session; after `SECURE_OPEN` succeeds the device re-sends its retained events
 inside it. The outer frame of `SECURE_DATA` has `request_id = 0`, `flags = 0`;
@@ -314,12 +320,12 @@ the inner header is authoritative. Credits count outer frames.
 | 0x09 | `CLAIM` | `{grant, sig}` → `{status, gen}` | gateway |
 | 0x0A | `RECOVER` | `{grant, sig}` → `{status, gen}` | gateway |
 | 0x0B | `RELEASE` | `{grant, sig, release_stage}` → `{status, gen, data?}` | all |
-| 0x0C | `STATUS` | `{}` → `{status, owner_state, gen, authority_id?, owner?, controller_match, challenge, root_proof?}` | all |
+| 0x0C | `STATUS` | `{}` → `{status, owner_state, gen, authority_id?, owner?, controller_match, challenge, root_proof?}`; `owner` (a profile id) only to the pinned controller | all |
 | 0x0D | `PAIR` | `{grant, sig, proof, op_key}` → `{status, gen, proof}` | bridge (`op_key` = `mk`), tag (`op_key` = `root`) |
 | 0x0E | `REKEY` | `{grant, sig, op_key}` → `{status, gen}` | bridge (new `mk`, new controller), tag (new `root`) |
-| 0x0F | `MAINT_AUTH` | `{proof}` → `{status}` | bridge maintenance port |
-| 0x17 | `RECOMMISSION` | `{grant?, sig?}` → `{status, gen, data}` | bridge maintenance port only: owned (after `MAINT_AUTH`, a `MAINT` grant) or released; leaves the mesh, returns a fresh setup payload |
-| 0x66 | `FACTORY_SETUP` | `{data}` → `{status}` | bridge maintenance port, unowned, no secret yet: store the 10-byte setup secret (`LOCKED` afterwards) |
+| 0x0F | `MAINT_AUTH` | `{proof}` → `{status}` | bridge maintenance port only (`NOT_OWNER` in a tunnel session) |
+| 0x17 | `RECOMMISSION` | `{grant?, sig?}` → `{status, gen, data}` | bridge maintenance port only: owned (after `MAINT_AUTH`, a `MAINT` grant) or released; leaves the mesh, returns a fresh setup payload. An unowned bridge answers `INVALID` (its label stays valid) |
+| 0x66 | `FACTORY_SETUP` | `{data}` → `{status}` | bridge maintenance port (plaintext or in a session), unowned, no secret yet: store the 10-byte setup secret (`LOCKED` afterwards) |
 
 `RELEASE` on a tag is two-stage, each stage with its own grant (same
 `gen_from`, a fresh challenge): `release_stage 0` (prepare) stores a fresh
@@ -327,9 +333,14 @@ setup secret as pending for that controller and returns `data` = its setup
 payload (§2.2); the worker shows it as the tag's last screen (a QR and the
 code) through a normal delivery; `release_stage 1` (commit, same controller)
 wipes the owner, the root and assignments and makes the fresh secret the only
-one the tag accepts (`RELEASED`). A gateway `RELEASE` wipes its mesh, CDB and
-assignments (`UNOWNED`, generation kept). A bridge `RELEASE` leaves the mesh
-and **locks** pairing until it is recommissioned over local USB.
+one the tag accepts (`RELEASED`). A `REKEY` abandons a prepared release (its
+stage 1 can no longer follow). A released tag keeps its stored epoch: its next
+owner assigns at or above it — a lower epoch answers `STALE_EPOCH` with the
+stored one, and the worker assigns again above it (the root changed, so frames
+of the previous owner can never authenticate again). A gateway `RELEASE` wipes
+its mesh, CDB and assignments (`UNOWNED`, generation kept) and reboots. A
+bridge `RELEASE` leaves the mesh and **locks** pairing until it is
+recommissioned over local USB.
 
 ### 5.2 v2 operational messages (owned gateway, pinned controller)
 
@@ -337,8 +348,8 @@ and **locks** pairing until it is recommissioned over local USB.
 |---|---|---|
 | 0x11 | `PROVISION` | v2 adds `static_oob` (bstr 32, **required** for v2 bridges) |
 | 0x16 | `DISCOVER` | `{op_id, bridge (0 = all), duration_s ≤ 120, tag_id (0 = any)}` → `ACCEPTED`; `EVT_DISCOVERED`s |
-| 0x33 | `TUNNEL_OPEN` | `{op_id, bridge, tag_id (0 = the bridge itself), duration_s}` → `{status, tunnel}`; `EVT_TUNNEL`s |
-| 0x34 | `TUNNEL_SEND` | `{tunnel, data ≤ 400}` → `{status}` |
+| 0x33 | `TUNNEL_OPEN` | `{op_id, bridge, tag_id (0 = the bridge itself), duration_s}` → `{status: OK, tunnel}` (`BUSY` while the bridge holds another tunnel); `EVT_TUNNEL`s; idle tunnels close after `duration_s` + 5 s |
+| 0x34 | `TUNNEL_SEND` | `{tunnel, data ≤ 400}` → `{status}`; one message per tunnel in flight (`BUSY` until it is through the mesh: retry), `TOO_LARGE` above 400 bytes |
 | 0x35 | `TUNNEL_CLOSE` | `{tunnel}` → `{status}` |
 | 0x8A | `EVT_TUNNEL` | `{tunnel, bridge, tag_id, state (OPEN 1, DATA 2, CLOSED 3), data?, status?}` (not retained) |
 | 0x8B | `EVT_DISCOVERED` | `{bridge, tag_id, rssi, flags}` (not retained; at most one per tag and bridge per 5 s) |
@@ -350,7 +361,7 @@ a secure session.
 
 `device_id 64, ik 65, owner_state 66, gen 67, authority_id 68, challenge 69,
 grant 70, sig 71, static_oob 72, tunnel 73, state 74, proof 75, owner 76,
-controller_match 77, root_proof 78, stage 79`.
+controller_match 77, root_proof 78, release_stage 79, op_key 80`.
 
 ### 5.4 Bridge maintenance port v2
 
@@ -406,7 +417,7 @@ owned v2 tag advertises exactly as v1 otherwise.
 
 | Characteristic | Short | Props | Value |
 |---|---|---|---|
-| `IDENT` | 0x0006 | read (long) | `ident2` struct: `proto, role, device_id[16], ik[32], owner_state, gen u32, authority_id[16], challenge[16], caps (tag_caps)` |
+| `IDENT` | 0x0006 | read (long) | `ident2` struct (91 bytes): `proto, role, device_id[16], ik[32], owner_state, gen u32, authority_id[16] (zeros when unowned), challenge[16], board, fw_major, fw_minor, fw_patch` |
 | `PAIR` | 0x0007 | write, indicate | fragmented secure-endpoint messages (same fragment header as `CTRL`), ≤ `PAIR_MSG_MAX` (320) |
 
 A `PAIR` message is `kind u8 ‖ body`: `1` Noise msg1/msg2, `2` transport
@@ -629,7 +640,7 @@ and either kept (pairing completes) or left unowned.
 
 Per device binding: public identity, generation, pinned authority/owner,
 tag roots, bridge `mk`, assignments (bridge, epoch), epoch floors, font pack
-id; per worker: the controller key. Never device private identity keys,
+id. Never controller keys (a recovery installs a new one), device private identity keys,
 never connector credentials.
 
 ### 10.2 Encryption at rest
@@ -666,6 +677,8 @@ worker whose companion is in `recovering` state, once).
 ---
 
 ## 11. Cremind Connect
+
+Building, installers, signing and releases: [connect-packaging.md](connect-packaging.md).
 
 ### 11.1 Processes
 

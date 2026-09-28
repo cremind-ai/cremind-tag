@@ -265,6 +265,8 @@ class HardwareWorker:
                 devices.append({"hw_id": bridge.hw_id, "kind": "bridge", "status": "ok" if connected else "offline"})
         if svc.gateway_hw_id:
             devices.append({"hw_id": svc.gateway_hw_id, "kind": "gateway", "status": "ok" if connected else "offline"})
+        if svc.agent is not None:
+            await svc.agent.decorate_heartbeat(devices)  # live generations (a restore's reconciling)
         return {"companion": {"version": __version__, "host": socket.gethostname(), "started_at": svc.started_at},
                 "queue": {"depth": stats["depth"], "oldest_age_s": stats["oldest_age_s"]},
                 "devices": devices}

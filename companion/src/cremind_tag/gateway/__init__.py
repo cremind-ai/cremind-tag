@@ -21,6 +21,7 @@ from .events import (
     RETAINED_EVENTS,
     AssignResult,
     BridgeInfoEvent,
+    Discovered,
     GatewayEvent,
     LogEvent,
     NodeConfigured,
@@ -31,16 +32,19 @@ from .events import (
     SessionStarted,
     StageEvent,
     TagSeen,
+    TunnelEvent,
     UnknownEvent,
     UnprovBeacon,
 )
+from .link import SecureOptions, WrongDeviceError
 from .opid import OpIdGenerator, new_op_id
-from .results import Ack, BridgeInfo, Caps, DeviceInfo, HelloInfo, NodeInfo, Timing
+from .results import Ack, BridgeInfo, Caps, DeviceInfo, HelloInfo, IdentifyInfo, NodeInfo, Timing
 
 __all__ = [
-    "RETAINED_EVENTS", "Ack", "AssignResult", "BridgeInfo", "BridgeInfoEvent", "Caps", "DeviceInfo", "EventHandler",
-    "EventSubscription", "EventWaiter", "FrameTooLargeError", "GatewayClient", "GatewayDisconnected", "GatewayError",
-    "GatewayEvent", "GatewayTimeout", "HelloInfo", "LogEvent", "NodeConfigured", "NodeInfo", "NodeRemoved",
-    "OpIdGenerator", "ProtocolError", "Provisioned", "ResultEvent", "RetainedEvent", "SessionStarted", "StageEvent",
-    "StatusError", "TagSeen", "Timing", "UnknownEvent", "UnprovBeacon", "any_of", "matches", "new_op_id",
+    "RETAINED_EVENTS", "Ack", "AssignResult", "BridgeInfo", "BridgeInfoEvent", "Caps", "DeviceInfo", "Discovered",
+    "EventHandler", "EventSubscription", "EventWaiter", "FrameTooLargeError", "GatewayClient", "GatewayDisconnected",
+    "GatewayError", "GatewayEvent", "GatewayTimeout", "HelloInfo", "IdentifyInfo", "LogEvent", "NodeConfigured",
+    "NodeInfo", "NodeRemoved", "OpIdGenerator", "ProtocolError", "Provisioned", "ResultEvent", "RetainedEvent",
+    "SecureOptions", "SessionStarted", "StageEvent", "StatusError", "TagSeen", "Timing", "TunnelEvent",
+    "UnknownEvent", "UnprovBeacon", "WrongDeviceError", "any_of", "matches", "new_op_id",
 ]
