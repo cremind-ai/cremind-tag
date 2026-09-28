@@ -232,7 +232,7 @@ def package_firmware(
         hashes[kind] = sha256_file(out)
     memory = {"target": name, "memory": meta.get("memory"), "resources": meta.get("resources")}
     mem_path = dst / f"{name}-{version}.memory.json"
-    mem_path.write_text(json.dumps(memory, indent=2) + "\n", encoding="utf-8")
+    mem_path.write_text(json.dumps(memory, indent=2) + "\n", encoding="utf-8", newline="\n")
     files["memory"] = _rel(mem_path, dist)
     hashes["memory"] = sha256_file(mem_path)
 
@@ -270,7 +270,9 @@ def package_firmware(
 
 def write_memory_report(dist: Path, entries: list[dict[str, Any]]) -> None:
     doc = {e["target"]: {"memory": e["memory"], "resources": e["resources"]} for e in entries}
-    (dist / "firmware" / "memory-report.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    # Every text file of a release has LF line ends, so one packaged on Windows hashes as on Linux.
+    (dist / "firmware" / "memory-report.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8",
+                                                          newline="\n")
     lines = [
         "# Firmware memory report",
         "",
@@ -286,7 +288,7 @@ def write_memory_report(dist: Path, entries: list[dict[str, Any]]) -> None:
             f"| {m.get('ram_used', 0):,} / {m.get('ram_region', 0):,} "
             f"| {r.get('ram_free', 0):,} ({'none' if ram_min is None else f'{ram_min:,}'}) |"
         )
-    (dist / "firmware" / "memory-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (dist / "firmware" / "memory-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 # --------------------------------------------------------------------------

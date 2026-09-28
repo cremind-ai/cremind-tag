@@ -182,8 +182,9 @@ def build(out_dir: Path, *, root: Path = ROOT, allow_dirty: bool = False) -> tup
     with gzip.GzipFile(fileobj=compressed, mode="wb", mtime=0, filename="") as gz:
         gz.write(raw.getvalue())
     archive.write_bytes(compressed.getvalue())
+    # LF on every OS: `sha256sum -c` reads a CR as part of the file name.
     (out_dir / f"{base}.tar.gz.sha256").write_text(f"{sha256_bytes(compressed.getvalue())}  {archive.name}\n",
-                                                   encoding="ascii")
+                                                   encoding="ascii", newline="\n")
     return target, archive
 
 

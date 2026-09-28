@@ -56,8 +56,8 @@ def test_builds_a_verifiable_reproducible_artifact(tmp_path: Path) -> None:
     with tarfile.open(archive) as tar:
         names = tar.getnames()
     assert names == sorted(names) and all(n.startswith("cremind-tag-contract-1.2.3/") for n in names)
-    sha = (archive.parent / (archive.name + ".sha256")).read_text(encoding="ascii").split()[0]
-    assert sha == c.sha256_bytes(first)
+    sidecar = (archive.parent / (archive.name + ".sha256")).read_bytes()
+    assert sidecar == f"{c.sha256_bytes(first)}  {archive.name}\n".encode("ascii"), "LF: sha256sum -c reads it"
 
 
 def test_check_refuses_changed_missing_and_unlisted_files(tmp_path: Path) -> None:

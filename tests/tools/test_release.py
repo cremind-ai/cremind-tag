@@ -221,6 +221,9 @@ def test_main_packages_a_trial_release(tmp_path: Path, monkeypatch, capsys):
     reasons = {e["target"]: e["reason"] for e in manifest["excluded_targets"]}
     assert reasons["tag-laowu-bwr"] == "not selected (--targets)" and "tag-sifei-52810" in reasons
     assert release.verify_sha256sums(dist) == []
+    crlf = [p.relative_to(dist).as_posix() for p in dist.rglob("*")
+            if p.suffix in (".json", ".md", ".sha256", ".txt") and b"\r" in p.read_bytes()]
+    assert crlf == [], "LF everywhere: a release packaged on Windows hashes as on Linux"
     assert (dist / "LICENSE").is_file() and not (dist / "contract" / f"cremind-tag-contract-{version}").exists()
     assert (tmp_path / "dist" / f"cremind-tag-{version}.tar.gz").is_file()
     assert (tmp_path / "dist" / f"RELEASE_NOTES-{version}.md").is_file()
