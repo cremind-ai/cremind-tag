@@ -1,0 +1,424 @@
+{
+  "description": "Protocol v2 (docs/connect-setup.md): setup codes, identities, the key schedule, grant rules in check order (expect = status code), and one byte-exact secure conversation (Noise IK through a tunnel, then PAIR). Keys are SHA-256('cremind-tag/v2/fixture' | seed).",
+  "authority_pub": "54b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b",
+  "setup_codes": [
+    {
+      "role": 3,
+      "short_id": 439041101,
+      "secret": "00010203040506070809",
+      "payload": "234d3c2b1a00010203040506070809",
+      "code": "4D6KR-ART00-0G40R-40M30-E2097",
+      "qr": "CTAG:4D6KRART000G40R40M30E2097"
+    },
+    {
+      "role": 2,
+      "short_id": 1,
+      "secret": "f0f1f2f3f4f5f6f7f8f9",
+      "payload": "2201000000f0f1f2f3f4f5f6f7f8f9",
+      "code": "480G0-000Y3-RZ5WZ-MYQVF-FY7SN",
+      "qr": "CTAG:480G0000Y3RZ5WZMYQVFFY7SN"
+    },
+    {
+      "role": 3,
+      "short_id": 4294967294,
+      "secret": "00000000000000000000",
+      "payload": "23feffffff00000000000000000000",
+      "code": "4FZFZ-ZZZ00-00000-00000-0000Q",
+      "qr": "CTAG:4FZFZZZZ0000000000000000Q"
+    }
+  ],
+  "identities": [
+    {
+      "role": 1,
+      "ik_priv": "d662c96f56191d4b0f77b48b0da10cdc027a1bd78d7854f02ffd581423be5b10",
+      "ik_pub": "c2d056af26ba47878f6f3a98e836ac49e1efd0815af4ea75395610655e6b5263",
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "short_id": 2464441173
+    },
+    {
+      "role": 2,
+      "ik_priv": "e48b9e2afbeac4e1fd006909f63dcc03c2438779df4ec9712b1ffaacc825f64f",
+      "ik_pub": "b7d5d3ba2c421f88e422bed0aa3af72d67fff64a58e828e1fd133f79bd26c12a",
+      "device_id": "2cd3de7d2ebae023aa0a4f5c616e20b8",
+      "short_id": 2111755052
+    },
+    {
+      "role": 3,
+      "ik_priv": "58d2f48f7540c6a35babf30dfe52fbbba5c07f3e9f4744ab90af42b437b0709d",
+      "ik_pub": "29026cb5882ed384508a587f2ead43ab8fdbc3a5059a798f3aa206fe56258912",
+      "device_id": "492b7915824bd15bde605b2b209b926b",
+      "short_id": 360262473
+    }
+  ],
+  "key_schedule": {
+    "setup_secret": "00010203040506070809",
+    "device_id": "492b7915824bd15bde605b2b209b926b",
+    "k_setup": "8d94614cbb3bd5a6002cbf4b26e1490a3f9032eaf1fc2e63b4f0946a13280c6c",
+    "static_oob": "7d99c03d22e0d5dec03411d660ae1477a613a1dd3b94108bdad198f29e457c7d",
+    "root": "c629b67d1d712a12e7d5486dbdc94fc3b037e7e36a9a5bdc107f08be07e01ff1",
+    "tag_id": 439041101,
+    "epoch": 3,
+    "k_epoch": "ded90a118b25c1cdcd6b4ca9c520ed0b",
+    "h": "9d52e6fdf8d627fd19d0f359c53ec1fbbbf8c84bcef0f7cc431a349479982f7c",
+    "root_proof": "f767a4cc996032ff4d29c7acc4de04de",
+    "maint_proof": "db1fa5f99395d641019a2882451f7027"
+  },
+  "grant_cases": [
+    {
+      "name": "claim ok",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa0002010102505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e8f",
+      "sig": "45198ac97c0cacfc24812d43a75e01ec251c880e851f1ffd6be8eaa559a7ad0df4b05904db03919f1847a753210ac9216c51f2bb70069e9063e0c835424c0108",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 0
+    },
+    {
+      "name": "not canonical",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa0002010102505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e",
+      "sig": "45198ac97c0cacfc24812d43a75e01ec251c880e851f1ffd6be8eaa559a7ad0df4b05904db03919f1847a753210ac9216c51f2bb70069e9063e0c835424c0108",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 36
+    },
+    {
+      "name": "short signature",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa0002010102505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e8f",
+      "sig": "45198ac97c0cacfc24812d43a75e01ec251c880e851f1ffd6be8eaa559a7ad0df4b05904db03919f1847a753210ac9216c51f2bb70069e9063e0c835424c01",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 36
+    },
+    {
+      "name": "other device",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa00020101025000000000000000000000000000000000030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e8f",
+      "sig": "a799ae86fd3964e0fa728e10839fa33d8d29df71bd32893738bbf8a791637b13626d1312daee3d15e3066d6a80709ec5cbdb99067cccf19c02b727d70a94fc09",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 36
+    },
+    {
+      "name": "op not carried by this message",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa0002010202505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e8f",
+      "sig": "34cd5a642df275b2d267d0589a6f89f95b0661abf0428f9defa86053f7ab82bf60b141db266ad68c316466133570d95075950ae9ea5c0477db2927a15a736203",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 36
+    },
+    {
+      "name": "wrong challenge",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa0002010102505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f07000801095000000000000000000000000000000000",
+      "sig": "bda9473cec6727544a796c79273c67222dbb4a59a8fb63b709221ac9eef944723a9efc024272b881117be225e6684bea15b0f7f1a6e73b854253280b98ca140b",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 36
+    },
+    {
+      "name": "stale generation",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa0002010102505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070408050950808182838485868788898a8b8c8d8e8f",
+      "sig": "52302381850d1d7d32dae6c2bc8012c3fd408f421ec765e7077a32344cf6c8b3a5a37bc14a5f912bce07a41f973210a49810913ca7f0f7e023ce1b31d52e6304",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 37
+    },
+    {
+      "name": "generation jump",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa0002010102505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008020950808182838485868788898a8b8c8d8e8f",
+      "sig": "2caebe0ca9fc7be7754393698974b6ed23a6ef85fd1435b14f0a63baa2a4498e0a1fb6d4a2135129bfbffd567f4286f83acbdf01b7b0ce86624e84d73e6bdb05",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 37
+    },
+    {
+      "name": "other controller",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa0002010102505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200000000000000000000000000000000000000000000000000000000000000000070008010950808182838485868788898a8b8c8d8e8f",
+      "sig": "b1795e2c91103a002ea486d22690799860729368dd3816a4a510e19ec4c9283441a18b5a68c3fefb528b11901d20eb29f56ebcdc11694718eb2f3f34d9068504",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 36
+    },
+    {
+      "name": "bad signature",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa0002010102505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e8f",
+      "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 36
+    },
+    {
+      "name": "owned: recover ok",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 1,
+        "gen": 1,
+        "authority_pub": "54b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b",
+        "owner": "404142434445464748494a4b4c4d4e4f",
+        "controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f"
+      },
+      "grant": "aa0002010202505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070108020950808182838485868788898a8b8c8d8e8f",
+      "sig": "4c241ced2371a009db2bdd7e786c0efbefddc7069d96e1913d38199cfefe6e22bfccd996cbca25ced95a0c6678830cf0f5b979f843ffdef2b1618b6584baa40b",
+      "ops": [
+        2
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 0
+    },
+    {
+      "name": "owned: claim again",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 1,
+        "gen": 1,
+        "authority_pub": "54b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b",
+        "owner": "404142434445464748494a4b4c4d4e4f",
+        "controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f"
+      },
+      "grant": "aa0002010102505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070108020950808182838485868788898a8b8c8d8e8f",
+      "sig": "169daf1e3e3a93338a42d57bff0373ed04ed96003560f031393176ea378f5181c859ce08e66d781d9fda4e491879d05e16f9c9000d16fe3cd355e0933592ac02",
+      "ops": [
+        1
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 35
+    },
+    {
+      "name": "owned: other authority",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 1,
+        "gen": 1,
+        "authority_pub": "54b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b",
+        "owner": "404142434445464748494a4b4c4d4e4f",
+        "controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f"
+      },
+      "grant": "aa0002010202505563e4923c0f6c54d7387e5f00377bc5030104582079e0974455ca2f5c61384132176f612634e727f7750b78bb7feb407931a3aa8d0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070108020950808182838485868788898a8b8c8d8e8f",
+      "sig": "5b2fa0156955967e856d8e22007bfa234c5cf0c1ed3343cbc18b3bf06f47095cbfc25b9e64893a48fefc17af58b6d0f30736b5187d9ffdcfc14efc30d6c83205",
+      "ops": [
+        2
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 35
+    },
+    {
+      "name": "owned: other owner",
+      "role": 1,
+      "device_id": "5563e4923c0f6c54d7387e5f00377bc5",
+      "ownership": {
+        "state": 1,
+        "gen": 1,
+        "authority_pub": "54b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b",
+        "owner": "404142434445464748494a4b4c4d4e4f",
+        "controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f"
+      },
+      "grant": "aa0002010202505563e4923c0f6c54d7387e5f00377bc5030104582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550000000000000000000000000000000000658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070108020950808182838485868788898a8b8c8d8e8f",
+      "sig": "aaaee2f5a9c4e2cdd8f638a3ceeb49c2f1cd3d1f7d8b0850dde88979a6a495314461946b41c8ba9d34daa98465cd3d033c628c2e617db719b66bfb0f7d456f04",
+      "ops": [
+        2
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": null,
+      "expect": 35
+    },
+    {
+      "name": "tag pair ok",
+      "role": 3,
+      "device_id": "492b7915824bd15bde605b2b209b926b",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa000201030250492b7915824bd15bde605b2b209b926b030304582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e8f",
+      "sig": "09bf3709d812e28469f3db69e3286fc2b278bb9c74f2d5bed3cf31de3524f15cc9cb09d751a2491651a7d71b245211572d00f35ea7131f5d051a1318582d390d",
+      "ops": [
+        3
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": true,
+      "expect": 0
+    },
+    {
+      "name": "tag pair bad setup proof",
+      "role": 3,
+      "device_id": "492b7915824bd15bde605b2b209b926b",
+      "ownership": {
+        "state": 0,
+        "gen": 0,
+        "authority_pub": "",
+        "owner": "",
+        "controller": ""
+      },
+      "grant": "aa000201030250492b7915824bd15bde605b2b209b926b030304582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e8f",
+      "sig": "09bf3709d812e28469f3db69e3286fc2b278bb9c74f2d5bed3cf31de3524f15cc9cb09d751a2491651a7d71b245211572d00f35ea7131f5d051a1318582d390d",
+      "ops": [
+        3
+      ],
+      "challenge": "808182838485868788898a8b8c8d8e8f",
+      "session_controller": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+      "setup_proof_ok": false,
+      "expect": 38
+    }
+  ],
+  "conversation": {
+    "ident": "0203492b7915824bd15bde605b2b209b926b29026cb5882ed384508a587f2ead43ab8fdbc3a5059a798f3aa206fe56258912000000000000000000000000000000000000000000808182838485868788898a8b8c8d8e8f13000200",
+    "controller_priv": "fa9a819119e9d8c1c1b890e2bfcd611625739142b7c88dd71892f1616af0b231",
+    "controller_pub": "0bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f",
+    "tag_ik_priv": "58d2f48f7540c6a35babf30dfe52fbbba5c07f3e9f4744ab90af42b437b0709d",
+    "prologue": "6372656d696e642d7461672f763202492b7915824bd15bde605b2b209b926b",
+    "init_ephemeral": "31480a12f55d517bb440f4afdd90e4339ba5de8a05d821ee9728fbadb442f1e2",
+    "resp_ephemeral": "bd15a969800dccf2fa75a541891cf24841c247eb17e13e755ae6f535ff4d3c23",
+    "msg1": "7113e4a8b901bd63fa6ae015b7d28b0b0c688163ef1fd4ff9e9c8b5e318e430b608cf46c7d694a12f225fa134e61d08f7051da4a9dcce6cdc293e01decdd02acbbf0183bbb831e953ad14f35529e42e8d957b136a8c5d0c33386ab93dab3ca4e",
+    "msg2": "06ede87d50f2b52762fb5b9b837fc1e8761f52fc6c6158b8f77a30834d926841474b5e231e0318c148a0c68f55ba1067",
+    "handshake_hash": "3367dd5bd2efd129cfb3ce6182ae07f5f630f0453feb934661b65bcd630ac4fb",
+    "setup_secret": "00010203040506070809",
+    "grant": "aa000201030250492b7915824bd15bde605b2b209b926b030304582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e8f",
+    "sig": "09bf3709d812e28469f3db69e3286fc2b278bb9c74f2d5bed3cf31de3524f15cc9cb09d751a2491651a7d71b245211572d00f35ea7131f5d051a1318582d390d",
+    "proof_s": "15051434788897a8a5fa07e949054acd",
+    "request_plain": "0d000100a418465887aa000201030250492b7915824bd15bde605b2b209b926b030304582054b5b549dc398582888635b6cbad0c1a33a11df8fb434990ab18fc3943894a0b0550404142434445464748494a4b4c4d4e4f0658200bd6f676e4507dcc508e28b6293385cb40c0393e03a3338f30dd2989720b4d4f070008010950808182838485868788898a8b8c8d8e8f1847584009bf3709d812e28469f3db69e3286fc2b278bb9c74f2d5bed3cf31de3524f15cc9cb09d751a2491651a7d71b245211572d00f35ea7131f5d051a1318582d390d184b5015051434788897a8a5fa07e949054acd18505820c629b67d1d712a12e7d5486dbdc94fc3b037e7e36a9a5bdc107f08be07e01ff1",
+    "request_sealed": "36d836f6f3ea014a016a4cd997b882ff920bea8df521b31b5f3e8a3c251c3526a3658ecf82d55dc0b07d821660ea2501db284851541d1ffc89971749dcb6bbcbd524a25e641a87965520ec62810e4b5e8e68d0045bf2602b1913a27258d7962719d6a2d8f3a78dceaed80adf95995adba08192ba921c7498b7fb448bfcd049a02d0f8a58f0361512ff261284c9aedc8888864120b69ed6666148b2476018603d570d71e15aa699e74d29042c4565d9e02fd1fdef25e39e990ba87767a1baf38c2bd6bb2a4bba5bcbacfc63b485231454de917625935fdd899681d3900c5ce5dc04440e8b91e51afa6681145d46bac9a87000e34e8130439841e70e2c4bc650ca91c5ac9931a3dd6ac3d9eee2f4b36a2c23bc0400a8a31d21d13733",
+    "answer_plain": "0d010100a30000184301184b50902036e5a792063e89ba1a2b0573bf6c",
+    "answer_sealed": "7224c934c28c50d501ab17e9c38750d6aea6372383d6181bc51afc027226656b56b434a3d63e999803417e3d85"
+  }
+}

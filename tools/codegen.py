@@ -69,7 +69,21 @@ class _SpecLoader(yaml.SafeLoader):
     pass
 
 
+def _construct_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode) -> dict[Any, Any]:
+    # YAML keeps the LAST of two equal keys silently; a duplicated name in the
+    # spec (a CBOR key, a message) would renumber the first one. Refuse it.
+    seen: set[Any] = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            raise SpecError(f"duplicate key {key!r} (line {key_node.start_mark.line + 1})")
+        seen.add(key)
+    loader.flatten_mapping(node)
+    return dict(loader.construct_pairs(node, deep=True))
+
+
 _SpecLoader.add_constructor("tag:yaml.org,2002:int", _construct_int)
+_SpecLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
 
 
 def load_spec(text: str) -> dict[str, Any]:
@@ -207,6 +221,11 @@ def collect_messages(spec: dict[str, Any]) -> list[Message]:
             f"plain_{name.lower()}", f"Plain{_camel(name)}", ("PlainMsg", name), msg["fields"])
     add("Enrollment blob (UICR.CUSTOMER)", "enrollment", "Enrollment", None,
         spec["enrollment"]["fields"])
+    v2 = spec["v2"]
+    add("v2 IDENT characteristic value / tunnel OPEN data", "ident2", "Ident2", None, v2["ident2"])
+    add("v2 enrollment blob (UICR.CUSTOMER[0..5])", "enrollment2", "Enrollment2", None, v2["enrollment2"])
+    add("v2 identity copy (UICR.CUSTOMER at uicr_identity_offset)", "uicr_identity", "UicrIdentity", None,
+        v2["uicr_identity"])
     return out
 
 
@@ -245,6 +264,12 @@ def check_spec(spec: dict[str, Any], messages: list[Message]) -> None:
         ("boards", spec["boards"], "value"),
         ("panels", spec["panels"], "value"),
         ("gatt.characteristics", spec["gatt"]["characteristics"], "short"),
+        ("v2.grant_ops", spec["v2"]["grant_ops"], "value"),
+        ("v2.owner_states", spec["v2"]["owner_states"], "value"),
+        ("v2.links", spec["v2"]["links"], "value"),
+        ("v2.tunnel_states", spec["v2"]["tunnel_states"], "value"),
+        ("v2.pair_kinds", spec["v2"]["pair_kinds"], "value"),
+        ("v2.adv_flags", spec["v2"]["adv_flags"], "value"),
     ]:
         unique(label, _values(group, key))
     unique("gatt message types", {
@@ -289,6 +314,18 @@ def check_spec(spec: dict[str, Any], messages: list[Message]) -> None:
            1 + 4 + const["TAG_RECORD_PAYLOAD_MAX"] + const["TAG_RECORD_MIC_LEN"])
     if const["TAG_RECORD_BUF"] < const["TAG_RECORD_WIRE_MAX"]:
         errors.append("TAG_RECORD_BUF is smaller than TAG_RECORD_WIRE_MAX")
+    expect("SETUP_PAYLOAD_LEN", const["SETUP_PAYLOAD_LEN"], 1 + 4 + const["SETUP_SECRET_LEN"])
+    expect("SETUP_CODE_LEN", const["SETUP_CODE_LEN"], math.ceil(const["SETUP_PAYLOAD_LEN"] * 8 / 5) + 1)
+    if const["TUNNEL_MSG_MAX"] > const["SERIAL_MAX_PAYLOAD"] // 2:
+        errors.append("TUNNEL_MSG_MAX must leave room in a serial frame")
+    if const["PAIR_MSG_MAX"] > 2 * const["TAG_RECORD_BUF"]:
+        errors.append("PAIR_MSG_MAX exceeds the tag's two record buffers")
+    ident = by_name["ident2"]
+    if 1 + ident.fixed_len > const["TUNNEL_MSG_MAX"]:
+        errors.append("ident2 does not fit a tunnel message")
+    offset = spec["v2"]["uicr_identity_offset"]
+    if offset < by_name["enrollment2"].fixed_len or offset + by_name["uicr_identity"].fixed_len > 128:
+        errors.append("uicr_identity_offset overlaps enrollment2 or leaves UICR.CUSTOMER")
 
     for m in messages:
         longest = m.fixed_len + (const[m.tail.max] if m.tail and m.tail.max else 0)
@@ -495,6 +532,20 @@ def gen_ids_h(spec: dict[str, Any], sha: str, text: str) -> str:
         L += [f'#define CTAG_CRYPTO_{name.upper()} "{label}"',
               f"#define CTAG_CRYPTO_{name.upper()}_LEN {len(label.encode())}"]
     L.append("")
+
+    section("Protocol v2: identity, ownership, grants (docs/connect-setup.md)")
+    v2 = spec["v2"]
+    enum("ctag_grant_op", "CTAG_GRANT_OP_", items(v2["grant_ops"]), "Grant operations (grant key 1).")
+    enum("ctag_owner_state", "CTAG_OWNER_", items(v2["owner_states"]), "Device ownership states.")
+    enum("ctag_link", "CTAG_LINK_", items(v2["links"]), "Noise prologue link byte.")
+    enum("ctag_tunnel_state", "CTAG_TUNNEL_", items(v2["tunnel_states"]), "EVT_TUNNEL states.")
+    enum("ctag_pair_kind", "CTAG_PAIR_KIND_", items(v2["pair_kinds"]),
+         "First byte of a PAIR / tunnel message.")
+    enum("ctag_adv_flag", "CTAG_ADV_FLAG_", items(v2["adv_flags"]), "Tag advertising flags.")
+    for name, label in v2["crypto"].items():
+        L += [f'#define CTAG_V2_{name.upper()} "{label}"',
+              f"#define CTAG_V2_{name.upper()}_LEN {len(label.encode())}"]
+    L += [f"#define CTAG_V2_UICR_IDENTITY_OFFSET {v2['uicr_identity_offset']}", ""]
 
     section("Enrollment, boards and panels (docs/protocol.md 9)")
     L += [f"#define CTAG_ENROLLMENT_MAGIC {fmt_int(spec['enrollment']['magic'], c=True)} /* bytes 'C','T','A','G' */", ""]
@@ -779,6 +830,18 @@ def gen_ids_py(spec: dict[str, Any], sha: str, text: str) -> str:
     L.append("")
     for name, label in spec["crypto"].items():
         L.append(f"CRYPTO_{name.upper()}: Final = {label.encode()!r}")
+    L.append("")
+    v2 = spec["v2"]
+    enum("GrantOp", "IntEnum", "Grant operations (grant key 1).", items(v2["grant_ops"]))
+    enum("OwnerState", "IntEnum", "Device ownership states.", items(v2["owner_states"]))
+    enum("Link", "IntEnum", "Noise prologue link byte.", items(v2["links"]))
+    enum("TunnelState", "IntEnum", "EVT_TUNNEL states.", items(v2["tunnel_states"]))
+    enum("PairKind", "IntEnum", "First byte of a PAIR / tunnel message.", items(v2["pair_kinds"]))
+    enum("AdvFlag", "IntFlag", "Tag advertising flags.", items(v2["adv_flags"]))
+    L.append("")
+    for name, label in v2["crypto"].items():
+        L.append(f"V2_{name.upper()}: Final = {label.encode()!r}")
+    L.append(f"V2_UICR_IDENTITY_OFFSET: Final = {v2['uicr_identity_offset']}")
     L += ["", f"ENROLLMENT_MAGIC: Final = {fmt_int(spec['enrollment']['magic'])}  # bytes 'C','T','A','G'", ""]
     enum("Board", "IntEnum", "Board ids.", items(spec["boards"]))
     enum("Panel", "IntEnum", "Panel ids.", items(spec["panels"]))
