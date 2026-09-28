@@ -1,7 +1,7 @@
 /*
  * CBOR payloads of serial frames (docs/protocol.md 1.1-1.2) for the gateway
  * and the bridge maintenance port; Zephyr + zcbor (CONFIG_ZCBOR_CANONICAL).
- * Mirrors companion protocol/cbor_msgs.py: one map keyed by
+ * Mirrors Cremind's app/tags/runtime/protocol/cbor_msgs.py: one map keyed by
  * enum ctag_cbor_key, canonical on encode (keys ascending, shortest forms,
  * definite lengths), any key order on decode, unknown keys skipped, value
  * kinds of known keys checked, nested maps (caps, timing, entries of nodes,

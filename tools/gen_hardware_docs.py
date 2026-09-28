@@ -248,7 +248,7 @@ def render_qualification(
         functional = [
             (
                 "Enrollment",
-                "Write the enrollment blob with the companion; read back UICR",
+                "Write the enrollment blob (`cremind tags tools tag enroll`); read back UICR",
                 "Tag advertises; missing/bad CRC → no advertising, SECURITY_CONFIG",
             ),
             (

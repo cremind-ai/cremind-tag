@@ -1,7 +1,7 @@
 /*
  * Serial protocol server (docs/protocol.md 1.1-1.5, 10): framing, credits,
  * HELLO, responses, retained and best-effort events, idempotency, and the
- * request dispatcher. Mirrors the companion's sim/device.py (DeviceEndpoint)
+ * request dispatcher. Mirrors Cremind's app/tags/runtime/sim/device.py (DeviceEndpoint)
  * and sim/gateway.py (_handle).
  *
  * Protocol v2 (CONFIG_CTAG_GW_SECURE, docs/connect-setup.md 4.2, 5): in
@@ -36,7 +36,7 @@ static const char T_MALFORMED[] = "malformed CBOR payload";
 static const char T_MISSING[] = "missing field";
 static const char T_TOO_LARGE_ANSWER[] = "answer too large";
 
-/* ---- Request field specifications (companion protocol/cbor_msgs.py REQUESTS) ---- */
+/* ---- Request field specifications (Cremind's app/tags/runtime/protocol/cbor_msgs.py REQUESTS) ---- */
 
 struct req_spec {
 	uint8_t type;

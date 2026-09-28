@@ -1,4 +1,4 @@
-"""tools/version.py: the one VERSION and its derived copies (apps' Zephyr VERSION, companion __version__)."""
+"""tools/version.py: the one VERSION and its derived copies (the apps' Zephyr VERSION files)."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ import version as v
 def test_parse_forms():
     assert v.parse("0.1.0") == v.Version(0, 1, 0)
     rc = v.parse("1.2.3-rc.4\n")
-    assert (str(rc), rc.tag, rc.pep440) == ("1.2.3-rc.4", "v1.2.3-rc.4", "1.2.3rc4")
-    assert v.parse("2.0.0-alpha.1").pep440 == "2.0.0a1"
-    assert v.parse("2.0.0-beta.0").pep440 == "2.0.0b0"
+    assert (str(rc), rc.tag) == ("1.2.3-rc.4", "v1.2.3-rc.4")
+    assert str(v.parse("2.0.0-alpha.1")) == "2.0.0-alpha.1"
     for bad in ("1.2", "01.2.3", "1.2.3-dev", "1.2.3-rc1", "1.2.3+build", "v1.2.3", "256.0.0"):
         with pytest.raises(ValueError):
             v.parse(bad)
@@ -31,7 +30,7 @@ def test_zephyr_file_round_trip():
     assert v.parse_zephyr_version(v.parse("1.0.0").zephyr_file().replace("TWEAK = 0", "TWEAK = 3")) is None
 
 
-def _repo(tmp_path: Path, apps: dict[str, str | None], companion: str | None = "0.1.0") -> Path:
+def _repo(tmp_path: Path, apps: dict[str, str | None]) -> Path:
     (tmp_path / "tools").mkdir()
     targets = "targets:\n" + "".join(f"  t-{i}:\n    app: {app}\n" for i, app in enumerate(apps))
     (tmp_path / "tools" / "targets.yaml").write_text(targets, encoding="utf-8")
@@ -41,10 +40,6 @@ def _repo(tmp_path: Path, apps: dict[str, str | None], companion: str | None = "
         (d / "CMakeLists.txt").write_text("", encoding="utf-8")
         if content is not None:
             (d / "VERSION").write_text(content, encoding="utf-8")
-    if companion is not None:
-        init = tmp_path / v.COMPANION_INIT
-        init.parent.mkdir(parents=True)
-        init.write_text(f'"""doc"""\n\n__version__ = "{companion}"\n', encoding="utf-8")
     return tmp_path
 
 
@@ -56,13 +51,10 @@ def test_check_and_sync(tmp_path: Path):
     assert any("apps/a/VERSION says 0.1.0" in p for p in problems)
     assert any("apps/b/VERSION is missing" in p for p in problems)
     assert any("apps/c/VERSION is not a Zephyr VERSION file" in p for p in problems)
-    assert any("__version__ is 0.1.0, VERSION says 0.2.0rc1" in p for p in problems)
     changed = v.sync(version, root)
-    assert {p.relative_to(root).as_posix() for p in changed} == {
-        "apps/a/VERSION", "apps/b/VERSION", "apps/c/VERSION", v.COMPANION_INIT.as_posix()}
+    assert {p.relative_to(root).as_posix() for p in changed} == {"apps/a/VERSION", "apps/b/VERSION", "apps/c/VERSION"}
     assert v.check(version, root) == []
     assert v.sync(version, root) == []
-    assert '__version__ = "0.2.0rc1"' in (root / v.COMPANION_INIT).read_text(encoding="utf-8")
     assert (root / "apps" / "a" / "VERSION").read_text(encoding="utf-8") == version.zephyr_file()
 
 
@@ -79,4 +71,4 @@ def test_cli(capsys, monkeypatch):
     assert v.main(["--expect-tag", "v9.9.9"]) == 1
     assert "does not match" in capsys.readouterr().err
     assert v.main(["--json"]) == 0
-    assert '"pep440"' in capsys.readouterr().out
+    assert capsys.readouterr().out.strip() == f'{{"version": "{v.read_version()}", "tag": "{v.read_version().tag}"}}'

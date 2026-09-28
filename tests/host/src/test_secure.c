@@ -1,7 +1,7 @@
 /*
  * ctag_secure against v2_secure.json (identities, key schedule, every grant
  * rule in check order, the byte-exact Noise IK conversation and sealed PAIR)
- * and the device rules of companion secure/device.py (test_v2_device.py's
+ * and the device rules of Cremind's app/tags/runtime/secure/device.py (test_v2_device.py's
  * flows), the ownership record, tunnel fragments and heap exhaustion.
  */
 #include <errno.h>

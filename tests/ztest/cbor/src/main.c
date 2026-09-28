@@ -1,7 +1,7 @@
 /*
  * ctag_cbor against the payloads of protocol/fixtures/serial_frames.json
  * (canonical encode, decode in any order) and the strictness rules of
- * companion protocol/cbor_msgs.py.
+ * Cremind's app/tags/runtime/protocol/cbor_msgs.py.
  */
 #include <errno.h>
 #include <string.h>

@@ -13,6 +13,12 @@ bindings against that snapshot. The artifact holds:
   every file, and ``digest``;
 - ``spec.yaml`` (the single source of truth for identifiers and limits);
 - ``fixtures/`` (the byte-exact golden vectors both sides test against);
+- ``tests/conversation.h`` (the bridge <-> tag conversations the tag core
+  test replays, tests/ztest/tag_core; the host's reference implementation
+  scripts them and checks its own against this copy);
+- ``hardware/`` (``matrix.yaml``: boards, panels and their qualification;
+  ``targets.yaml``: the firmware targets and SoC geometry, tools/targets.yaml),
+  the tables host tools that flash and enroll hardware must agree with;
 - ``docs/`` (the normative protocol documents).
 
 ``digest`` is the SHA-256 of the ``SHA256SUMS``-style listing of every other
@@ -55,6 +61,12 @@ REPOSITORY = "https://github.com/cremind-ai/cremind-tag"
 SPEC = "protocol/spec.yaml"
 FIXTURES = "protocol/fixtures"
 DOCS = ("docs/protocol.md", "docs/fontpack.md", "docs/connect-setup.md")
+# Artifact path -> source: the other contract files.
+EXTRA = {
+    "tests/conversation.h": "tests/ztest/tag_core/src/conversation.h",
+    "hardware/matrix.yaml": "hardware/matrix.yaml",
+    "hardware/targets.yaml": "tools/targets.yaml",
+}
 META = "contract.json"
 
 
@@ -78,7 +90,7 @@ def digest_of(files: dict[str, str]) -> str:
 def _normalised(path: Path) -> bytes:
     """File bytes as committed: text files with LF endings (Windows checkouts may carry CRLF)."""
     data = path.read_bytes()
-    if path.suffix in (".yaml", ".json", ".md"):
+    if path.suffix in (".yaml", ".json", ".md", ".h"):
         data = data.replace(b"\r\n", b"\n")
     return data
 
@@ -90,6 +102,10 @@ def contract_inputs(root: Path = ROOT) -> dict[str, Path]:
     for path in sorted(fixtures.iterdir()):
         if path.is_file() and not path.name.startswith("."):
             out[f"fixtures/{path.name}"] = path
+    for name, source in EXTRA.items():
+        if not (root / source).is_file():
+            raise ContractError(f"{source} is missing: the contract needs it as {name}")
+        out[name] = root / source
     for doc in DOCS:
         path = root / doc
         if path.is_file():
@@ -118,7 +134,7 @@ def _git(*args: str, root: Path = ROOT) -> str:
 
 def source_revision(root: Path = ROOT, *, allow_dirty: bool = False) -> dict[str, Any]:
     revision = _git("rev-parse", "HEAD", root=root)
-    tracked = [SPEC, FIXTURES, *DOCS]
+    tracked = [SPEC, FIXTURES, *EXTRA.values(), *DOCS]
     dirty = bool(_git("status", "--porcelain", "--", *tracked, root=root))
     if dirty and not allow_dirty:
         raise ContractError("the contract's inputs have uncommitted changes; commit them first "

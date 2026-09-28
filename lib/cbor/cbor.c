@@ -1,4 +1,4 @@
-/* Serial CBOR maps (docs/protocol.md 1.1); mirrors companion protocol/cbor_msgs.py. */
+/* Serial CBOR maps (docs/protocol.md 1.1); mirrors Cremind's app/tags/runtime/protocol/cbor_msgs.py. */
 #include <errno.h>
 #include <string.h>
 

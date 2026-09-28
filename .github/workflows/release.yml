@@ -2,8 +2,10 @@ name: Release
 
 # A tag vX.Y.Z (VERSION must say X.Y.Z) runs every CI gate, builds the
 # publishable firmware targets pristine in the pinned toolchain container,
-# proves them reproducible, builds the font packs and the companion, packages
-# everything with tools/release.py and uploads it to a DRAFT GitHub release.
+# proves them reproducible, packages them with the protocol contract
+# (tools/release.py) and uploads everything to a DRAFT GitHub release. A
+# release holds firmware and the contract only: host software (Cremind) is
+# released on its own.
 # Nothing is published automatically: a maintainer reviews the draft and
 # publishes it (docs/releasing.md).
 #
@@ -52,17 +54,17 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
-      - name: Sync companion environment
-        run: uv sync --project companion
+      - name: Sync the tools environment
+        run: uv sync --locked
       - id: v
         name: VERSION matches the tag and every derived copy
         run: |
-          uv run --project companion python tools/version.py --check
+          uv run python tools/version.py --check
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            uv run --project companion python tools/version.py --expect-tag "$GITHUB_REF_NAME"
+            uv run python tools/version.py --expect-tag "$GITHUB_REF_NAME"
           fi
-          echo "version=$(uv run --project companion python tools/version.py)" >> "$GITHUB_OUTPUT"
-          echo "targets=$(uv run --project companion python tools/release.py --list-targets)" >> "$GITHUB_OUTPUT"
+          echo "version=$(uv run python tools/version.py)" >> "$GITHUB_OUTPUT"
+          echo "targets=$(uv run python tools/release.py --list-targets)" >> "$GITHUB_OUTPUT"
 
   firmware:
     name: Firmware (release targets, pristine)
@@ -140,29 +142,9 @@ jobs:
           if-no-files-found: ignore
           path: build/repro/
 
-  fonts-determinism:
-    name: Font packs are deterministic
-    needs: [gates]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.13"
-      - name: Sync companion environment
-        run: uv sync --project companion
-      - uses: actions/cache@v4
-        with:
-          path: fonts/cache
-          key: fonts-${{ hashFiles('fonts/manifest.lock.json') }}
-      - name: Fetch the pinned fonts (verified by SHA-256)
-        run: uv run --project companion cremind-tag fonts fetch
-      - name: Build dev and full twice (all processes, then one) and compare
-        run: uv run --project companion python tools/repro_check.py --no-firmware --fonts dev,full
-
   package:
     name: Package and draft the GitHub release
-    needs: [version, firmware, reproducibility, fonts-determinism]
+    needs: [version, firmware, reproducibility]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -175,22 +157,19 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
-      - name: Sync companion environment
-        run: uv sync --project companion
+      - name: Sync the tools environment
+        run: uv sync --locked
       - uses: actions/download-artifact@v5
         with:
           name: release-firmware
           path: build
-      - uses: actions/cache@v4
-        with:
-          path: fonts/cache
-          key: fonts-${{ hashFiles('fonts/manifest.lock.json') }}
       - name: Package dist/${{ needs.version.outputs.version }}
-        run: uv run --project companion python tools/release.py --out dist
+        run: uv run python tools/release.py --out dist
       - name: Check the checksums as a user would
         run: |
           (cd "dist/$VERSION" && sha256sum --quiet -c SHA256SUMS)
           (cd dist && sha256sum -c "cremind-tag-$VERSION.tar.gz.sha256")
+          (cd "dist/$VERSION/contract" && sha256sum -c "cremind-tag-contract-$VERSION.tar.gz.sha256")
       - uses: actions/upload-artifact@v4
         with:
           name: release-dist
@@ -207,7 +186,8 @@ jobs:
           assets=(
             "dist/cremind-tag-$VERSION.tar.gz" "dist/cremind-tag-$VERSION.tar.gz.sha256"
             "$dir/release.json" "$dir/SHA256SUMS" "$dir/THIRD_PARTY_NOTICES.txt"
-            "$dir"/companion/*.whl "$dir"/companion/*.tar.gz
+            "$dir/contract/cremind-tag-contract-$VERSION.tar.gz"
+            "$dir/contract/cremind-tag-contract-$VERSION.tar.gz.sha256"
             "$dir"/firmware/*/*.hex "$dir"/firmware/*/*.metadata.json
           )
           if gh release view "$tag" >/dev/null 2>&1; then

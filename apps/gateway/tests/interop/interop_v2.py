@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Drive the protocol v2 native_sim gateway (apps/gateway/tests/interop built
-with v2.conf) as a Connect worker would: plaintext IDENTIFY and SECURE_OPEN,
-then every request sealed with the companion's reference SecureChannel
-(cremind_tag.secure.channel), grants signed with its reference grants module,
-and a Noise session through a mesh tunnel to the simulated bridge's secure
-endpoint (lib/secure in C). The companion's GatewayClient is not used (it
-speaks v1); this is a small synchronous serial client over the PTY.
+with v2.conf) as a gateway worker would: plaintext IDENTIFY and SECURE_OPEN,
+then every request sealed with the host's reference SecureChannel
+(Cremind's app.tags.runtime.secure.channel), grants signed with its reference
+grants module, and a Noise session through a mesh tunnel to the simulated
+bridge's secure endpoint (lib/secure in C). The host's GatewayClient is not
+used (it speaks v1); this is a small synchronous serial client over the PTY.
 
 Usage (inside the NCS toolchain container, see README.md)::
 
-    PYTHONPATH=/work/companion/src python3 interop_v2.py /build/gw-interop-v2/zephyr/zephyr.exe
+    CREMIND_SRC=/cremind python3 interop_v2.py /build/gw-interop-v2/zephyr/zephyr.exe
 
 Exit status 0 = every scenario passed.
 """
@@ -25,12 +25,20 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import serial
 
-from cremind_tag.protocol import cbor_msgs
-from cremind_tag.protocol.ids import (
+# The host side is Cremind's hardware runtime (app.tags.runtime): a Cremind checkout at
+# $CREMIND_SRC (default /cremind, where run.sh and the README mount it) or an installed
+# `cremind[tags]`.
+CREMIND_SRC = Path(os.environ.get("CREMIND_SRC", "/cremind"))
+if (CREMIND_SRC / "app" / "tags" / "runtime").is_dir():
+    sys.path.insert(0, str(CREMIND_SRC))
+
+from app.tags.runtime.protocol import cbor_msgs  # noqa: E402
+from app.tags.runtime.protocol.ids import (  # noqa: E402
     PROTO_VERSION,
     SECURE_PROTO_VERSION,
     AdvFlag,
@@ -44,11 +52,11 @@ from cremind_tag.protocol.ids import (
     Status,
     TunnelState,
 )
-from cremind_tag.protocol.msgs import Ident2
-from cremind_tag.protocol.serial_frame import Frame, FrameReader, frame_to_wire
-from cremind_tag.secure import grants, identity
-from cremind_tag.secure.channel import SecureChannel
-from cremind_tag.secure.messages import pair_message, parse_pair_message
+from app.tags.runtime.protocol.msgs import Ident2  # noqa: E402
+from app.tags.runtime.protocol.serial_frame import Frame, FrameReader, frame_to_wire  # noqa: E402
+from app.tags.runtime.secure import grants, identity  # noqa: E402
+from app.tags.runtime.secure.channel import SecureChannel  # noqa: E402
+from app.tags.runtime.secure.messages import pair_message, parse_pair_message  # noqa: E402
 
 # The simulation's fixtures (src/main.c).
 GW_IK = bytes([0x0A, 0x1B, 0x2C, 0x3D, 0x4E, 0x5F, 0x60, 0x71, 0x82, 0x93, 0xA4, 0xB5, 0xC6, 0xD7, 0xE8,

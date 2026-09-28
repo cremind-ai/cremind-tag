@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Package a release into dist/<version>/ (docs/releasing.md).
+"""Package a firmware release into dist/<version>/ (docs/releasing.md).
 
 Inputs: the firmware artifacts tools/build.py wrote to build/<target>/ (each
-with its metadata.json), the font packs built here with the companion, the
-companion wheel and sdist (``uv build``), the protocol spec and fixtures.
-Output::
+with its metadata.json) and the protocol contract built from this commit
+(tools/contract.py). Output::
 
     dist/<version>/
       release.json                 the manifest tying everything together
       SHA256SUMS                   every other file (sha256sum -c SHA256SUMS)
-      THIRD_PARTY_NOTICES.txt      QR generator, fonts, icons, firmware SDK, companion dependencies
+      THIRD_PARTY_NOTICES.txt      QR generator, firmware SDK components
       LICENSE
       firmware/<target>/<target>-<version>.{hex,bin,elf,map,config,dts}
                                    and .metadata.json .verify.json .memory.json
       firmware/memory-report.{md,json}
-      fonts/{full,dev}/            fontpack.ctfp, fontpack.json, NOTICE, LICENSES/, coverage.json
-      fonts/dev/image/             flash.hex, flash.bin, flash.json (nRF52840 DK external flash)
-      companion/                   cremind_tag-<version>-py3-none-any.whl, cremind_tag-<version>.tar.gz
-      protocol/                    spec.yaml, fixtures/, protocol.md, fontpack.md
+      contract/cremind-tag-contract-<version>.tar.gz (+ .sha256)
+                                   the protocol contract host software pins
     dist/cremind-tag-<version>.tar.gz (+ .sha256)   the directory above, deterministic archive
+
+A release holds firmware and the contract only: host software (Cremind)
+ships separately, with its own version, and builds the font packs itself.
 
 Only publishable targets are packaged: a board ``qualified`` in
 hardware/matrix.yaml, or one explicitly marked ``release: true`` in
@@ -30,12 +30,9 @@ of this commit and VERSION, a clean sdk-nrf v3.4.1 workspace, the pinned
 toolchain digest, verify_stack passed and resources met, and its files still
 hash as recorded.
 
-Run it with the companion environment (fonts, licences of the companion's
-dependencies)::
-
     python tools/build.py --pristine $(python tools/release.py --list-targets)
-    uv run --project companion python tools/release.py
-    uv run --project companion python tools/release.py --targets tag-laowu-bw --skip-fonts --out /tmp/dist
+    uv run python tools/release.py
+    uv run python tools/release.py --targets tag-laowu-bw --out /tmp/dist
 
 Exit status: 0 packaged, 1 a check or step failed, 2 usage error.
 """
@@ -47,26 +44,25 @@ import gzip
 import hashlib
 import io
 import json
-import os
 import shutil
-import subprocess
 import sys
 import tarfile
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build  # noqa: E402
+import contract as ctag_contract  # noqa: E402
 import version as ctag_version  # noqa: E402
 
 REPO_ROOT = build.REPO_ROOT
-MANIFEST_SCHEMA = "cremind-tag/release@1"
+MANIFEST_SCHEMA = "cremind-tag/release@2"
 EXIT_OK, EXIT_FAILED, EXIT_USAGE = 0, 1, 2
 
 # SoC key (tools/targets.yaml) -> (J-Link device, nrfjprog family). Mirrored in
-# the companion's `cremind-tag firmware` (cremind_tag/cli/firmware.py).
+# Cremind's `cremind tags tools firmware` (app/tags/runtime/cli/firmware.py), which
+# checks its copy against the contract's hardware/targets.yaml.
 SOC_DEVICES: dict[str, tuple[str, str]] = {
     "nrf51822_qfaa": ("nRF51822_xxAA", "NRF51"),
     "nrf51822_qfab": ("nRF51822_xxAB", "NRF51"),
@@ -89,7 +85,6 @@ FIRMWARE_FILES: dict[str, str] = {
 REQUIRED_FIRMWARE = ("zephyr.hex", "zephyr.bin", "zephyr.elf", "zephyr.map", "verify.json", "metadata.json")
 PUBLISHED_STATUSES = ("qualified", "functional", "buildable")
 NEVER_PUBLISHED = ("blocked", "documented")
-FONT_PROFILES = ("full", "dev")
 
 
 class ReleaseError(Exception):
@@ -155,40 +150,6 @@ def sha256_file(path: Path) -> str:
 
 def _rel(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
-
-
-_COMPANION_MAIN = "from cremind_tag.cli.main import main; main()"
-
-
-def _display_cmd(cmd: list[str]) -> str:
-    if len(cmd) > 2 and cmd[1:3] == ["-c", _COMPANION_MAIN]:
-        return "cremind-tag " + " ".join(cmd[3:])
-    return " ".join(cmd)
-
-
-def _run(cmd: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None) -> str:
-    print(f"  $ {_display_cmd(cmd)}", flush=True)
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=cwd, check=False
-    )
-    if proc.returncode != 0:
-        tail = "\n".join(((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-15:])
-        raise ReleaseError(f"`{_display_cmd(cmd)}` exited {proc.returncode}:\n{tail}")
-    return proc.stdout
-
-
-def companion_cli(*args: str) -> list[str]:
-    return [sys.executable, "-c", _COMPANION_MAIN, *args]
-
-
-def _require_companion() -> None:
-    try:
-        import cremind_tag  # noqa: F401
-    except ImportError:
-        raise ReleaseError(
-            "the companion is not importable: run with its environment "
-            "(uv run --project companion python tools/release.py), or pass --skip-fonts --skip-wheel"
-        ) from None
 
 
 # --------------------------------------------------------------------------
@@ -280,9 +241,9 @@ def package_firmware(
     hex_rel = files["hex"]
     if t.role == "tag":
         board = t.hardware or ("nrf52dk_tag" if t.board.startswith("nrf52dk/") else t.board)
-        flash = f"cremind-tag tag enroll --board {board} --firmware {hex_rel}"
+        flash = f"cremind tags tools tag enroll --board {board} --firmware {hex_rel}"
     else:
-        flash = f"cremind-tag firmware flash --target {name} --hex {hex_rel}"
+        flash = f"cremind tags tools firmware flash --target {name} --hex {hex_rel}"
     return {
         "target": name,
         "app": meta["app"],
@@ -329,160 +290,31 @@ def write_memory_report(dist: Path, entries: list[dict[str, Any]]) -> None:
 
 
 # --------------------------------------------------------------------------
-# Fonts, companion, protocol
+# The protocol contract
 
 
-def package_fonts(dist: Path, jobs: int | None) -> dict[str, Any]:
-    _require_companion()
-    _run(companion_cli("fonts", "fetch"))
-    packs: dict[str, Any] = {}
-    manifest_id = None
-    for profile in FONT_PROFILES:
-        out = dist / "fonts" / profile
-        _run(companion_cli("fonts", "build", "--profile", profile, "--out", str(out),
-                           *(["--jobs", str(jobs)] if jobs else [])))
-        pack = out / "fontpack.ctfp"
-        _run(companion_cli("fonts", "coverage", "--pack", str(pack), "--json", str(out / "coverage.json")))
-        sidecar = json.loads((out / "fontpack.json").read_text(encoding="utf-8"))
-        manifest_id = sidecar.get("manifest_id", manifest_id)
-        packs[profile] = {
-            "pack_id": sidecar.get("pack_id"),
-            "manifest_id": sidecar.get("manifest_id"),
-            "size": sidecar.get("total_size"),
-            "faces": len(sidecar.get("faces") or []),
-            "files": {"pack": _rel(pack, dist), "sidecar": _rel(out / "fontpack.json", dist),
-                      "notice": _rel(out / "NOTICE", dist), "coverage": _rel(out / "coverage.json", dist)},
-            "sha256": sha256_file(pack),
-        }
-    image = dist / "fonts" / "dev" / "image"
-    _run(companion_cli("fonts", "image", "--pack", str(dist / "fonts" / "dev" / "fontpack.ctfp"), "--out", str(image)))
-    packs["dev"]["image"] = {p.name: _rel(p, dist) for p in sorted(image.iterdir()) if p.is_file()}
-    return {"manifest_id": manifest_id, "packs": packs}
-
-
-def package_companion(dist: Path, version: ctag_version.Version, epoch: int | None) -> dict[str, Any]:
-    uv = shutil.which("uv")
-    if uv is None:
-        raise ReleaseError("uv not found on PATH (needed for the wheel and sdist; or pass --skip-wheel)")
-    out = dist / "companion"
+def package_contract(dist: Path, allow_dirty: bool) -> dict[str, Any]:
+    """The contract artifact of this commit (tools/contract.py), as host software downloads and pins it."""
+    out = dist / "contract"
     out.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    if epoch is not None:
-        env["SOURCE_DATE_EPOCH"] = str(epoch)  # hatchling writes reproducible archives with this time
-    _run([uv, "build", str(REPO_ROOT / "companion"), "--out-dir", str(out), "--no-progress"], env=env)
-    for stale in out.glob(".gitignore"):
-        stale.unlink()
-    wheel = out / f"cremind_tag-{version.pep440}-py3-none-any.whl"
-    sdist = out / f"cremind_tag-{version.pep440}.tar.gz"
-    missing = [p.name for p in (wheel, sdist) if not p.is_file()]
-    if missing:
-        found = ", ".join(sorted(p.name for p in out.iterdir()))
-        raise ReleaseError(f"uv build did not produce {', '.join(missing)} (found: {found}); is the companion "
-                           f"__version__ {version.pep440}?")
+    try:
+        unpacked, archive = ctag_contract.build(out, allow_dirty=allow_dirty)
+        meta = ctag_contract.check(unpacked)
+    except ctag_contract.ContractError as exc:
+        raise ReleaseError(f"contract: {exc}") from None
+    shutil.rmtree(unpacked)  # the archive is what is published (and pinned); SHA256SUMS covers it
     return {
-        "version": version.pep440,
-        "wheel": {"file": _rel(wheel, dist), "sha256": sha256_file(wheel)},
-        "sdist": {"file": _rel(sdist, dist), "sha256": sha256_file(sdist)},
-    }
-
-
-def package_protocol(dist: Path) -> dict[str, Any]:
-    out = dist / "protocol"
-    shutil.copytree(REPO_ROOT / "protocol", out, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    for doc in ("protocol.md", "fontpack.md"):
-        shutil.copyfile(REPO_ROOT / "docs" / doc, out / doc)
-    spec = out / "spec.yaml"
-    import yaml
-
-    proto = (yaml.safe_load(spec.read_text(encoding="utf-8")) or {}).get("spec_version")
-    return {
-        "spec": _rel(spec, dist),
-        "spec_sha256": sha256_file(spec),
-        "protocol_version": proto,
-        "fixtures": sorted(_rel(p, dist) for p in (out / "fixtures").rglob("*") if p.is_file()),
+        "name": meta["name"],
+        "version": meta["version"],
+        "digest": meta["digest"],
+        "protocol": meta["protocol"],
+        "archive": _rel(archive, dist),
+        "sha256": sha256_file(archive),
     }
 
 
 # --------------------------------------------------------------------------
 # Notices
-
-
-def _licence_from_metadata(md: Any) -> str | None:
-    expr = md.get("License-Expression")
-    if expr:
-        return str(expr)
-    classifiers = [c.split(" :: ")[-1] for c in (md.get_all("Classifier") or []) if c.startswith("License ::")]
-    text = md.get("License")
-    if text and "\n" not in text.strip() and len(text.strip()) <= 60 and text.strip().upper() != "UNKNOWN":
-        return text.strip()
-    return " / ".join(classifiers) if classifiers else None
-
-
-def _pypi_licence(name: str, version: str) -> str | None:
-    try:
-        with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/{version}/json", timeout=10) as resp:
-            info = json.load(resp).get("info") or {}
-    except Exception:
-        return None
-    if info.get("license_expression"):
-        return str(info["license_expression"])
-    lic = (info.get("license") or "").strip()
-    if lic and "\n" not in lic and len(lic) <= 60:
-        return lic
-    classifiers = [c.split(" :: ")[-1] for c in info.get("classifiers") or [] if c.startswith("License ::")]
-    return " / ".join(classifiers) or None
-
-
-def companion_dependencies(network: bool = True) -> list[dict[str, Any]]:
-    """The companion's runtime dependency closure (every platform) with licences from package metadata."""
-    from importlib import metadata
-
-    deps: list[dict[str, Any]] = []
-    uv = shutil.which("uv")
-    if uv is not None:
-        out = _run([uv, "export", "--project", str(REPO_ROOT / "companion"), "--frozen", "--no-dev", "--no-hashes",
-                    "--no-emit-project", "--no-header", "--no-annotate", "--format", "requirements-txt"])
-        for line in out.splitlines():
-            line = line.strip()
-            if not line or line.startswith(("#", "-")):
-                continue
-            req, _, marker = line.partition(";")
-            name, _, ver = req.strip().partition("==")
-            deps.append({"name": name.strip(), "version": ver.strip(), "marker": marker.strip() or None})
-    else:  # installed closure of this platform only
-        pending, seen = ["cremind-tag"], set()
-        while pending:
-            dist_name = pending.pop()
-            for req in metadata.requires(dist_name) or []:
-                if "extra ==" in req:
-                    continue
-                name = req.split(";")[0].split("[")[0].strip()
-                for sep in ("<", ">", "=", "!", "~", " "):
-                    name = name.split(sep)[0]
-                key = name.lower().replace("_", "-")
-                if key in seen:
-                    continue
-                seen.add(key)
-                try:
-                    deps.append({"name": name, "version": metadata.version(name), "marker": None})
-                    pending.append(name)
-                except metadata.PackageNotFoundError:
-                    continue
-    for dep in deps:
-        try:
-            md = metadata.metadata(dep["name"])
-            installed = md.get("Version")
-        except metadata.PackageNotFoundError:
-            md, installed = None, None
-        if md is not None and installed == dep["version"]:
-            dep["licence"], dep["licence_source"] = _licence_from_metadata(md), "installed package metadata"
-        elif network and (lic := _pypi_licence(dep["name"], dep["version"])):
-            dep["licence"], dep["licence_source"] = lic, "PyPI metadata"
-        else:
-            dep["licence"], dep["licence_source"] = None, "not installed here; see the project's page"
-        dep["licence"] = dep["licence"] or "unknown"
-    return sorted(deps, key=lambda d: d["name"].lower())
 
 
 # Firmware SDK components: (name, licence, marker found in zephyr.map when linked).
@@ -513,8 +345,6 @@ def write_notices(
     dist: Path,
     firmware: list[dict[str, Any]],
     components: list[tuple[str, str, list[str]]],
-    fonts: dict[str, Any] | None,
-    deps: list[dict[str, Any]] | None,
 ) -> Path:
     qr_license = (REPO_ROOT / "lib" / "third_party" / "qrcodegen" / "LICENSE").read_text(encoding="utf-8")
     parts = [
@@ -525,41 +355,13 @@ def write_notices(
         "contains or links the third-party components below.",
         "",
         "1. Nayuki QR Code generator v1.8.0 — MIT",
-        "   Vendored in the firmware (lib/third_party/qrcodegen, C) and in the companion",
-        "   (cremind_tag/third_party/qrcodegen.py, Python). Source:",
+        "   Vendored in the firmware (lib/third_party/qrcodegen, C). Source:",
         "   https://github.com/nayuki/QR-Code-generator (tag v1.8.0).",
         "",
         *("   " + line if line else "" for line in qr_license.strip().splitlines()),
         "",
     ]
     n = 2
-    if fonts is not None:
-        profiles = ", ".join(f"fonts/{p}/" for p in fonts["packs"])
-        ofl = (REPO_ROOT / "fonts" / "LICENSES" / "OFL-1.1.txt").read_text(encoding="utf-8")
-        parts += [
-            f"{n}. Noto fonts — SIL Open Font License 1.1",
-            f"   The font packs ({profiles}) are bitmap conversions (Modified Versions) of Noto",
-            "   fonts, distributed under OFL-1.1 as \"Cremind Tag Glyph Pack\", derived from Noto.",
-            "   Each pack's NOTICE lists every face's copyright, trademark, version, source URL",
-            "   and SHA-256; LICENSES/ beside it holds the licence texts. \"Noto\" is a trademark",
-            "   of Google LLC; the OFL grants no trademark rights. The packs may be bundled with",
-            "   firmware but not sold by themselves.",
-            "",
-            *("   " + line if line else "" for line in ofl.strip().splitlines()),
-            "",
-        ]
-        n += 1
-        apache = (REPO_ROOT / "fonts" / "LICENSES" / "Apache-2.0.txt").read_text(encoding="utf-8")
-        parts += [
-            f"{n}. Material Icons — Apache License 2.0",
-            "   Face 0 (icons) of every font pack is rendered from google/material-design-icons",
-            "   font/MaterialIcons-Regular.ttf (version and commit in the pack NOTICE).",
-            "   Copyright Google LLC.",
-            "",
-            *("   " + line if line else "" for line in apache.strip().splitlines()),
-            "",
-        ]
-        n += 1
     if components:
         parts += [
             f"{n}. Firmware SDK components (nRF Connect SDK {build.NCS_REVISION}, sdk-nrf "
@@ -571,18 +373,6 @@ def write_notices(
         for comp, licence, users in components:
             everyone = len(users) == len(firmware)
             parts.append(f"   - {comp}: {licence} ({'all targets' if everyone else ', '.join(users)})")
-        parts.append("")
-        n += 1
-    if deps is not None:
-        parts += [
-            f"{n}. Companion runtime dependencies (installed by pip/uv from PyPI, not bundled in the wheel)",
-            "   Licences from each package's metadata.",
-            "",
-            f"   {'package':28} {'version':12} licence",
-        ]
-        for d in deps:
-            marker = f"  [{d['marker']}]" if d.get("marker") else ""
-            parts.append(f"   {d['name']:28} {d['version']:12} {d['licence']}{marker}")
         parts.append("")
     path = dist / "THIRD_PARTY_NOTICES.txt"
     path.write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8", newline="\n")
@@ -655,13 +445,10 @@ def release_notes(manifest: dict[str, Any]) -> str:
     if manifest.get("excluded_targets"):
         lines += ["", "Not in this release: " + "; ".join(
             f"`{e['target']}` ({e['reason']})" for e in manifest["excluded_targets"]) + "."]
-    fonts = manifest.get("fonts")
-    if fonts:
-        lines += ["", "Font packs (manifest id `" + str(fonts["manifest_id"]) + "`): " + ", ".join(
-            f"{p} `{d['pack_id']}` ({d['size']:,} B)" for p, d in fonts["packs"].items()) + "."]
-    if manifest.get("companion"):
-        lines += ["", f"Companion: `{manifest['companion']['wheel']['file'].split('/')[-1]}` "
-                      f"(`pip install` it, or `uv tool install` it)."]
+    contract = manifest["contract"]
+    capabilities = ", ".join(f"{k} {v}" for k, v in contract["protocol"].items())
+    lines += ["", f"Protocol contract `{contract['archive'].split('/')[-1]}` ({capabilities}), digest "
+                  f"`{contract['digest']}`: what host software pins (Cremind: scripts/tags/pin_contract.py)."]
     lines += [
         "",
         "Verify before use (docs/releasing.md, \"Verifying a download\"):",
@@ -669,10 +456,11 @@ def release_notes(manifest: dict[str, Any]) -> str:
         "```sh",
         f"sha256sum -c cremind-tag-{v}.tar.gz.sha256 && tar xzf cremind-tag-{v}.tar.gz",
         f"cd cremind-tag-{v} && sha256sum -c SHA256SUMS",
-        "cremind-tag firmware verify --hex firmware/<target>/<target>-" + v + ".hex",
+        "cremind tags tools firmware verify --hex firmware/<target>/<target>-" + v + ".hex",
         "```",
         "",
-        "Flash gateways and bridges with `cremind-tag firmware flash`, tags with `cremind-tag tag enroll --firmware`.",
+        "Flash gateways and bridges with `cremind tags tools firmware flash`, tags with "
+        "`cremind tags tools tag enroll --firmware` (Cremind's hardware tools).",
     ]
     return "\n".join(lines) + "\n"
 
@@ -683,15 +471,11 @@ def release_notes(manifest: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--targets", help="comma-separated targets (default: every publishable target)")
-    parser.add_argument("--skip-fonts", action="store_true", help="no font packs in the release")
-    parser.add_argument("--skip-wheel", action="store_true", help="no companion wheel/sdist")
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "dist", help="output root (dist/<version>/ inside)")
     parser.add_argument("--firmware-dir", type=Path, default=REPO_ROOT / "build",
                         help="where tools/build.py wrote the artifacts (default: build/)")
     parser.add_argument("--build", action="store_true", help="run tools/build.py --pristine for the targets first")
     parser.add_argument("--allow-dirty", action="store_true", help="package a dirty tree (never for a real release)")
-    parser.add_argument("--jobs", type=int, help="font rasteriser processes")
-    parser.add_argument("--no-network", action="store_true", help="no PyPI lookups for licences")
     parser.add_argument("--no-archive", action="store_true", help="do not write dist/cremind-tag-<version>.tar.gz")
     parser.add_argument("--list-targets", action="store_true", help="print the publishable targets and exit")
     args = parser.parse_args(argv)
@@ -750,18 +534,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  firmware {entry['target']:20} {entry['release_status']:12} {entry['sha256']['hex'][:16]}")
         if firmware:
             write_memory_report(dist, firmware)
-        fonts = None if args.skip_fonts else package_fonts(dist, args.jobs)
-        if fonts:
-            for profile, pack in fonts["packs"].items():
-                print(f"  fonts    {profile:20} pack id {pack['pack_id']} ({pack['size']:,} B)")
-        companion = None if args.skip_wheel else package_companion(dist, version, epoch)
-        if companion:
-            print(f"  companion {companion['wheel']['file']}")
-        protocol = package_protocol(dist)
+        contract = package_contract(dist, args.allow_dirty)
+        print(f"  contract {contract['archive']} (digest {contract['digest'][:16]})")
         shutil.copyfile(REPO_ROOT / "LICENSE", dist / "LICENSE")
-        deps = companion_dependencies(network=not args.no_network) if companion else None
         components = firmware_components(args.firmware_dir, names)
-        write_notices(dist, firmware, components, fonts, deps)
+        write_notices(dist, firmware, components)
     except (ReleaseError, OSError, KeyError) as exc:
         print(f"release: error: {exc}", file=sys.stderr)
         shutil.rmtree(dist, ignore_errors=True)  # never leave a partial release behind
@@ -783,9 +560,7 @@ def main(argv: list[str] | None = None) -> int:
         "firmware": firmware,
         "excluded_targets": excluded
         + [{"target": n, "reason": "not selected (--targets)"} for n in by_name if n not in names],
-        "fonts": fonts,
-        "companion": companion,
-        "protocol": protocol,
+        "contract": contract,
         "notices": "THIRD_PARTY_NOTICES.txt",
         "licence": "LICENSE",
         "checksums": "SHA256SUMS",

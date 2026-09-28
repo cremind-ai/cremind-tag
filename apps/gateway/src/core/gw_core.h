@@ -10,7 +10,7 @@
  * one thread (gw_thread.c); the native_sim tests drive it directly with a
  * mocked backend and a fake clock.
  *
- * Behaviour mirrors the companion's simulator (companion/src/cremind_tag/sim/
+ * Behaviour mirrors the companion's simulator (Cremind's app/tags/runtime/sim/
  * gateway.py, device.py); docs/gateway-firmware.md lists where real hardware
  * forced a difference.
  */

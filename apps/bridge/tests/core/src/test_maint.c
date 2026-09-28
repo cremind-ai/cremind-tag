@@ -1,5 +1,5 @@
 /*
- * Maintenance port as the companion's bridge_maint/client.py drives it:
+ * Maintenance port as Cremind's app/tags/runtime/bridge_maint/client.py drives it:
  * framing, HELLO and credits (docs/protocol.md 1.1-1.3, 10), font
  * installation (docs/fontpack.md 4), FLASH_TEST idempotency, REBOOT.
  */

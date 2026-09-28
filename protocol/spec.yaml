@@ -1,9 +1,10 @@
 # Cremind Tag protocol specification — single source of truth.
 #
-# tools/codegen.py turns this file into:
-#   include/ctag/proto_ids.h, proto_msgs.h              (firmware, C)
-#   companion/src/cremind_tag/protocol/ids.py, msgs.py  (companion, Python)
-# CI fails when either generated file is stale (`python tools/codegen.py --check`).
+# tools/codegen.py turns this file into the firmware's bindings:
+#   include/ctag/proto_ids.h, proto_msgs.h              (C)
+# CI fails when either generated file is stale (`uv run python tools/codegen.py --check`).
+# Host software generates its own from the published contract artifact
+# (tools/contract.py; Cremind: app/tags/runtime/protocol/ids.py, msgs.py).
 #
 # All multi-byte integers on every binary wire format are LITTLE-ENDIAN unless a
 # field says otherwise. Field types: u8 u16 u32 u64 i8 i16 i32, bytes[N] (fixed),

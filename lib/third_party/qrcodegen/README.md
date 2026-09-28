@@ -1,8 +1,8 @@
 # Nayuki QR Code generator (C), v1.8.0
 
 Vendored verbatim from <https://github.com/nayuki/QR-Code-generator>, tag
-`v1.8.0`, directory `c/`. The companion vendors the Python port of the same
-release (`companion/src/cremind_tag/third_party/qrcodegen.py`); docs/protocol.md
+`v1.8.0`, directory `c/`. The host software vendors the Python port of the same
+release (Cremind: `app/tags/runtime/third_party/qrcodegen.py`); docs/protocol.md
 §4.4 requires both to be this exact version. Licence: MIT, see `LICENSE` (the
 text of the release's `Readme.markdown`, also in each file's header).
 

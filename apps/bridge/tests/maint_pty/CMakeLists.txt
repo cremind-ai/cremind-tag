@@ -1,5 +1,5 @@
 # The bridge's maintenance-port core behind a native_sim pseudo-terminal, for
-# driving it with the companion's real client (interop.py).
+# driving it with the host's real client (interop.py, Cremind's hardware runtime).
 cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(ctag_bridge_maint_pty)

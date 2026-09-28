@@ -25,6 +25,12 @@ def _repo(tmp_path: Path) -> Path:
     (root / "protocol" / "fixtures" / "a.json").write_text('{"x": 1}\n', encoding="utf-8")
     (root / "protocol" / "fixtures" / "pack.ctfp").write_bytes(b"\x00\x01\r\n\x02")
     (root / "docs" / "protocol.md").write_bytes(b"# Protocol\r\n")  # as a CRLF checkout has it
+    (root / "tests" / "ztest" / "tag_core" / "src").mkdir(parents=True)
+    (root / "tests" / "ztest" / "tag_core" / "src" / "conversation.h").write_bytes(b"/* conv */\r\n")
+    (root / "hardware").mkdir()
+    (root / "hardware" / "matrix.yaml").write_text("gateways: []\n", encoding="utf-8")
+    (root / "tools").mkdir()
+    (root / "tools" / "targets.yaml").write_text("socs: {}\ntargets: {}\n", encoding="utf-8")
     for args in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]):
         subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
     return root
@@ -37,10 +43,12 @@ def test_builds_a_verifiable_reproducible_artifact(tmp_path: Path) -> None:
     assert meta["version"] == "1.2.3" and meta["schema"] == c.SCHEMA
     assert meta["protocol"] == {"spec_version": 2, "proto_version": 1, "secure_proto_version": 2,
                                 "fontpack_version": 1}
-    assert set(meta["files"]) == {"spec.yaml", "fixtures/a.json", "fixtures/pack.ctfp", "docs/protocol.md"}
+    assert set(meta["files"]) == {"spec.yaml", "fixtures/a.json", "fixtures/pack.ctfp", "docs/protocol.md",
+                                  "tests/conversation.h", "hardware/matrix.yaml", "hardware/targets.yaml"}
     assert meta["source"]["revision"] == subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
                                                         capture_output=True, text=True).stdout.strip()
     assert (target / "docs" / "protocol.md").read_bytes() == b"# Protocol\n"  # text normalised to LF
+    assert (target / "tests" / "conversation.h").read_bytes() == b"/* conv */\n"
     assert (target / "fixtures" / "pack.ctfp").read_bytes() == b"\x00\x01\r\n\x02"  # binary kept as is
     first = archive.read_bytes()
     _, again = c.build(tmp_path / "out2", root=root)
@@ -83,8 +91,16 @@ def test_uncommitted_inputs_are_refused_unless_allowed(tmp_path: Path) -> None:
     assert json.loads((target / c.META).read_text(encoding="utf-8"))["source"]["dirty"] is True
 
 
+def test_a_missing_table_is_refused(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "hardware" / "matrix.yaml").unlink()
+    with pytest.raises(c.ContractError, match="hardware/matrix.yaml is missing"):
+        c.build(tmp_path / "out", root=root, allow_dirty=True)
+
+
 def test_this_repository_builds_its_contract(tmp_path: Path) -> None:
     target, _ = c.build(tmp_path / "out", root=REPO_ROOT, allow_dirty=True)
     meta = c.check(target)
     assert meta["protocol"]["spec_version"] >= 2
-    assert "fixtures/v2_secure.json" in meta["files"]
+    assert {"fixtures/v2_secure.json", "tests/conversation.h", "hardware/matrix.yaml",
+            "hardware/targets.yaml"} <= set(meta["files"])

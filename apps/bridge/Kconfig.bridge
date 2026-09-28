@@ -85,7 +85,7 @@ config CTAG_BRIDGE_MAINT_MAX_FRAME
 	range 256 4096
 	help
 	  The host learns it from HELLO's caps.max_frame and sizes FONT_DATA
-	  chunks to fit (companion bridge_maint/client.py: max_frame - 36).
+	  chunks to fit (Cremind's app/tags/runtime/bridge_maint/client.py: max_frame - 36).
 
 config CTAG_BRIDGE_MAINT_TX_FRAME
 	int "Maintenance port: response frame buffer"

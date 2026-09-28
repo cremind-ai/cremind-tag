@@ -1,5 +1,5 @@
 # Built by twister (build only); interop.py runs the image against the
-# companion's BridgeMaintClient (docs/bridge-firmware.md, "Tests").
+# host's BridgeMaintClient, Cremind's hardware runtime (docs/bridge-firmware.md, "Tests").
 common:
   tags:
     - ctag

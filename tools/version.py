@@ -8,9 +8,12 @@ these copies are derived from it:
 
 - ``apps/<app>/VERSION`` for every app in tools/targets.yaml, in Zephyr's
   format, so ``app_version.h`` gives ``APP_VERSION_MAJOR/MINOR/PATCHLEVEL`` and
-  ``APP_VERSION_STRING`` (what the tag's CAPS and the gateway's HELLO report);
-- ``__version__`` in companion/src/cremind_tag/__init__.py (PEP 440 form:
-  ``0.2.0-rc.1`` becomes ``0.2.0rc1``), which names the wheel.
+  ``APP_VERSION_STRING`` (what the tag's CAPS and the gateway's HELLO report).
+
+It versions the firmware and the protocol contract artifact
+(tools/contract.py) only. Host software has its own version: compatibility
+follows the contract's protocol capabilities and the font pack identifiers,
+never a comparison of application versions.
 
 Examples::
 
@@ -39,13 +42,10 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = REPO_ROOT / "VERSION"
 TARGETS_FILE = REPO_ROOT / "tools" / "targets.yaml"
-COMPANION_INIT = Path("companion") / "src" / "cremind_tag" / "__init__.py"
 
 _SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:alpha|beta|rc)\.(?:0|[1-9]\d*)))?$"
 )
-_PEP440_PRE = {"alpha": "a", "beta": "b", "rc": "rc"}
-_INIT_VERSION = re.compile(r'(?m)^__version__\s*=\s*"([^"]*)"')
 
 
 @dataclass(frozen=True)
@@ -62,14 +62,6 @@ class Version:
     @property
     def tag(self) -> str:
         return f"v{self}"
-
-    @property
-    def pep440(self) -> str:
-        base = f"{self.major}.{self.minor}.{self.patch}"
-        if not self.pre:
-            return base
-        kind, number = self.pre.split(".")
-        return f"{base}{_PEP440_PRE[kind]}{number}"
 
     def zephyr_file(self) -> str:
         """The app VERSION file Zephyr's cmake/modules/version.cmake reads."""
@@ -130,14 +122,6 @@ def app_version(app_dir: Path) -> Version | None:
     return parse_zephyr_version(path.read_text(encoding="utf-8")) if path.is_file() else None
 
 
-def companion_version(root: Path = REPO_ROOT) -> str | None:
-    path = root / COMPANION_INIT
-    if not path.is_file():
-        return None
-    m = _INIT_VERSION.search(path.read_text(encoding="utf-8"))
-    return m[1] if m else None
-
-
 def check(version: Version, root: Path = REPO_ROOT, targets_file: Path | None = None) -> list[str]:
     """Every derived copy that differs from ``version`` (empty = all in sync).
 
@@ -155,9 +139,6 @@ def check(version: Version, root: Path = REPO_ROOT, targets_file: Path | None = 
             problems.append(f"{app}/VERSION is not a Zephyr VERSION file")
         elif found != version:
             problems.append(f"{app}/VERSION says {found}, VERSION says {version}")
-    companion = companion_version(root)
-    if companion is not None and companion != version.pep440:
-        problems.append(f"{COMPANION_INIT.as_posix()} __version__ is {companion}, VERSION says {version.pep440}")
     return problems
 
 
@@ -172,20 +153,13 @@ def sync(version: Version, root: Path = REPO_ROOT, targets_file: Path | None = N
         if app_version(app_dir) != version:  # formatting alone never rewrites a file
             path.write_text(version.zephyr_file(), encoding="utf-8", newline="\n")
             changed.append(path)
-    init = root / COMPANION_INIT
-    if init.is_file():
-        text = init.read_text(encoding="utf-8")
-        new = _INIT_VERSION.sub(f'__version__ = "{version.pep440}"', text, count=1)
-        if new != text:
-            init.write_text(new, encoding="utf-8", newline="\n")
-            changed.append(init)
     return changed
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--check", action="store_true", help="exit 1 if an app VERSION or the companion differs")
+    group.add_argument("--check", action="store_true", help="exit 1 if an app VERSION differs")
     group.add_argument("--sync", action="store_true", help="rewrite the derived copies from VERSION")
     group.add_argument("--set", metavar="VERSION", help="write VERSION, then sync")
     parser.add_argument("--expect-tag", metavar="TAG", help="also require TAG == v<VERSION> (release CI)")
@@ -216,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         status = 1
     if args.json:
-        print(json.dumps({"version": str(version), "tag": version.tag, "pep440": version.pep440}))
+        print(json.dumps({"version": str(version), "tag": version.tag}))
     elif status == 0 and not (args.sync or args.set):
         print(version)
     return status

@@ -55,7 +55,7 @@ bridges:
     mcu: nRF52840
     flash_kib: 1024
     ram_kib: 256
-    external_flash: soldered NOR, capacity from `cremind-tag fonts size` (DK MX25R6435F 8 MiB is for development only)
+    external_flash: soldered NOR, capacity from `cremind tags tools fonts size` (DK MX25R6435F 8 MiB is for development only)
     maintenance_link: usb_cdc_acm
     status: buildable
     notes: apps/bridge links in the exact geometry and passes verify_stack.py (flash 69.7 % free, 144 KiB RAM free with two tag sessions at once); not flashed yet.

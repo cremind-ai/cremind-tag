@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Prove that firmware images (and font packs) are reproducible.
+"""Prove that firmware images are reproducible.
 
-Firmware: the checkout is snapshotted once and copied to a second, differently
+The checkout is snapshotted once and copied to a second, differently
 named path; each copy is built pristine with tools/build.py into its own build
 root (a different, deeper directory). ``zephyr.hex`` and ``zephyr.bin`` of the
 two builds must be byte-identical; ``zephyr.elf`` and the Kconfig/devicetree
@@ -15,16 +15,13 @@ ELF section and symbol at each, path strings found in only one image, date or
 time strings, GNU build ids, and the fix to apply in tools/build.py
 (``repro_cmake_args``).
 
-Font packs (``--fonts dev,full``): each profile is built twice with the
-companion (all processes, then one), and the packs, sidecars, NOTICE and
-LICENSES/ must be identical, pack ids included. This part runs on the host with
-the companion environment.
+Font packs are the host software's: Cremind builds, pins and proves them
+(its scripts/tags/build_font_bundle.py --check).
 
 Examples::
 
     python tools/repro_check.py tag-laowu-bw bridge-nrf52840dk
     python tools/repro_check.py --release-targets             # every target tools/release.py publishes
-    uv run --project companion python tools/repro_check.py --fonts dev,full --no-firmware
     python3 tools/repro_check.py --in-container --all         # CI, inside the toolchain container
 
 The report goes to build/repro/report.json; for a target that differs both
@@ -46,7 +43,6 @@ import shutil
 import struct
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -67,9 +63,6 @@ SNAPSHOT_IGNORE_PATHS = (
     "build-*",
     "dist",
     "twister-out*",
-    "fonts/cache",
-    "fonts/out",
-    "companion/dist",
     "tests/host/build",
 )
 SNAPSHOT_IGNORE_NAMES = frozenset(
@@ -411,58 +404,9 @@ def run_firmware(args: argparse.Namespace, targets: list[str]) -> tuple[list[dic
 
 
 # --------------------------------------------------------------------------
-# Font packs (host, companion environment)
 
 
-def _tree_digest(root: Path) -> dict[str, str]:
-    return {
-        p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in sorted(root.rglob("*"))
-        if p.is_file()
-    }
-
-
-def run_fonts(profiles: list[str]) -> list[dict[str, Any]]:
-    try:
-        import cremind_tag  # noqa: F401
-    except ImportError:
-        raise SystemExit(
-            "error: --fonts needs the companion environment: uv run --project companion python tools/repro_check.py"
-        ) from None
-    cli = [sys.executable, "-c", "from cremind_tag.cli.main import main; main()", "fonts", "build"]
-    results: list[dict[str, Any]] = []
-    with tempfile.TemporaryDirectory(prefix="ctag-fonts-repro-") as tmp:
-        for profile in profiles:
-            runs: list[dict[str, str]] = []
-            ids: list[str | None] = []
-            for label, jobs in (("a", []), ("b", ["--jobs", "1"])):
-                out = Path(tmp) / f"{profile}-{label}"
-                proc = subprocess.run([*cli, "--profile", profile, "--out", str(out), *jobs],
-                                      capture_output=True, text=True, errors="replace", check=False)
-                if proc.returncode != 0:
-                    results.append({"profile": profile, "status": "build-failed",
-                                    "detail": (proc.stderr or proc.stdout).strip().splitlines()[-3:]})
-                    break
-                runs.append(_tree_digest(out))
-                sidecar = json.loads((out / "fontpack.json").read_text(encoding="utf-8"))
-                ids.append(sidecar.get("pack_id"))
-            else:
-                differing = sorted(k for k in runs[0].keys() | runs[1].keys() if runs[0].get(k) != runs[1].get(k))
-                results.append({
-                    "profile": profile,
-                    "status": "reproducible" if not differing and ids[0] == ids[1] else "DIFFERENT",
-                    "pack_ids": ids,
-                    "files": len(runs[0]),
-                    "differing_files": differing,
-                    "fontpack_sha256": runs[0].get("fontpack.ctfp"),
-                })
-    return results
-
-
-# --------------------------------------------------------------------------
-
-
-def _print_summary(firmware: list[dict[str, Any]], fonts: list[dict[str, Any]]) -> None:
+def _print_summary(firmware: list[dict[str, Any]]) -> None:
     if firmware:
         print(f"\n{'target':20} {'status':20} {'zephyr.hex':14} {'zephyr.bin':14} {'zephyr.elf':14} kconfig/dts")
         for r in firmware:
@@ -480,13 +424,10 @@ def _print_summary(firmware: list[dict[str, Any]], fonts: list[dict[str, Any]]) 
                 print(f"    hint: {hint}")
             for item in (r.get("diagnosis") or {}).get("ranges", [])[:5]:
                 print(f"    {item['start']} +{item['length']}: {item.get('section')} {item.get('symbol_a')}")
-    for r in fonts:
-        print(f"fonts {r['profile']:6} {r['status']:14} pack ids {r.get('pack_ids')} "
-              f"({r.get('files', 0)} files{', differing: ' + ', '.join(r['differing_files']) if r.get('differing_files') else ''})")
 
 
-def _exit_status(firmware: list[dict[str, Any]], fonts: list[dict[str, Any]]) -> int:
-    statuses = [r["status"] for r in (*firmware, *fonts)]
+def _exit_status(firmware: list[dict[str, Any]]) -> int:
+    statuses = [r["status"] for r in firmware]
     if any(s in ("DIFFERENT", "build-failed") for s in statuses):
         return EXIT_FAILED
     return EXIT_SKIPPED if "skipped" in statuses else EXIT_OK
@@ -503,8 +444,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("targets", nargs="*", help="firmware targets from tools/targets.yaml")
     parser.add_argument("--all", action="store_true", help="every target")
     parser.add_argument("--release-targets", action="store_true", help="the targets tools/release.py publishes")
-    parser.add_argument("--no-firmware", action="store_true", help="check only --fonts")
-    parser.add_argument("--fonts", help="comma-separated font-pack profiles to build twice (dev,full)")
     parser.add_argument("--in-container", action="store_true", help="already inside the NCS toolchain (CI)")
     parser.add_argument("--work-root", help="scratch directory for the two checkouts and builds "
                                             "(default: $CTAG_BUILD_ROOT/repro)")
@@ -514,21 +453,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     targets_all, _ = build.load_matrix()
-    names: list[str] = []
-    if not args.no_firmware:
-        names = list(targets_all) if args.all else release_targets() if args.release_targets else args.targets
-        unknown = [n for n in names if n not in targets_all]
-        if unknown or not names:
-            parser.error(f"unknown target(s): {', '.join(unknown)}" if unknown
-                         else "give target names, --all, --release-targets or --no-firmware")
-    fonts = [p.strip() for p in (args.fonts or "").split(",") if p.strip()]
-    if args.no_firmware and not fonts:
-        parser.error("--no-firmware needs --fonts")
+    names = list(targets_all) if args.all else release_targets() if args.release_targets else args.targets
+    unknown = [n for n in names if n not in targets_all]
+    if unknown or not names:
+        parser.error(f"unknown target(s): {', '.join(unknown)}" if unknown
+                     else "give target names, --all or --release-targets")
 
-    firmware_results: list[dict[str, Any]] = []
-    if names and args.in_container:
+    if args.in_container:
         firmware_results, _ = run_firmware(args, names)
-    elif names:
+    else:
         inner = ["python3", f"{build.CONTAINER_REPO}/tools/repro_check.py", "--in-container", "--work-root",
                  f"{build.CONTAINER_BUILD}/repro", *names]
         if args.keep:
@@ -539,21 +472,17 @@ def main(argv: list[str] | None = None) -> int:
         report = REPORT_DIR / "report.json"
         if rc == EXIT_USAGE or not report.is_file():
             return rc if rc else EXIT_USAGE
-        firmware_results = json.loads(report.read_text(encoding="utf-8")).get("firmware", [])
-        if not fonts:
-            if args.json:
-                args.json.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(report, args.json)
-            return rc
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(report, args.json)
+        return rc
 
-    font_results = run_fonts(fonts) if fonts else []
     doc = {
         "tool": "repro_check",
         "version": 1,
         "toolchain": build.IMAGE,
         "ncs": build.NCS_REVISION,
         "firmware": firmware_results,
-        "fonts": font_results,
     }
     out = args.json or REPORT_DIR / "report.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -565,9 +494,9 @@ def main(argv: list[str] | None = None) -> int:
                 os.chown(path, uid, gid)
             except OSError:
                 pass
-    _print_summary(firmware_results, font_results)
+    _print_summary(firmware_results)
     print(f"report: {build._display(out)}")
-    return _exit_status(firmware_results, font_results)
+    return _exit_status(firmware_results)
 
 
 if __name__ == "__main__":
