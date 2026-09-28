@@ -10,13 +10,21 @@ it must interoperate with, and the companion's simulator
 (`companion/src/cremind_tag/sim/gateway.py`, [simulator.md](simulator.md))
 implements the same rules; §12 lists every place the firmware differs and why.
 
-| Target | Board | Status | Memory |
-|---|---|---|---|
-| `gateway-nrf52840dk` | `nrf52840dk/nrf52840` | builds, `verify_stack.py` 16/16, meets its targets; not yet run on hardware | [§8](#8-memory) |
-| `gateway-nrf52dk` | `nrf52dk/nrf52832` (stand-in for the nRF52832 + CH340 board) | builds, `verify_stack.py` 16/16; **4,688 B RAM free with a reduced queue and unmeasured stacks — subject to resource qualification** | [§8](#8-memory) |
+**Protocol v2** ([connect-setup.md](connect-setup.md): device identity,
+ownership, Noise IK sessions, static-OOB provisioning, DISCOVER, tunnels) is
+built with `CONFIG_CTAG_GW_SECURE` on the nRF52840 targets and described in
+[§15](#15-protocol-v2-config_ctag_gw_secure); the nRF52832 gateway stays on
+protocol v1 (§15.12). Sections 1–14 describe v1 and what v2 keeps.
 
-Build: `python tools/build.py gateway-nrf52840dk gateway-nrf52dk` (on Windows:
-`unset VIRTUAL_ENV; companion/.venv/Scripts/python.exe tools/build.py …`); see
+| Target | Board | Protocol | Status | Memory |
+|---|---|---|---|---|
+| `gateway-nrf52840dk` | `nrf52840dk/nrf52840` | v2 | builds, `verify_stack.py` 16/16, meets its targets; not yet run on hardware | [§8](#8-memory) |
+| `gateway-nrf52840dongle` | `nrf52840dongle/nrf52840` | v2 | builds, `verify_stack.py` 16/16, meets its targets; not yet run on hardware | [§8](#8-memory) |
+| `gateway-nrf52dk` | `nrf52dk/nrf52832` (stand-in for the nRF52832 + CH340 board) | v1 | builds, `verify_stack.py` 16/16; **4.5 KiB RAM free with a reduced queue and unmeasured stacks — subject to resource qualification**; too small for v2 (a v2 fit build overflows RAM by 12 KB, §15.12) | [§8](#8-memory) |
+
+Build: `python tools/build.py gateway-nrf52840dk gateway-nrf52840dongle
+gateway-nrf52dk` (on Windows: `unset VIRTUAL_ENV;
+companion/.venv/Scripts/python.exe tools/build.py …`); see
 [building.md](building.md).
 
 ---
@@ -157,7 +165,8 @@ beacons (AD type 0x2B, beacon type 0) with their RSSI, which the provisioner's
 each UUID matching the prefix is reported once as `EVT_UNPROV_BEACON {uuid,
 rssi, oob}` (up to 16 devices per scan). `duration_s = 0` closes the window.
 
-**`PROVISION {op_id, uuid, name?}`**
+**`PROVISION {op_id, uuid, name?}`** (v1; v2 requires `static_oob` and
+authenticates with it, §15.7)
 
 | Condition | Answer / outcome |
 |---|---|
@@ -329,7 +338,10 @@ battery_mv, flags}`, at most one per `(bridge, tag)` every 10 s
 | Net key, app key, device keys, IV index, sequence number, replay list, CDB (nodes, `CONFIGURED` flags) | Zephyr mesh settings; keys as persistent PSA keys in trusted storage (`BT_MESH_SECURE_STORAGE`) | yes |
 | Bridge names | settings `ctag/gw/n/<addr>` | yes |
 | Assignment table | settings `ctag/gw/a` (10-byte records) | yes |
-| Retained events, idempotency slots, delivery queue, transfers, results de-duplication, scan state | RAM | no — a new `boot_id` tells the companion (§1.2) |
+| v2: identity key (X25519, 32 B) | settings `ctag/gw/id` | yes; a factory reset keeps it |
+| v2: ownership record (176 B, CRC-32) | settings `ctag/gw/own` | yes; a factory reset stores UNOWNED |
+| v2: generation floor (u32) | settings `ctag/gw/genf` | yes, and survives a corrupt record (§15.2) |
+| Retained events, idempotency slots, delivery queue, transfers, results de-duplication, scan state; v2: the secure session, challenges, tunnels, DISCOVER windows | RAM | no — a new `boot_id` tells the companion (§1.2); a v2 session is opened again |
 
 Settings live on NVS in the board's `storage_partition` (nRF52840 DK: 32 KiB at
 `0xf8000`; nRF52840 Dongle: 32 KiB at `0xd8000`, below its USB bootloader;
@@ -357,8 +369,12 @@ every bridge must then be reset and provisioned again.
 | `CTAG_GW_MESH_OPS` | 8 | 8 | assignments and tag commands in flight |
 | `CTAG_GW_ASSIGN_MAX` | 32 | 24 | assignment table |
 | `CTAG_GW_UART_RX_RING` / `_TX_RING` | 1024 / 1024 | 768 / 256 | serial driver rings |
-| `CTAG_GW_EVQ_DEPTH` | 24 | 16 | Bluetooth → loop event queue |
-| `MAIN_STACK_SIZE` (start-up + loop) | 4096 | 3072 | |
+| `CTAG_GW_EVQ_DEPTH` | 24 | 16 | Bluetooth → loop event queue (v2: 172-byte events, room for a `TUNNEL_UP`; v1: 64) |
+| `CTAG_GW_SECURE` | y | n | protocol v2 (§15) |
+| `CTAG_SECURE_HEAP_SIZE` | 12288 | — | the Noise*/HACL* heap: one session plus the largest message sealed or opened (§15.11) |
+| `CTAG_GW_TUNNELS` / `CTAG_GW_DISCOVERED_SLOTS` | 2 / 16 | — | tunnels open at once / `EVT_DISCOVERED` rate-limit entries |
+| `BT_MESH_ECDH_P256_HMAC_SHA256_AES_CCM`, `BT_MESH_OOB_AUTH_REQUIRED` | y, y | —, — | static OOB over HMAC-SHA256 (§15.7) |
+| `MAIN_STACK_SIZE` (start-up + loop) | 12288 (v2) | 3072 | the v2 crypto runs on the loop: 9,916 B worst static chain (§15.11) |
 | `SYSTEM_WORKQUEUE_STACK_SIZE` | 4096 | 2560 | |
 | `BT_RX_STACK_SIZE` | 3300 | 2560 | |
 | `BT_MESH_ADV_STACK_SIZE` | 4000 | 2048 | |
@@ -382,13 +398,21 @@ shipping), manufacturer "Cremind", product "Cremind Tag gateway".
 
 ## 8. Memory
 
-`tools/build.py` (NCS v3.4.1, Zephyr controller, `--no-sysbuild`), 2026-09-28:
+`tools/build.py` (NCS v3.4.1, Zephyr controller, `--no-sysbuild`), 2026-09-28,
+protocol v2 on the nRF52840 targets:
 
 | Target | Flash used / code partition | Headroom (min 15 %) | RAM used / RAM | RAM free | Stack check |
 |---|---|---|---|---|---|
-| `gateway-nrf52840dk` | 229,912 / 1,015,808 B (22.6 %) | 77.4 % | 100,372 / 262,144 B | 161,772 B | pass 16/16 |
-| `gateway-nrf52dk` | 198,764 / 499,712 B (39.8 %) | 60.2 % | 60,848 / 65,536 B | **4,688 B** | pass 16/16 |
-| debug (`debug/rtt.conf`) nRF52840 / nRF52832, before the 104-byte event slots (+128 B RAM since) | 299,052 / 255,764 B | | 103,252 / 63,408 B | 158,892 / 2,128 B | |
+| `gateway-nrf52840dk` (v2) | 289,156 / 1,015,808 B (28.5 %) | 71.5 % | 127,348 / 262,144 B | 134,796 B | pass 16/16 |
+| `gateway-nrf52840dongle` (v2) | 285,704 / 880,640 B (32.4 %) | 67.6 % | 127,284 / 262,144 B | 134,860 B | pass 16/16 |
+| `gateway-nrf52dk` (v1) | 198,896 / 499,712 B (39.8 %) | 60.2 % | 60,912 / 65,536 B | **4,624 B** | pass 16/16 |
+| `gateway-nrf52840dk` as v1 (before v2, same day) | 229,912 / 1,015,808 B (22.6 %) | 77.4 % | 100,372 / 262,144 B | 161,772 B | pass 16/16 |
+| debug (`debug/rtt.conf`) nRF52840 / nRF52832, v1, before the 104-byte event slots (+128 B RAM since) | 299,052 / 255,764 B | | 103,252 / 63,408 B | 158,892 / 2,128 B | |
+
+Protocol v2 costs the nRF52840 **+59.2 KB of flash and +27.0 KB of RAM**
+(§15.11 itemises both). The nRF52832 build (v1) is 132 B of flash and 64 B
+of RAM above the earlier figures (shared code: the v2 CBOR keys, the core's
+64-bit retained-event cursor; not itemised further).
 
 The protocol v1 finalisation (`EVT_RESULT` with `flags` and `stored_epoch`)
 cost 48–64 B of flash and 128 B of RAM on each: the 16 retained event slots grew
@@ -404,7 +428,7 @@ heap 1,024, `gw_evq` 1,024, controller threads 1,472, mesh segmentation 1,504
 (segment buffers, `seg_rx`, `seg_tx`), UART rings 1,024. On the nRF52840 the
 core is 39,168 B (a 20 KiB arena) and USB adds ~5 KiB.
 
-**nRF52832 verdict.** The application fits with 4.6 KiB spare only after
+**nRF52832 verdict.** The application fits with 4.5 KiB spare only after
 reducing the delivery queue (a 5 KiB layout arena), the event and HCI buffers
 and the thread stacks. The trimmed stacks are not measured; they are the risk,
 not the static RAM. Until the resource qualification in
@@ -502,6 +526,34 @@ twister, 2026-09-28):
   streaming COBS transmitter equal to the library encoder across the 254-byte
   block boundary.
 
+**Protocol v2** (`ctag.gateway.core.v2`, 79 tests; 2026-09-28 twister: v1
+61 and v2 79 on both platforms, 280 test cases, all passing; the same sources with
+`CONFIG_CTAG_GW_SECURE`, `lib/secure` linked, a 24 KiB secure heap shared by
+the gateway and the test's Noise initiator). Every suite above runs again
+*through a secure session* — the test host opens Noise IK as the pinned
+worker, seals each request into `SECURE_DATA` and opens every answer and
+event, asserting the outer `request_id` 0 — except two `gw_serial` tests whose
+premise v2 changes (HELLO re-sending retained events, and a REBOOT answer held
+back by a HELLO: in v2 a HELLO ends the session, and its events wait for the
+next one, which `gw_v2` tests), plus the `gw_v2` suite (20): plaintext v1 requests need a
+session, IDENTIFY (fields, fresh challenges, no authority when unowned),
+SECURE_OPEN failures (`INVALID`, `AUTH_FAILED`, `NO_RESOURCES` with the heap
+recovering), RNG failures (`INTERNAL` for IDENTIFY, SECURE_OPEN, STATUS), a
+decrypt failure ending the session with a plaintext `AUTH_REQUIRED`, HELLO
+dropping the session, answers of an old session never reaching a new one,
+inner RESPONSE/EVENT flags ignored with the credit returned, the access table
+of an unowned gateway (and `UNSUPPORTED` for bridge messages and a sealed
+SECURE_OPEN), CLAIM fields and grant rules (`STORAGE_ERROR`,
+`STALE_GENERATION`, single-use challenges), STATUS fields (the owner only to
+the pinned controller), another controller recovering and receiving the
+retained events, RELEASE wiping and rebooting, the boot rule, PROVISION's
+static OOB (required; `SECURITY_CONFIG` for no static OOB offered, a failed
+exchange and the deadline after the capabilities; `TIMEOUT` before them),
+DISCOVER (rate limit, window, idempotency), tunnels (round trip with
+fragmentation through the lane, reassembly, gaps, busy, too large, close,
+idle timeout, failed send), CAPS2 in the inventory. Between tests the
+harness frees both Noise objects and asserts the secure heap is empty.
+
 Run: `west twister -T /work/apps/gateway/tests/core -p native_sim -p native_sim/native/64 -x ZEPHYR_EXTRA_MODULES=/work --outdir /build/twister-gw-core`
 (after `apt-get install -y make`).
 
@@ -520,6 +572,23 @@ scenarios pass** —
 | lost LAYOUT_STATUS OK → DUPLICATE → one EVT_RESULT | pass (re-commit after 10 s) |
 | provisioning, configuration, removal | pass |
 | REBOOT → new `boot_id`, `SessionStarted.boot_changed` | pass |
+
+**Interop, protocol v2** (the same app with `v2.conf`, driven by
+`interop_v2.py` with the companion's reference `SecureChannel`, grants and
+identity; the simulated bridge `0x0002` runs `lib/secure` as a BRIDGE behind
+tunnels). 2026-09-28: **9/9 scenarios pass** (and v1 8/8 in the same run) —
+
+| Scenario | Result |
+|---|---|
+| plaintext layer: HELLO, IDENTIFY, `AUTH_REQUIRED`, SECURE_OPEN with garbage → `AUTH_FAILED` | pass |
+| SECURE_OPEN + CLAIM with a signed grant | pass: gen 1, answered in ~21 ms on the host; a replayed grant `GRANT_INVALID`; STATUS with the owner for the pinned worker |
+| access table: another controller, RECOVER | pass: no owner in its STATUS, `NOT_OWNER`, RECOVER gen 2, then pinned; the first worker refused |
+| sealed answers and events | pass: DELIVER_LAYOUT → sealed `EVT_RESULT OK` with the digest, EVENT_ACK |
+| DISCOVER → EVT_DISCOVERED | pass: one per bridge, duplicates rate-limited (counters), 121 s `INVALID` |
+| tunnel to the bridge's endpoint: Noise IK + PAIR | pass: `ident2` in `EVT_TUNNEL OPEN`, Noise IK through the tunnel (`Link.TUNNEL`), PAIR with the setup proof, `proof_d` checks, MAINT_AUTH through the tunnel `NOT_OWNER`, a tunnel to 0x0003 closed `BUSY` |
+| PROVISION with static OOB | pass: none → `INVALID`, wrong → `SECURITY_CONFIG` addr 0, derived → `0x0004` |
+| decrypt failure ends the session | pass |
+| RELEASE → UNOWNED, network wiped | pass: reboot, UNOWNED at gen 3, CLAIM gen 4 on an empty network |
 
 ---
 
@@ -542,6 +611,8 @@ scenarios pass** —
 | `EVT_UNPROV_BEACON` | only devices the simulator knows are unprovisioned | every matching unprovisioned beacon, once per scan, ≤ 16 devices | radio reality; a provisioned node does not beacon |
 | Names | any length | ≤ 32 bytes, cut at a UTF-8 boundary | RAM, settings |
 | REBOOT on a UART | the TCP connection drops | the port stays open; the companion notices through a timeout and a new `boot_id` | UART has no enumeration (USB re-enumerates as in the simulator) |
+| v2 `PROVISION` without `static_oob` | `ACCEPTED`, then `EVT_PROVISIONED SECURITY_CONFIG` | `INVALID` "missing field" at once | the field is required of a v2 request (spec: "required by v2 gateways"); nothing is started |
+| v2 failure after the capabilities (radio loss mid-exchange) | n/a | `SECURITY_CONFIG` | Zephyr reports no reason for a closed link (§15.7) |
 
 ## 13. Hardware test plan
 
@@ -590,12 +661,298 @@ results in the board's qualification report.
   segments, CDB persistence through reboots, secure storage of device keys),
   USB CDC ACM enumeration and the nRF UARTE path are verified only by building.
 - Stack sizes are unmeasured on both boards (§10, §13 step 5).
-- The nRF52832 gateway's RAM margin (4.6 KiB) and its reduced queue need the
+- The nRF52832 gateway's RAM margin (4.5 KiB) and its reduced queue need the
   resource qualification before it is used.
 - USB VID/PID `1209:0002` is a pid.codes test pair; `MESH_COMPANY_ID` 0xFFFF is
   the SIG test value (spec.yaml): both need assigned values before production.
 - No watchdog is enabled (optional per the plan); a hang would need a power
   cycle. `CONFIG_WATCHDOG` with a feed from the gateway loop is a small addition
   once the loop's worst-case pass time is measured.
-- PB-ADV without OOB authentication (protocol §2): provision in a controlled
-  environment.
+- v1 (the nRF52832): PB-ADV without OOB authentication (protocol §2): provision
+  in a controlled environment. v2 authenticates with static OOB (§15.7).
+- v2: see §15.13.
+
+---
+
+## 15. Protocol v2 (`CONFIG_CTAG_GW_SECURE`)
+
+The normative description is [connect-setup.md](connect-setup.md) (§2
+identity, §3 keys and sessions, §4 ownership, §5 messages, §6 mesh); the
+reference is the companion's `cremind_tag.secure` package (`device.py` for
+the device rules) and `protocol/fixtures/v2_secure.json`. The gateway runs
+the role-independent secure endpoint of `lib/secure`
+([firmware-libs.md](firmware-libs.md#ctag_secure--protocol-v2-secure-endpoint-connect-setupmd-25))
+behind its serial server: `src/core/gw_secure.c` (plaintext layer, access
+table, the ownership messages, sealing), `src/core/gw_tunnel.c` (DISCOVER,
+tunnels), `src/reset.c` (the button), and v2 parts of `main.c`, `mesh.c`,
+`store.c`, `gw_serial.c`, `gw_nodes.c`. Everything in `src/core` stays
+Bluetooth-free and runs in the native_sim tests.
+
+### 15.1 Start-up
+
+Before anything else `main()` checks the factory-reset button (§15.10). Then
+the v1 start-up (§1), and `secure_boot()`:
+
+1. The identity key from settings `ctag/gw/id`; on first boot 32 bytes of
+   `sys_csrand_get()` (retried until the entropy driver is ready — never a
+   weaker source), stored. Its X25519 public key is `ik`; `device_id` and
+   `short_id` follow (connect-setup.md §2.1).
+2. The ownership record (`ctag/gw/own`) and the generation floor
+   (`ctag/gw/genf`) are loaded into the endpoint (§15.2). The RAM copies of
+   the key and the record are wiped.
+3. A factory reset stores an UNOWNED record at the kept generation, wipes the
+   network (below) and reboots.
+4. **An unowned gateway never keeps a network**: if the record is not OWNED
+   and the CDB has bridges or the assignment table entries (a v1 network at
+   the first v2 boot, or a RELEASE interrupted by a power loss), the network
+   is wiped and the gateway reboots into a new, empty one.
+
+*Wiping the network* (`gw_mesh_wipe`, also RELEASE): every bridge's stored
+name, `bt_mesh_cdb_clear()`, `bt_mesh_reset()` of the gateway node, and the
+assignment table. The next boot creates a new network key and app key.
+
+### 15.2 Ownership record and generation floor
+
+`struct ctag_owner_record`, stored as 176 bytes: `version` (1), `state`
+(UNOWNED 0, OWNED 1, RELEASED 2), `flags`, a zero byte, `gen` u32 LE, the
+authority's Ed25519 key (32), `owner` (16), the pinned controller (32), and
+the fields bridges and tags use (`op_key`, override and pending secrets,
+pending controller), then a CRC-32 over the first 172 bytes. A record with
+another length, version, CRC, state, an unknown flag or a non-zero reserved
+byte is corrupt.
+
+A change is **stored before it is answered**: the endpoint calls
+`store_owner(record, gen)`, which first raises the floor (`ctag/gw/genf`,
+only when `gen` is above it), then writes the record. A failed write answers
+`STORAGE_ERROR` and changes nothing. At boot a corrupt or missing record
+means UNOWNED at the floor's generation; a good one keeps its content with
+`gen = max(gen, floor)` — a lost or rolled-back record can never rewind the
+generation a grant is checked against.
+
+### 15.3 Plaintext layer
+
+| Frame | Answer |
+|---|---|
+| `HELLO` | as in v1 (`proto` 1); it also ends the secure session and drops its unsent answers |
+| `PING` | answered in plaintext |
+| `IDENTIFY {}` | `{status, proto 2, role GATEWAY, device_id, ik, fw, build, board, owner_state, gen, challenge, authority_id (OWNED only)}` — a fresh 16-byte challenge each time, valid until the next `IDENTIFY` or `STATUS`, one grant check or a reboot |
+| `SECURE_OPEN {data: Noise message 1, 96 B}` | the Noise IK responder (prologue `"cremind-tag/v2" \| link 1 (serial) \| device_id`) → `{status OK, data: message 2, 48 B}`; it replaces any session. `AUTH_FAILED` when message 1 does not authenticate, `NO_RESOURCES` when the secure heap is exhausted, `INTERNAL` when the RNG fails (`secure_failures`) |
+| `SECURE_DATA {data}` | one sealed secure message (§15.4) |
+| anything else | `AUTH_REQUIRED` (`auth_required`) |
+
+### 15.4 The session
+
+- **Framing.** A secure message is `type u8 | flags u8 | request_id u16le |
+  CBOR` (the serial catalogue), sealed with the session. It travels as a
+  `SECURE_DATA` frame with `request_id` 0 and `flags` 0 whose payload is
+  `{41 (data): ciphertext}`, in both directions; the **inner header is
+  authoritative**. Credits count the outer frames: every sealed answer
+  returns its request's credit, as in v1.
+- **Failures.** `SECURE_DATA` without a session, or one that does not
+  decrypt, is answered in plaintext: a `SECURE_DATA` frame flagged RESPONSE,
+  `request_id` 0, `{status: AUTH_REQUIRED}`. A message that fails to decrypt
+  (tampered, replayed, out of order) also **ends the session**
+  (`decrypt_failures`). An inner header shorter than 4 bytes or flagged
+  RESPONSE/EVENT is dropped (`unexpected_frames`; its credit returns).
+- **Answers belong to their session.** Each answer records the session it
+  was asked in; one whose session ended meanwhile (HELLO, a new
+  SECURE_OPEN, a decrypt failure) is dropped unsent, never sealed into
+  another session.
+- **Events only for the owner.** Retained and best-effort events go out
+  only into a *privileged* session — the gateway is OWNED and the session's
+  controller is the pinned one — and are sealed into it. Retained events
+  wait (up to the ring's 16) and are re-sent when such a session opens
+  (`SECURE_OPEN`) or a session becomes privileged (`CLAIM`, `RECOVER`).
+- Inside a session `HELLO`, `IDENTIFY`, `SECURE_OPEN`, `SECURE_DATA` and the
+  bridge/tag messages `PAIR`, `REKEY`, `MAINT_AUTH`, `RECOMMISSION`,
+  `FACTORY_SETUP` answer `UNSUPPORTED`.
+
+### 15.5 Access table (connect-setup.md §4.2)
+
+| Gateway | Session's controller | Served |
+|---|---|---|
+| UNOWNED | any | `INFO`, `PING`, `STATUS`, `CLAIM` |
+| OWNED | the pinned controller | everything (the v1 catalogue, `STATUS`, `RECOVER`, `RELEASE`, `DISCOVER`, `TUNNEL_*`) |
+| OWNED | another controller | `INFO`, `PING`, `STATUS`, `RECOVER` |
+
+Anything else is `NOT_OWNER` (`not_owner`), decided before the message's own
+rules: a refused grant message leaves the challenge unused.
+
+### 15.6 STATUS, CLAIM, RECOVER, RELEASE
+
+The endpoint (`ctag_secure_handle`) implements `device.py`:
+
+- `STATUS {}` → `{status, owner_state, gen, challenge (fresh), controller_match,
+  authority_id (OWNED), owner (OWNED, and only to the pinned controller)}`.
+- `CLAIM {grant, sig}` (op CLAIM) → OWNED at `gen_to` with the grant's
+  authority, owner and controller; `{gen}`.
+- `RECOVER {grant, sig}` (OWNED only, op RECOVER) → the controller becomes the
+  grant's, `gen_to`; authority and owner stay; `{gen}`.
+- `RELEASE {grant, sig}` (op RELEASE) → UNOWNED at `gen_to`, `{gen, data: b""}`;
+  then the network is wiped (§15.1), the tunnels, retained events and
+  idempotency slots are forgotten and the gateway **reboots once the answer
+  is out** (as REBOOT, §2).
+
+A missing `grant` or `sig` is `INVALID` and keeps the challenge; otherwise
+the challenge is used up whatever the outcome. The grant rules run in the
+order of `check_grant`: canonical grant (`GRANT_INVALID`), 64-byte
+signature, device id, role and op, the challenge (constant time), `gen_from
+= gen` (`STALE_GENERATION`), the grant's controller = the session's, the
+Ed25519 signature over `"cremind-tag/v2/grant" | grant`, then ownership
+(OWNED: the op must be one an owner may use and authority and owner must be
+the pinned ones, else `NOT_OWNER`; UNOWNED: only CLAIM). Counters `claims`,
+`recovers`, `releases`.
+
+### 15.7 PROVISION with static OOB (connect-setup.md §3.4, §6)
+
+`PROVISION {op_id, uuid, name?, static_oob}`: `static_oob` (32 bytes) is
+required (`INVALID` "missing field" otherwise, not remembered). It is handed
+to `gw_mesh_provision()`, which keeps it for the link and wipes it at link
+close. In the provisioner's `capabilities` callback:
+
+- the device offers static OOB and the HMAC-SHA256 algorithm →
+  `bt_mesh_auth_method_set_static(value, 32)`; the core is told the
+  authentication began (`GW_EVT_PROV_AUTH`);
+- anything else → `GW_EVT_PROV_SECURITY` and
+  `bt_mesh_auth_method_set_input(ENTER_NUMBER, 1)`, a method this provisioner
+  can never complete (it has no input callback), so the stack fails the link.
+  There is no fallback to unauthenticated provisioning.
+
+| Outcome | `EVT_PROVISIONED` |
+|---|---|
+| `node_added` | `OK` with the address |
+| the link never opened | `NOT_FOUND` |
+| the link opened, no capabilities arrived before it closed or the 90 s guard | `TIMEOUT` (transient) |
+| the capabilities arrived (static OOB refused, or its exchange began) and the node was not added | **`SECURITY_CONFIG`**, addr 0 (final) |
+
+Zephyr reports no reason for a closed provisioning link; a wrong static OOB
+shows only as a link that closes without `node_added` (the device's
+Provisioning Failed "confirmation failed", or the provisioner's own check),
+so every failure after the capabilities counts as an authentication failure:
+a mistyped setup code must end the worker's retries, which `TIMEOUT` would
+not. `prov_security` counts `SECURITY_CONFIG` outcomes. Kconfig:
+`CONFIG_BT_MESH_ECDH_P256_HMAC_SHA256_AES_CCM=y` and
+`CONFIG_BT_MESH_OOB_AUTH_REQUIRED=y` (names verified in NCS v3.4.1,
+[firmware-notes.md](firmware-notes.md) §3; the latter matters only for the
+provisionee role, which the gateway never uses over PB-ADV).
+
+### 15.8 DISCOVER
+
+`DISCOVER {op_id, bridge (0 = every configured bridge), duration_s ≤ 120,
+tag_id (0 = any)}` → `ACCEPTED` (idempotent by `op_id`; > 120 s is
+`INVALID`): the mesh `DISCOVER` (unsegmented) goes to each bridge, which
+opens a window of `duration_s` + 2 s for its answers. Each `DISCOVERED` inside
+its bridge's window becomes a best-effort `EVT_DISCOVERED {bridge, tag_id,
+rssi, flags}`, at most one per `(bridge, tag)` per 5 s (16 entries;
+`discovered`, `discovered_limited`). Outside a window it is
+`unexpected_mesh`. Candidates are never kept or listed.
+
+### 15.9 Tunnels
+
+| Request | Behaviour |
+|---|---|
+| `TUNNEL_OPEN {op_id, bridge, tag_id (0 = the bridge's own endpoint), duration_s 1–255}` | `{status OK, tunnel}` with a fresh non-zero id (idempotent by `op_id`: a repeat answers the same id with `detail DUPLICATE`); the mesh `TUNNEL_OPEN {tunnel, tag_id, timeout_s}`. One tunnel per bridge and `CTAG_GW_TUNNELS` (2) at once: `BUSY` beyond. `NOT_FOUND` for an unknown or unconfigured bridge |
+| `TUNNEL_SEND {tunnel, data}` | one message of 1–400 bytes (`INVALID` empty, `TOO_LARGE` beyond, `NOT_FOUND` unknown tunnel, `BUSY` while the previous message is still being sent) → `OK`; fragmented into `TUNNEL_DATA` of ≤ 150 bytes (`seq` from 0, START, END), each an acknowledged segmented send through the lane (§4). A fragment that fails (the lane's retries exhausted) closes the tunnel: mesh `TUNNEL_CLOSE TIMEOUT` and `EVT_TUNNEL CLOSED TIMEOUT` |
+| `TUNNEL_CLOSE {tunnel}` | `OK`; mesh `TUNNEL_CLOSE OK`; no event |
+
+Upward, `TUNNEL_UP` fragments are reassembled in order; the endpoint's first
+message becomes `EVT_TUNNEL {tunnel, bridge, tag_id, state OPEN, data}` (the
+bridge's or tag's `ident2`), every later one `state DATA`. A gap drops the
+message (`tunnel_gaps`; the Noise session above fails and the worker opens a
+new one). The CLOSE flag (data = status) is `EVT_TUNNEL {state CLOSED,
+status}`. A tunnel without traffic for its `duration_s` + 5 s is closed with
+`TIMEOUT` both ways. `EVT_TUNNEL` is best effort, sealed like every event.
+The gateway never looks into tunnel messages: the worker's Noise session
+runs end to end with the bridge's or tag's endpoint.
+
+### 15.10 Factory reset (connect-setup.md §4.3)
+
+The board button (devicetree `sw0`: Button 1 on the DK, SW1 on the Dongle)
+held through power-up: the LED (`led0`) blinks fast for 10 s, then stays on
+and the reset runs (§15.1 step 3) — ownership, network and assignments go,
+the identity key and the generation stay, and the gateway reboots. Releasing
+earlier boots normally. There is no software or radio path to it.
+
+### 15.11 Resources
+
+**Flash** (nRF52840 DK, v2 − v1 = +59.2 KB): HACL* 35.9 KB (Curve25519_51
+13,962 B, Ed25519 12,800, ChaCha20-Poly1305 4,982, SHA-2 3,692, HMAC 424),
+Noise* IK 7,535, `lib/secure` 7,987 (endpoint 2,642, noise 1,648, grant 797,
+keys 759, message 740, record 576, glue 566, crypto 259), `gw_secure.c`
+2,530, `gw_tunnel.c` 2,301, `reset.c` 278, the rest in the serial server,
+nodes, mesh and settings glue. SHA-1 and BLAKE2 (vendored for `Hacl_HMAC.c`)
+are dropped by the linker.
+
+**RAM** (+27.0 KB): the secure heap 12,288 B; the main stack +8,192 B
+(12 KiB, below); the event queue +2,592 B (24 events of 172 bytes: a
+`TUNNEL_UP` fits); the core +3,408 B (endpoint and keys, two tunnels of
+2 × 400-byte buffers, the `EVT_DISCOVERED` table, answer slots with a secure
+answer each); the rest in `lib/secure` state and the settings glue.
+
+**Secure heap** (`CONFIG_CTAG_SECURE_HEAP_SIZE`, a `sys_heap`): measured with
+the host allocator (8-byte headers, the same call sequence): a device object
+248 B, a peer 112 B, a responder handshake peaks +1,096 B and leaves a
+session of 776 B; sealing 100 B takes +264 B transiently, 2,522 B +5,112 B,
+4,061 B +8,184 B; opening 4,077 B peaks +8,168 B and holds 4,072 B until
+the message is handled. The largest message is a `DELIVER_LAYOUT` of 4,000
+bytes inside `SECURE_DATA` (4,083 of the 4,084 payload bytes a frame
+allows), so 12 KiB holds the session and the largest open. Every Noise*
+call runs under the allocation guard: an exhausted heap or an RNG failure
+fails the call, wipes and re-initialises the heap and ends the session
+(`NO_RESOURCES` / `AUTH_REQUIRED` to the host, `secure_heap_failures`); it
+never reaches the rest of the firmware. `secure_heap_peak` shows the high
+water.
+
+**Stacks.** The v2 crypto runs on the gateway loop, i.e. the main thread
+(`SECURE_OPEN`: two X25519 plus Noise; `CLAIM`/`RECOVER`/`RELEASE`: Ed25519
+verification; every sealed frame: ChaCha20-Poly1305). Static analysis of the
+nRF52840 DK build (GCC 14.3 `-Os`, `-fstack-usage -fcallgraph-info=su`, the
+worst path through the call graph, 4,009 functions):
+
+| From | Worst chain | Largest frames on it |
+|---|---:|---|
+| `main` (start-up, then the loop) | **9,916 B** | `Hacl_Ed25519_verify` 6,432 (two precomputed point tables), `Field51_fmul` 848, point decompression 632, `do_pair` 400, `gw_run` 328, `gw_v2_outer` 280 |
+| `ctag_secure_handle` (a grant check) | 9,188 B | the Ed25519 chain above |
+| `ctag_secure_open` (SECURE_OPEN) | 3,324 B | `Field51_fmul2` 1,520, Noise* `state_handshake_read` 608, `scalarmult` 584 |
+| `gw_core_poll` → sealing an answer or event | 3,252 B | the X25519 chain (static worst case of `Noise_IK_session_write`) |
+| `gw_core_secure_init` (boot: `ik` from the key) | 2,468 B | X25519 |
+
+The analysis cannot follow function pointers (the backend: settings writes,
+the RNG, the UART) — those run after the crypto returns, not inside it — and
+counts `do_pair`, which the gateway never reaches (`do_claim`'s frame is
+smaller). `MAIN_STACK_SIZE` is therefore **12,288 B** on the nRF52840 targets
+(4,096 in v1): ~2.3 KiB above the worst chain for exception frames and the
+untracked calls. A thread-analyzer measurement on hardware (§10) through
+SECURE_OPEN, CLAIM and sustained sealed traffic is the confirmation still to
+do. (Any device that verifies grants with HACL*'s Ed25519 needs this ~9.5 KB
+chain; see firmware-libs.md `ctag_secure`.)
+
+### 15.12 The nRF52832 gateway stays on protocol v1
+
+The nRF52832 build has 4.5 KiB of RAM free (§8). v2 needs, at the least, a
+secure heap that opens a 4 KiB `SECURE_DATA` (~9.3 KiB: a session plus the
+unseal peak), a main stack of ~10 KiB for the Ed25519 chain (§15.11, v1:
+3 KiB), larger events and the tunnel buffers. A fit build with the smallest
+plausible settings — 10 KiB heap, one tunnel, 8 `EVT_DISCOVERED` slots and
+only a 5 KiB main stack — fails to link: **`region 'RAM' overflowed by
+12,272 bytes`** (2026-09-28); with the stack the analysis requires it would
+be ~17 KB short of the 64 KiB. `gateway-nrf52dk` therefore builds without `CONFIG_CTAG_GW_SECURE`
+(`socs/nrf52832.conf`), serves protocol v1 only and is for development; a
+v2 deployment uses an nRF52840 gateway (DK or Dongle).
+
+### 15.13 Open items (v2)
+
+- Nothing of v2 has run on hardware: the static OOB exchange with a real v2
+  bridge, the capabilities callback, `bt_mesh_cdb_clear()` + `bt_mesh_reset()`
+  followed by a reboot into a new network, settings writes of the record and
+  the floor, the button and LED, and the time a handshake and a grant check
+  take on the Cortex-M4 (X25519 with the portable 128-bit arithmetic,
+  Ed25519 verification) are verified only by building and on native_sim.
+- The main stack size comes from static analysis; measure it with the
+  thread analyzer through SECURE_OPEN, CLAIM and sustained sealed traffic.
+- Provisioning reports `SECURITY_CONFIG` for any failure after the
+  capabilities, including a radio loss in the middle of the exchange, which
+  the worker will not retry: re-running `PROVISION` is the recovery.
+- The bridge and tag firmware sides (their endpoints, `CAPS2_STATUS`,
+  `DISCOVERED`, `TUNNEL_UP`) are other applications' work; the gateway's
+  side is tested against the native_sim network of `tests/interop`.

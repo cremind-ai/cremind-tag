@@ -82,8 +82,16 @@ ZTEST(gw_ring, test_streaming_cobs_matches_the_library)
 		zassert_true(gw_emit(&core, CTAG_SERIAL_MSG_EVT_LOG, &f, 1u, false));
 		gw_core_poll(&core, now_ms);
 		got_len = capture_peek(&got);
+#ifdef CONFIG_CTAG_GW_SECURE
+		/* The event went out sealed: compare with the library's encoding of
+		 * the frame the gateway actually built (decoded from the wire). */
+		ARG_UNUSED(h);
+		len = ctag_cobs_decode(got, got_len - 1u, frame, sizeof(frame));
+		zassert_true(len > 0);
+#else
 		len = ctag_cbor_encode(&f, 1u, &frame[CTAG_SERIAL_HEADER_LEN], 1024u);
 		len = ctag_serial_frame_build(frame, sizeof(frame), &h, NULL, (size_t)len);
+#endif
 		wlen = ctag_serial_wire_encode(frame, (size_t)len, wire, sizeof(wire));
 		zassert_equal(got_len, (size_t)wlen, "length at text %u", n);
 		zassert_mem_equal(got, wire, (size_t)wlen, "bytes at text %u", n);

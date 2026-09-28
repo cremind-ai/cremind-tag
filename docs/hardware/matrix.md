@@ -17,9 +17,9 @@ Every board moves through these states; qualification reports in
 
 | Board | Board id | Zephyr board | MCU | Flash / RAM | Host link | Status | Notes |
 |---|---|---|---|---|---|---|---|
-| [nrf52840_gateway](../qualification/nrf52840_gateway.md) | 1 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | usb_cdc_acm | buildable |  |
-| [nrf52832_gateway](../qualification/nrf52832_gateway.md) | 2 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | uart_ch340 | buildable | Links with 4.6 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending. |
-| [nrf52840dongle_gateway](../qualification/nrf52840dongle_gateway.md) | 1 | `nrf52840dongle/nrf52840` | nRF52840 | 1024 / 256 KiB | usb_cdc_acm | buildable | nRF52840 Dongle (PCA10059) with Nordic's factory USB bootloader kept: the image links at 0x1000 after the MBR, the settings take the 32 KiB below the bootloader (0xd8000), and it is flashed over USB DFU (docs/building.md "nRF52840 Dongle"). Same firmware and protocol board id as the DK gateway; not flashed yet. |
+| [nrf52840_gateway](../qualification/nrf52840_gateway.md) | 1 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | usb_cdc_acm | buildable | Protocol v2 (docs/gateway-firmware.md §15: secure sessions, ownership, static-OOB provisioning, tunnels); links with 131.6 KiB RAM free after a 12 KiB secure heap and a 12 KiB main stack sized by static analysis; not flashed yet. |
+| [nrf52832_gateway](../qualification/nrf52832_gateway.md) | 2 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | uart_ch340 | buildable | Protocol v1 only (a protocol v2 fit build overflows its RAM by 12 KB, docs/gateway-firmware.md §15.12). Links with 4.5 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending. |
+| [nrf52840dongle_gateway](../qualification/nrf52840dongle_gateway.md) | 1 | `nrf52840dongle/nrf52840` | nRF52840 | 1024 / 256 KiB | usb_cdc_acm | buildable | nRF52840 Dongle (PCA10059) with Nordic's factory USB bootloader kept: the image links at 0x1000 after the MBR, the settings take the 32 KiB below the bootloader (0xd8000), and it is flashed over USB DFU (docs/building.md "nRF52840 Dongle"). Same firmware (protocol v2) and protocol board id as the DK gateway; the factory reset is SW1 held through power-up; not flashed yet. |
 
 ## Bridges
 

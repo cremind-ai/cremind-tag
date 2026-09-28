@@ -177,7 +177,7 @@ ZTEST(ctag_cbor, test_encode_rejects)
 	};
 	const struct ctag_cbor_field bad[][1] = {
 		{{.key = CTAG_CBOR_KEY_STATUS, .kind = CTAG_CBOR_BSTR}},
-		{{.key = CTAG_CBOR_KEY_ASSIGNED_COUNT + 1, .kind = CTAG_CBOR_UINT}}, /* unknown */
+		{{.key = CTAG_CBOR_KEY_OP_KEY + 1, .kind = CTAG_CBOR_UINT}}, /* unknown */
 		{{.key = CTAG_CBOR_KEY_ADDR, .kind = CTAG_CBOR_UINT, .v.u = 0x10000}},
 		{{.key = CTAG_CBOR_KEY_STATUS, .kind = CTAG_CBOR_UINT, .v.u = 0x100000000ull}},
 		{{.key = CTAG_CBOR_KEY_RSSI, .kind = CTAG_CBOR_INT, .v.i = INT32_MIN - 1ll}},
@@ -217,14 +217,14 @@ static const struct raw rejected[] = {
 	RAW("value not shortest", 0xa1, 0x00, 0x18, 0x01),
 	RAW("uint16 not shortest", 0xa1, 0x00, 0x19, 0x00, 0x10),
 	RAW("indefinite map", 0xbf, 0x00, 0x00, 0xff),
-	RAW("indefinite bstr", 0xa1, 0x18, 0x40, 0x5f, 0x41, 0x00, 0xff),
+	RAW("indefinite bstr", 0xa1, 0x18, 0x60, 0x5f, 0x41, 0x00, 0xff),
 	RAW("tag", 0xa1, 0x00, 0xc1, 0x00),
-	RAW("float", 0xa1, 0x18, 0x40, 0xf9, 0x00, 0x00),
-	RAW("null", 0xa1, 0x18, 0x40, 0xf6),
+	RAW("float", 0xa1, 0x18, 0x60, 0xf9, 0x00, 0x00),
+	RAW("null", 0xa1, 0x18, 0x60, 0xf6),
 	RAW("text key", 0xa1, 0x61, 0x61, 0x01),
 	RAW("negative key", 0xa1, 0x20, 0x01),
 	RAW("duplicate key", 0xa2, 0x00, 0x00, 0x00, 0x01),
-	RAW("duplicate unknown key", 0xa2, 0x18, 0x40, 0x00, 0x18, 0x40, 0x01),
+	RAW("duplicate unknown key", 0xa2, 0x18, 0x60, 0x00, 0x18, 0x60, 0x01),
 	RAW("text not UTF-8", 0xa1, 0x18, 0x18, 0x62, 0xc3, 0x28),
 	RAW("trailing byte", 0xa0, 0x00),
 	RAW("truncated", 0xa1, 0x00),
@@ -236,7 +236,7 @@ static const struct raw rejected[] = {
 	RAW("relay as uint", 0xa1, 0x0f, 0x01),
 	RAW("caps with a text key", 0xa1, 0x15, 0xa1, 0x61, 0x61, 0x00),
 	RAW("counters with a uint key", 0xa1, 0x18, 0x19, 0xa1, 0x00, 0x00),
-	RAW("nested too deep", 0xa1, 0x18, 0x40, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81,
+	RAW("nested too deep", 0xa1, 0x18, 0x60, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81,
 	    0x81, 0x00),
 };
 
@@ -245,7 +245,7 @@ static const struct raw accepted[] = {
 	RAW("unknown key skipped", 0xa2, 0x00, 0x01, 0x18, 0x63, 0x62, 0x68, 0x69),
 	RAW("keys in any order", 0xa2, 0x05, 0x03, 0x00, 0x01),
 	RAW("64-bit unknown key", 0xa2, 0x1b, 0, 0, 0, 1, 0, 0, 0, 0, 0x00, 0x00, 0x01),
-	RAW("nested to depth 8", 0xa2, 0x00, 0x01, 0x18, 0x40, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81,
+	RAW("nested to depth 8", 0xa2, 0x00, 0x01, 0x18, 0x60, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81,
 	    0x81, 0x00),
 };
 
@@ -270,7 +270,9 @@ ZTEST(ctag_cbor, test_decode_strictness)
 	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_CAPS), CTAG_CBOR_MAP);
 	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_STORED_EPOCH), CTAG_CBOR_UINT);
 	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_ASSIGNED_COUNT), CTAG_CBOR_UINT);
-	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_ASSIGNED_COUNT + 1), 0);
+	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_OP_KEY), CTAG_CBOR_BSTR);
+	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_CONTROLLER_MATCH), CTAG_CBOR_BOOL);
+	zassert_equal(ctag_cbor_key_kind(CTAG_CBOR_KEY_OP_KEY + 1), 0);
 }
 
 /* ---- Work bounds: nested maps were once re-scanned for every later key ---- */
@@ -295,7 +297,7 @@ static size_t put_head(uint8_t *p, uint8_t major, size_t n)
 }
 
 /*
- * levels nested maps of n entries: unknown keys 64, 65, ... (skipped by the
+ * levels nested maps of n entries: unknown keys 96, 97, ... (above every spec key) (skipped by the
  * typed decoding) with value 0, except that the first (or the last) key's
  * value is the next level's map. A 7 x 32 payload is 680 bytes.
  */
@@ -306,7 +308,7 @@ static size_t nested(uint8_t *p, unsigned int levels, unsigned int n, bool last)
 
 	for (unsigned int j = 0; j < n; j++) {
 		p[len++] = 0x18;
-		p[len++] = (uint8_t)(64u + j);
+		p[len++] = (uint8_t)(96u + j);
 		if (j == at && levels > 1u) {
 			len += nested(&p[len], levels - 1u, n, last);
 		} else {
@@ -368,15 +370,15 @@ ZTEST(ctag_cbor, test_scan_bounds)
 	zassert_equal(decode_counted(big, len), -EBADMSG);
 	zassert_true(ctag_cbor_steps <= 2u);
 
-	/* 512 map entries in a payload: {64: [{64: 0} x m]} has 1 + m. */
+	/* 512 map entries in a payload: {96: [{96: 0} x m]} has 1 + m. */
 	for (m = 511; m <= 512; m++) {
 		len = 0;
 		big[len++] = 0xa1;
 		big[len++] = 0x18;
-		big[len++] = 0x40;
+		big[len++] = 0x60;
 		len += put_head(&big[len], 4, m);
 		for (size_t j = 0; j < m; j++) {
-			memcpy(&big[len], (const uint8_t[]){0xa1, 0x18, 0x40, 0x00}, 4);
+			memcpy(&big[len], (const uint8_t[]){0xa1, 0x18, 0x60, 0x00}, 4);
 			len += 4;
 		}
 		zassert_equal(decode_counted(big, len), m == 511 ? 0 : -EBADMSG, "%u maps",
@@ -384,10 +386,10 @@ ZTEST(ctag_cbor, test_scan_bounds)
 		zassert_true(ctag_cbor_steps <= len);
 	}
 
-	/* The key offsets are 16-bit: {64: h'...'} of 65535 bytes, then 65536. */
+	/* The key offsets are 16-bit: {96: h'...'} of 65535 bytes, then 65536. */
 	for (m = 65529; m <= 65530; m++) {
 		memset(big, 0, sizeof(big));
-		memcpy(big, (const uint8_t[]){0xa1, 0x18, 0x40, 0x59, (uint8_t)(m >> 8), (uint8_t)m},
+		memcpy(big, (const uint8_t[]){0xa1, 0x18, 0x60, 0x59, (uint8_t)(m >> 8), (uint8_t)m},
 		       6);
 		zassert_equal(decode_counted(big, 6 + m), m == 65529 ? 0 : -EBADMSG);
 	}
@@ -398,19 +400,19 @@ ZTEST(ctag_cbor, test_duplicates_per_map)
 	/* Keys are compared within their own map only; values of unknown keys
 	 * are skipped by the typed decoding, so any key kind reaches the scan. */
 	static const struct raw cases[] = {
-		RAW("same key in a nested map and its parent", 0xa2, 0x18, 0x40, 0xa1, 0x18, 0x41,
-		    0x00, 0x18, 0x41, 0x00),
-		RAW("same key in two sibling maps", 0xa1, 0x18, 0x40, 0x82, 0xa1, 0x18, 0x40, 0x00,
-		    0xa1, 0x18, 0x40, 0x00),
-		RAW("distinct map keys", 0xa1, 0x18, 0x40, 0xa2, 0xa1, 0x00, 0x00, 0x00, 0xa1, 0x00,
+		RAW("same key in a nested map and its parent", 0xa2, 0x18, 0x60, 0xa1, 0x18, 0x61,
+		    0x00, 0x18, 0x61, 0x00),
+		RAW("same key in two sibling maps", 0xa1, 0x18, 0x60, 0x82, 0xa1, 0x18, 0x60, 0x00,
+		    0xa1, 0x18, 0x60, 0x00),
+		RAW("distinct map keys", 0xa1, 0x18, 0x60, 0xa2, 0xa1, 0x00, 0x00, 0x00, 0xa1, 0x00,
 		    0x01, 0x00),
 	};
 	static const struct raw dups[] = {
-		RAW("duplicate inside a nested map", 0xa1, 0x18, 0x40, 0xa2, 0x18, 0x41, 0x00, 0x18,
-		    0x41, 0x01),
-		RAW("parent duplicate after a nested map", 0xa2, 0x18, 0x40, 0xa1, 0x18, 0x41, 0x00,
-		    0x18, 0x40, 0x00),
-		RAW("duplicate map keys", 0xa1, 0x18, 0x40, 0xa2, 0xa1, 0x00, 0x00, 0x00, 0xa1, 0x00,
+		RAW("duplicate inside a nested map", 0xa1, 0x18, 0x60, 0xa2, 0x18, 0x61, 0x00, 0x18,
+		    0x61, 0x01),
+		RAW("parent duplicate after a nested map", 0xa2, 0x18, 0x60, 0xa1, 0x18, 0x61, 0x00,
+		    0x18, 0x60, 0x00),
+		RAW("duplicate map keys", 0xa1, 0x18, 0x60, 0xa2, 0xa1, 0x00, 0x00, 0x00, 0xa1, 0x00,
 		    0x00, 0x01),
 		RAW("duplicate counter name", 0xa1, 0x18, 0x19, 0xa2, 0x61, 0x61, 0x00, 0x61, 0x61,
 		    0x01),

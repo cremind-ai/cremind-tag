@@ -3,6 +3,14 @@
  * keys, IV index and sequence number itself): bridge names under
  * "ctag/gw/n/<addr>" and the assignment table under "ctag/gw/a" (10-byte
  * little-endian records: bridge u16, tag_id u32, epoch u32).
+ *
+ * Protocol v2 (docs/connect-setup.md 2.1, 4.1): the identity key under
+ * "ctag/gw/id" (32 bytes, generated on the device at first boot, never
+ * exported), the ownership record under "ctag/gw/own" (lib/secure's
+ * 176-byte record, CRC-protected) and the generation floor under
+ * "ctag/gw/genf" (u32le), written before the record so that a record lost to
+ * corruption can never rewind the generation. Each settings write is atomic
+ * (NVS).
  */
 #include <errno.h>
 #include <stdio.h>
@@ -25,6 +33,14 @@ static struct {
 static size_t names_n;
 static struct gw_assign assigns[CONFIG_CTAG_GW_ASSIGN_MAX];
 static size_t assigns_n;
+
+#ifdef CONFIG_CTAG_GW_SECURE
+static uint8_t identity[32];
+static bool identity_ok;
+static uint8_t owner_rec[CTAG_OWNER_RECORD_LEN];
+static size_t owner_len;
+static uint32_t gen_floor;
+#endif
 
 static int store_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
@@ -57,6 +73,28 @@ static int store_set(const char *key, size_t len, settings_read_cb read_cb, void
 		}
 		return 0;
 	}
+#ifdef CONFIG_CTAG_GW_SECURE
+	if (settings_name_steq(key, "id", &next) && next == NULL) {
+		identity_ok = len == sizeof(identity) &&
+			      read_cb(cb_arg, identity, sizeof(identity)) == (ssize_t)sizeof(identity);
+		return 0;
+	}
+	if (settings_name_steq(key, "own", &next) && next == NULL) {
+		ssize_t n = len <= sizeof(owner_rec) ? read_cb(cb_arg, owner_rec, sizeof(owner_rec)) : -1;
+
+		/* A record of another size is kept as unreadable: UNOWNED + floor. */
+		owner_len = n > 0 ? (size_t)n : 0u;
+		return 0;
+	}
+	if (settings_name_steq(key, "genf", &next) && next == NULL) {
+		uint8_t raw[4];
+
+		if (len == sizeof(raw) && read_cb(cb_arg, raw, sizeof(raw)) == (ssize_t)sizeof(raw)) {
+			gen_floor = sys_get_le32(raw);
+		}
+		return 0;
+	}
+#endif
 	return -ENOENT;
 }
 
@@ -99,3 +137,51 @@ void gw_store_apply(struct gw_core *g)
 	}
 	gw_core_set_assignments(g, assigns, assigns_n);
 }
+
+#ifdef CONFIG_CTAG_GW_SECURE
+
+bool gw_store_identity(uint8_t ik[32])
+{
+	if (!identity_ok) {
+		return false;
+	}
+	memcpy(ik, identity, sizeof(identity));
+	memset(identity, 0, sizeof(identity)); /* the core keeps the one copy */
+	identity_ok = false;
+	return true;
+}
+
+int gw_store_save_identity(const uint8_t ik[32])
+{
+	return settings_save_one("ctag/gw/id", ik, 32u);
+}
+
+void gw_store_owner(const uint8_t **rec, size_t *len, uint32_t *floor)
+{
+	*rec = owner_len > 0u ? owner_rec : NULL;
+	*len = owner_len;
+	*floor = gen_floor;
+}
+
+int gw_store_save_owner(void *ctx, const uint8_t rec[CTAG_OWNER_RECORD_LEN], uint32_t gen)
+{
+	int err = 0;
+
+	ARG_UNUSED(ctx);
+	if (gen > gen_floor) {
+		uint8_t raw[4];
+
+		sys_put_le32(gen, raw);
+		err = settings_save_one("ctag/gw/genf", raw, sizeof(raw));
+		if (err != 0) {
+			return err; /* nothing changed: the old record and floor stand */
+		}
+		gen_floor = gen;
+	}
+	err = settings_save_one("ctag/gw/own", rec, CTAG_OWNER_RECORD_LEN);
+	memset(owner_rec, 0, sizeof(owner_rec)); /* the boot copy is stale now */
+	owner_len = 0u;
+	return err;
+}
+
+#endif

@@ -209,7 +209,7 @@ static void prov_event(struct gw_core *g, uint64_t op_id, const uint8_t *uuid, u
 }
 
 struct gw_req_result gw_provision(struct gw_core *g, uint64_t op_id, const uint8_t *uuid,
-				  const char *name, size_t name_len)
+				  const char *name, size_t name_len, const uint8_t *static_oob)
 {
 	struct gw_prov *p = &g->prov;
 	struct gw_node *known;
@@ -227,7 +227,8 @@ struct gw_req_result gw_provision(struct gw_core *g, uint64_t op_id, const uint8
 	if (gw_node_count(g) >= CTAG_MAX_BRIDGES) {
 		return (struct gw_req_result){CTAG_STATUS_NO_RESOURCES, T_FULL};
 	}
-	err = g->be->provision(g->be->ctx, uuid);
+	/* v2: authenticated with the label's static OOB only (connect-setup.md 3.4). */
+	err = g->be->provision(g->be->ctx, uuid, static_oob);
 	if (gw_is_retryable(err) || err == -EALREADY) {
 		return (struct gw_req_result){CTAG_STATUS_PROVISIONING_ACTIVE, NULL};
 	}
@@ -255,6 +256,14 @@ static void prov_finish(struct gw_core *g, uint8_t status)
 	if (p->added) {
 		status = CTAG_STATUS_OK;
 	}
+#ifdef CONFIG_CTAG_GW_SECURE
+	else if (p->security || p->authenticating) {
+		/* No static OOB offered, or the authentication failed after the
+		 * capabilities (gw_core.h): final, never retried like a TIMEOUT. */
+		status = CTAG_STATUS_SECURITY_CONFIG;
+		g->v2.c.prov_security++;
+	}
+#endif
 	prov_event(g, p->op_id, p->uuid, p->added ? p->addr : 0u, p->added ? p->elements : 0u,
 		   status);
 }
@@ -299,6 +308,24 @@ void gw_core_prov_closed(struct gw_core *g, int64_t now)
 	}
 	gw_serial_pump(g);
 }
+
+#ifdef CONFIG_CTAG_GW_SECURE
+void gw_core_prov_security(struct gw_core *g, int64_t now)
+{
+	g->now = now;
+	if (g->prov.active) {
+		g->prov.security = true;
+	}
+}
+
+void gw_core_prov_auth(struct gw_core *g, int64_t now)
+{
+	g->now = now;
+	if (g->prov.active) {
+		g->prov.authenticating = true;
+	}
+}
+#endif
 
 /* ---- Configuration and removal (configuration client) ---- */
 
@@ -826,12 +853,27 @@ static size_t assigned_maps(struct gw_core *g, uint16_t addr, size_t *used)
 	return *used - first;
 }
 
+#ifdef CONFIG_CTAG_GW_SECURE
+/* A v2 bridge's CAPS2_STATUS: its identity, generation and ownership state. */
+static size_t caps2_fields(const struct gw_node *n, struct ctag_cbor_field *f)
+{
+	if (!n->caps2_valid) {
+		return 0u;
+	}
+	f[0] = GW_F_BSTR(CTAG_CBOR_KEY_DEVICE_ID, n->caps2.device_id, sizeof(n->caps2.device_id));
+	f[1] = GW_F_UINT(CTAG_CBOR_KEY_GEN, n->caps2.gen);
+	f[2] = GW_F_UINT(CTAG_CBOR_KEY_OWNER_STATE, n->caps2.owner_state);
+	return 3u;
+}
+#endif
+
 static void bridge_info_event(struct gw_core *g, struct gw_node *n)
 {
 	struct gw_scratch *s = &g->scratch;
-	struct ctag_cbor_field f[6];
+	struct ctag_cbor_field f[9];
 	size_t used = 0u;
 	size_t na = assigned_maps(g, n->addr, &used);
+	size_t nf = 6u;
 
 	if (!n->caps_valid) {
 		return;
@@ -849,7 +891,10 @@ static void bridge_info_event(struct gw_core *g, struct gw_node *n)
 	f[5].kind = CTAG_CBOR_COUNTERS;
 	f[5].v.counters.items = s->health[0];
 	f[5].v.counters.count = health_counters(n, s->health[0]);
-	(void)gw_emit(g, CTAG_SERIAL_MSG_EVT_BRIDGE_INFO, f, 6u, false);
+#ifdef CONFIG_CTAG_GW_SECURE
+	nf += caps2_fields(n, &f[nf]);
+#endif
+	(void)gw_emit(g, CTAG_SERIAL_MSG_EVT_BRIDGE_INFO, f, nf, false);
 }
 
 /* Node indexes sorted by address. */
@@ -947,6 +992,9 @@ int gw_encode_inventory(struct gw_core *g, uint8_t *buf, size_t size)
 			it[m].v.counters.items = s->health[k];
 			it[m++].v.counters.count = health_counters(n, s->health[k]);
 		}
+#ifdef CONFIG_CTAG_GW_SECURE
+		m += caps2_fields(n, &it[m]);
+#endif
 		s->items[k].fields = it;
 		s->items[k].count = m;
 	}
@@ -1039,10 +1087,32 @@ void gw_nodes_mesh_rx(struct gw_core *g, uint16_t src, uint8_t op, const uint8_t
 		}
 		break;
 	}
+#ifdef CONFIG_CTAG_GW_SECURE
+	case CTAG_MESH_OP_CAPS2_STATUS:
+		if (n != NULL && ctag_mesh_caps2_status_unpack(&n->caps2, p, len) == 0) {
+			n->caps2_valid = true;
+			bridge_info_event(g, n);
+			return;
+		}
+		break;
+	case CTAG_MESH_OP_DISCOVERED:
+	case CTAG_MESH_OP_TUNNEL_UP:
+		gw_tunnel_mesh_rx(g, src, op, p, len);
+		return;
+#endif
 	default:
 		break;
 	}
 	g->c.unexpected_mesh++;
+}
+
+void gw_nodes_forget(struct gw_core *g)
+{
+	memset(g->nodes, 0, sizeof(g->nodes));
+	g->assign_count = 0u;
+	memset(g->tag_seen, 0, sizeof(g->tag_seen));
+	g->scan_until = 0;
+	g->scan_seen_count = 0u;
 }
 
 /* ---- Timers ---- */

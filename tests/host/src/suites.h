@@ -43,7 +43,20 @@
 	X(test_enroll_invalid)                                                                     \
 	X(test_fuzz_layouts)                                                                       \
 	X(test_fuzz_fontpack)                                                                      \
-	X(test_fuzz_streams)
+	X(test_fuzz_streams)                                                                       \
+	X(test_v2_identities)                                                                      \
+	X(test_v2_key_schedule)                                                                    \
+	X(test_v2_grant_cases)                                                                     \
+	X(test_v2_grant_strict)                                                                    \
+	X(test_v2_conversation)                                                                    \
+	X(test_v2_handshake_errors)                                                                \
+	X(test_v2_gateway_flows)                                                                   \
+	X(test_v2_claim_rules)                                                                     \
+	X(test_v2_tag_flows)                                                                       \
+	X(test_v2_bridge_flows)                                                                    \
+	X(test_v2_record)                                                                          \
+	X(test_v2_tunnel_fragments)                                                                \
+	X(test_v2_heap_failures)
 
 #define CTAG_TEST_DECLARE(name) void name(void);
 CTAG_HOST_TESTS(CTAG_TEST_DECLARE)

@@ -42,12 +42,13 @@ set(test_sources
   src/test_frag.c
   src/test_txn.c
   src/test_enroll.c
-  src/test_fuzz.c)
+  src/test_fuzz.c
+  src/test_secure.c)
 add_executable(ctag_host_tests ${test_sources})
 ctag_test_vectors(ctag_host_tests ${Python3_EXECUTABLE})
 target_include_directories(ctag_host_tests PRIVATE src)
 target_link_libraries(ctag_host_tests PRIVATE
-  ctag_frame ctag_layout ctag_render ctag_frag ctag_txn ctag_enroll ctag_host_options)
+  ctag_frame ctag_layout ctag_render ctag_frag ctag_txn ctag_enroll ctag_secure ctag_host_options)
 
 # The same suites with a renderer that keeps one QR symbol (as a bridge with
 # CONFIG_CTAG_RENDER_QR_SLOTS=1): QR commands beyond it are re-encoded per strip.
@@ -59,7 +60,7 @@ add_executable(ctag_host_tests_qr1 ${test_sources})
 add_dependencies(ctag_host_tests_qr1 ctag_host_tests) # the generated vectors
 target_include_directories(ctag_host_tests_qr1 PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/vectors)
 target_link_libraries(ctag_host_tests_qr1 PRIVATE
-  ctag_frame ctag_layout ctag_render_qr1 ctag_frag ctag_txn ctag_enroll ctag_host_options)
+  ctag_frame ctag_layout ctag_render_qr1 ctag_frag ctag_txn ctag_enroll ctag_secure ctag_host_options)
 
 enable_testing()
 add_test(NAME ctag_host_tests COMMAND ctag_host_tests)

@@ -95,6 +95,9 @@ void gw_core_poll(struct gw_core *g, int64_t now)
 	gw_lane_timers(g);
 	gw_delivery_timers(g);
 	gw_nodes_timers(g);
+#ifdef CONFIG_CTAG_GW_SECURE
+	gw_tunnel_timers(g);
+#endif
 	gw_serial_timers(g);
 	gw_serial_pump(g);
 }
@@ -105,6 +108,9 @@ int64_t gw_core_next_deadline(const struct gw_core *g)
 
 	d = gw_min_deadline(d, gw_delivery_deadline(g));
 	d = gw_min_deadline(d, gw_nodes_deadline(g));
+#ifdef CONFIG_CTAG_GW_SECURE
+	d = gw_min_deadline(d, gw_tunnel_deadline(g));
+#endif
 	d = gw_min_deadline(d, gw_serial_deadline(g));
 	return d;
 }
@@ -162,6 +168,9 @@ size_t gw_core_counters(const struct gw_core *g, struct ctag_cbor_counter *items
 		n = max;
 	}
 	memcpy(items, all, n * sizeof(all[0]));
+#ifdef CONFIG_CTAG_GW_SECURE
+	n += gw_v2_counters(g, &items[n], max - n);
+#endif
 	if (g->be->counters != NULL && n < max) {
 		n += g->be->counters(g->be->ctx, &items[n], max - n);
 	}

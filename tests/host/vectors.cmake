@@ -7,7 +7,7 @@ function(ctag_test_vectors target python)
   get_filename_component(root ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../.. ABSOLUTE)
   set(dir ${CMAKE_CURRENT_BINARY_DIR}/vectors)
   set(names crc32 cobs serial serial_cbor mesh layouts render qr fontpack fragments tag_txn
-    enrollment session)
+    enrollment session v2)
   list(TRANSFORM names PREPEND ${dir}/v_ OUTPUT_VARIABLE headers)
   list(TRANSFORM headers APPEND .h)
   file(GLOB fixtures ${root}/protocol/fixtures/*)

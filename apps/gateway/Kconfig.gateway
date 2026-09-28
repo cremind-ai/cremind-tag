@@ -142,4 +142,29 @@ config CTAG_GW_EVQ_DEPTH
 	int "Mesh/provisioning events queued for the gateway loop"
 	default 24
 
+config CTAG_GW_SECURE
+	bool "Protocol v2: identity, ownership and secure sessions"
+	select CTAG_SECURE
+	help
+	  docs/connect-setup.md: IDENTIFY, SECURE_OPEN and SECURE_DATA in
+	  plaintext, everything else only inside a Noise IK session and only
+	  as the access table of 4.2 allows; CLAIM, RECOVER, RELEASE, STATUS;
+	  PROVISION with static OOB; DISCOVER and mesh tunnels. Without it the
+	  gateway speaks protocol v1 (docs/gateway-firmware.md says which
+	  boards run which).
+
+if CTAG_GW_SECURE
+
+config CTAG_GW_TUNNELS
+	int "Mesh tunnels open at once (one per bridge)"
+	default 2
+	range 1 5
+
+config CTAG_GW_DISCOVERED_SLOTS
+	int "EVT_DISCOVERED rate limiter entries ((bridge, tag) pairs)"
+	default 16
+	range 4 64
+
+endif
+
 endmenu

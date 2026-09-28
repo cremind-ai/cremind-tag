@@ -245,6 +245,9 @@ ZTEST(gw_serial, test_request_without_credit_and_no_slot_is_dropped)
 	zassert_is_null(response(rid[8]));
 }
 
+/* v1 only: under v2 the ASSIGN_TAG below needs a session, and retained
+ * events come back after SECURE_OPEN (gw_v2 covers both). */
+#ifndef CONFIG_CTAG_GW_SECURE
 ZTEST(gw_serial, test_hello_drops_unsent_answers_then_resends_retained)
 {
 	uint16_t lost, rid;
@@ -268,6 +271,7 @@ ZTEST(gw_serial, test_hello_drops_unsent_answers_then_resends_retained)
 	zassert_not_null(event(CTAG_SERIAL_MSG_EVT_ASSIGN_RESULT, 0));
 	zassert_equal(field_u(event(CTAG_SERIAL_MSG_EVT_ASSIGN_RESULT, 0), CTAG_CBOR_KEY_SEQ), seq);
 }
+#endif
 
 ZTEST(gw_serial, test_retained_events_until_cumulative_ack)
 {
@@ -417,6 +421,9 @@ ZTEST(gw_serial, test_reboot_answers_then_resets)
 	zassert_equal(field_u(response(rid), CTAG_CBOR_KEY_STATUS), CTAG_STATUS_OK);
 }
 
+/* v1 only: under v2 a REBOOT needs a session (gw_v2 covers the grace timer
+ * through RELEASE). */
+#ifndef CONFIG_CTAG_GW_SECURE
 ZTEST(gw_serial, test_reboot_resets_even_when_its_answer_is_stuck)
 {
 	struct ctag_cbor_field f = GW_F_UINT(CTAG_CBOR_KEY_OP_ID, 32u);
@@ -433,6 +440,7 @@ ZTEST(gw_serial, test_reboot_resets_even_when_its_answer_is_stuck)
 	advance(1);
 	zassert_equal(mock.reboots, 1u);
 }
+#endif
 
 ZTEST(gw_serial, test_frames_survive_partial_writes)
 {

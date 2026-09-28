@@ -9,6 +9,13 @@ with the Bluetooth Mesh replaced by a small simulated network
 `cremind_tag.gateway.GatewayClient` over the PTY, exactly as the companion
 drives a USB or UART gateway.
 
+A second build with `v2.conf` (`CONFIG_CTAG_GW_SECURE`, protocol v2,
+docs/connect-setup.md) adds `src/core/gw_secure.c`, `gw_tunnel.c` and
+`lib/secure`; `interop_v2.py` drives it as a Connect worker would, with the
+companion's reference `cremind_tag.secure` modules (`SecureChannel`, grants,
+identity) and a small serial client of its own (the companion's
+`GatewayClient` speaks v1 and is not modified). See "Protocol v2" below.
+
 ## Running
 
 From the repository root on the host (Git Bash on Windows needs
@@ -20,12 +27,15 @@ MSYS_NO_PATHCONV=1 docker run --rm -v ncs-v3.4.1:/ncs -v ctag-build:/build \
   -c 'sh /work/apps/gateway/tests/interop/run.sh'
 ```
 
-`run.sh` installs `make` (missing from the image) and `cbor2`/`pyserial`,
-builds `/build/gw-interop` (`west build --no-sysbuild -b native_sim`), starts
-`zephyr.exe` (real-time pacing, `CONFIG_NATIVE_SIM_SLOWDOWN_TO_REAL_TIME`),
-reads the PTY path from its `uart connected to pseudotty: /dev/pts/N` line and
-runs the scenarios with `PYTHONPATH=/work/companion/src`. Exit status 0 means
-every scenario passed; the script prints a Markdown results table.
+`run.sh` installs `make` (missing from the image) and
+`cbor2`/`pyserial`/`cryptography`, builds `/build/gw-interop` (`west build
+--no-sysbuild -b native_sim`) and `/build/gw-interop-v2`
+(`-DEXTRA_CONF_FILE=v2.conf`), starts each `zephyr.exe` (real-time pacing,
+`CONFIG_NATIVE_SIM_SLOWDOWN_TO_REAL_TIME`), reads the PTY path from its `uart
+connected to pseudotty: /dev/pts/N` line and runs the scenarios with
+`PYTHONPATH=/work/companion/src`. `CTAG_INTEROP=v1` or `v2` (`docker run -e`)
+runs one variant only. Exit status 0 means every scenario passed; each script
+prints a Markdown results table.
 
 ## The simulated network
 
@@ -55,7 +65,32 @@ every scenario passed; the script prints a Markdown results table.
 | provisioning | inventory lists the assignments made above; scan → beacon; `PROVISION` → `EVT_PROVISIONED` at `0x0004` with its name; a second `PROVISION` meanwhile → `PROVISIONING_ACTIVE`; `CONFIGURE_NODE` → `EVT_NODE_CONFIGURED OK`; `REMOVE_NODE` → `EVT_NODE_REMOVED OK` |
 | REBOOT | answered, then a new boot: the client's next request times out, it re-HELLOs, sees a new `boot_id` and reports `SessionStarted.boot_changed`; the node list survives |
 
+## Protocol v2 (`v2.conf`, `interop_v2.py`)
+
+The same network, plus:
+
+| Behaviour | How |
+|---|---|
+| Gateway identity and records | a fixed identity key (`gw_ik`, the same bytes in `interop_v2.py`); the ownership record and the generation floor stay in RAM across simulated reboots; `RELEASE` empties the network (the next boot has no nodes) |
+| The unprovisioned device | a v2 bridge: UUID = its `device_id`, setup secret `"NEWBIE-SEC"`; PB-ADV posts `GW_EVT_PROV_AUTH` (capabilities with static OOB) and adds the node only with `static_oob = HKDF(secret, "cremind-tag/v2/mesh-oob", device_id)`; any other value closes the link without the node |
+| `CAPS_GET` | `CAPS_STATUS` and then `CAPS2_STATUS` (`device_id`, `gen`, `owner_state`) |
+| `DISCOVER` | every bridge answers two `DISCOVERED` for tag `0x13572468` (`flags` SETUP): the gateway rate-limits the second |
+| Bridge `0x0002`'s secure endpoint | `lib/secure` in role BRIDGE (factory secret `"SIM-BRIDGE"`) behind `TUNNEL_OPEN tag_id 0`: its `ident2` goes up first, then `kind | body` messages (Noise handshake, sealed transport, close) in `TUNNEL_UP` fragments; a tunnel to a tag closes `NOT_FOUND`, any other `BUSY` |
+
+| Scenario | Checks |
+|---|---|
+| plaintext layer | HELLO; IDENTIFY (proto 2, role, `ik`, the `device_id` of connect-setup.md §2.1, UNOWNED gen 0, no `authority_id`, a fresh challenge each time); INFO, LIST_NODES, REBOOT, STATUS in plaintext → `AUTH_REQUIRED`; PING answered; SECURE_DATA without a session → plaintext `AUTH_REQUIRED`; SECURE_OPEN with garbage → `AUTH_FAILED` |
+| SECURE_OPEN + CLAIM | Noise IK with worker A; unowned: LIST_NODES, GET_COUNTERS, RECOVER → `NOT_OWNER`, INFO OK; a grant for another controller → `GRANT_INVALID`; CLAIM → gen 1; the same grant again → `GRANT_INVALID` (single-use challenge); STATUS: OWNED, `controller_match`, `owner`, `authority_id`; LIST_NODES |
+| access table | worker B: STATUS without `owner`; INFO OK; LIST_NODES, GET_INVENTORY, SCAN_UNPROV, CLAIM → `NOT_OWNER`; RECOVER → gen 2, B pinned; A → `NOT_OWNER` |
+| sealed answers and events | DELIVER_LAYOUT → sealed `EVT_RESULT OK` (digest), EVENT_ACK; the v2 counters in INFO |
+| DISCOVER | one `EVT_DISCOVERED` per bridge (0x0002, 0x0003), duplicates rate-limited (counters), 121 s → `INVALID` |
+| tunnel + PAIR | TUNNEL_OPEN → tunnel id (the same `op_id` → `DUPLICATE`, a second tunnel → `BUSY`); `EVT_TUNNEL OPEN` carries the bridge's `ident2`; Noise IK through the tunnel (`Link.TUNNEL` prologue); STATUS; PAIR with the setup proof → gen 1 and a `proof_d` that checks; MAINT_AUTH through the tunnel → `NOT_OWNER`; TUNNEL_CLOSE; a tunnel to 0x0003 → `EVT_TUNNEL CLOSED BUSY` |
+| PROVISION with static OOB | no `static_oob` → `INVALID`; a wrong one → `EVT_PROVISIONED SECURITY_CONFIG`, addr 0; the derived one → `0x0004` |
+| decrypt failure | a tampered SECURE_DATA → plaintext `AUTH_REQUIRED`, the session ends (a well-sealed one is refused too); a new session works; `decrypt_failures` 1 |
+| RELEASE | → gen + 1, reboot, UNOWNED at that generation; CLAIM again on an empty network |
+
 What this does **not** cover: the Zephyr mesh stack itself (provisioning
-PDUs, the configuration client's messages, segmentation, `send_cb` timing),
-USB CDC ACM enumeration and the nRF UART driver — those are hardware tests
+PDUs, the static OOB exchange, the configuration client's messages,
+segmentation, `send_cb` timing), USB CDC ACM enumeration, the nRF UART driver,
+the factory-reset button and settings storage — those are hardware tests
 (docs/gateway-firmware.md §13).

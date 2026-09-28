@@ -16,4 +16,8 @@ target_sources(app PRIVATE
   ${gw}/src/gw_thread.c
   ${gw}/src/uart_io.c
   src/main.c)
+# Protocol v2 (v2.conf): the secure layer and tunnels.
+target_sources_ifdef(CONFIG_CTAG_GW_SECURE app PRIVATE
+  ${gw}/src/core/gw_secure.c
+  ${gw}/src/core/gw_tunnel.c)
 target_include_directories(app PRIVATE ${gw}/src ${gw}/src/core)

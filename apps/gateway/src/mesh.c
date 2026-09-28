@@ -36,6 +36,11 @@ LOG_MODULE_REGISTER(gw_mesh, LOG_LEVEL_INF);
 static uint8_t dev_uuid[16];
 static int mesh_err;
 static uint32_t start_errors, cfg_errors;
+#ifdef CONFIG_CTAG_GW_SECURE
+/* The static OOB of the provisioning in progress (wiped when it ends). */
+static uint8_t prov_oob[CTAG_STATIC_OOB_LEN];
+static bool prov_oob_set;
+#endif
 
 /* ---- Inbound vendor messages: queued for the gateway thread ---- */
 
@@ -67,6 +72,11 @@ HANDLER(CAPS_STATUS)
 HANDLER(HEALTH_STATUS)
 HANDLER(ASSIGN_STATUS)
 HANDLER(TAG_SEEN)
+#ifdef CONFIG_CTAG_GW_SECURE
+HANDLER(CAPS2_STATUS)
+HANDLER(DISCOVERED)
+HANDLER(TUNNEL_UP)
+#endif
 
 #define OP(name) {CTAG_MESH_OPCODE_##name, BT_MESH_LEN_EXACT(CTAG_MESH_##name##_LEN), h_##name}
 
@@ -82,6 +92,12 @@ static const struct bt_mesh_model_op mgmt_cli_ops[] = {
 	OP(HEALTH_STATUS),
 	OP(ASSIGN_STATUS),
 	OP(TAG_SEEN),
+#ifdef CONFIG_CTAG_GW_SECURE
+	OP(CAPS2_STATUS),
+	OP(DISCOVERED),
+	/* 4 bytes + up to TUNNEL_DATA_MAX of data (the core checks the rest) */
+	{CTAG_MESH_OPCODE_TUNNEL_UP, BT_MESH_LEN_MIN(CTAG_MESH_TUNNEL_UP_LEN), h_TUNNEL_UP},
+#endif
 	BT_MESH_MODEL_OP_END,
 };
 
@@ -202,8 +218,42 @@ static void prov_link_close(bt_mesh_prov_bearer_t bearer)
 	struct gw_evt e = {.type = GW_EVT_PROV_CLOSED};
 
 	ARG_UNUSED(bearer);
+#ifdef CONFIG_CTAG_GW_SECURE
+	memset(prov_oob, 0, sizeof(prov_oob));
+	prov_oob_set = false;
+#endif
 	gw_post(&e);
 }
+
+#ifdef CONFIG_CTAG_GW_SECURE
+/*
+ * connect-setup.md 3.4: provision only with the static OOB the worker derived
+ * from the bridge's label, over HMAC-SHA256 (32 bytes). A device offering
+ * anything else is refused: it gets the Input OOB method, which this
+ * provisioner can never complete (it has no output callbacks), so the
+ * stack's method check fails and the link closes; the core reports
+ * EVT_PROVISIONED SECURITY_CONFIG. There is no fallback to no OOB.
+ *
+ * With static OOB selected the core is told the authentication began: the
+ * stack does not say why a link closes, and a wrong value (the device's
+ * Provisioning Failed "confirmation failed", or ours) only shows as a link
+ * that closes without node_added. The core reports that SECURITY_CONFIG too.
+ */
+static void prov_capabilities(const struct bt_mesh_dev_capabilities *cap)
+{
+	struct gw_evt e = {.type = GW_EVT_PROV_SECURITY};
+
+	if (prov_oob_set && (cap->oob_type & BT_MESH_STATIC_OOB_AVAILABLE) != 0u &&
+	    (cap->algorithms & BIT(BT_MESH_PROV_AUTH_HMAC_SHA256_AES_CCM)) != 0u &&
+	    bt_mesh_auth_method_set_static(prov_oob, sizeof(prov_oob)) == 0) {
+		e.type = GW_EVT_PROV_AUTH;
+		gw_post(&e);
+		return;
+	}
+	gw_post(&e);
+	(void)bt_mesh_auth_method_set_input(BT_MESH_ENTER_NUMBER, 1);
+}
+#endif
 
 static void prov_node_added(uint16_t net_idx, uint8_t uuid[16], uint16_t addr, uint8_t num_elem)
 {
@@ -219,6 +269,9 @@ static const struct bt_mesh_prov prov = {
 	.link_open = prov_link_open,
 	.link_close = prov_link_close,
 	.node_added = prov_node_added,
+#ifdef CONFIG_CTAG_GW_SECURE
+	.capabilities = prov_capabilities,
+#endif
 };
 
 /* Unprovisioned beacons with their RSSI, from the scan the mesh runs anyway
@@ -359,11 +412,29 @@ int gw_mesh_cfg(void *ctx, uint16_t addr, uint8_t step, uint8_t arg, uint32_t ta
 	return err;
 }
 
-int gw_mesh_provision(void *ctx, const uint8_t uuid[16])
+int gw_mesh_provision(void *ctx, const uint8_t uuid[16], const uint8_t *static_oob)
 {
+	int err;
+
 	ARG_UNUSED(ctx);
+#ifdef CONFIG_CTAG_GW_SECURE
+	if (static_oob == NULL) {
+		return -EINVAL; /* v2 never provisions without authentication */
+	}
+	memcpy(prov_oob, static_oob, sizeof(prov_oob));
+	prov_oob_set = true;
+#else
+	ARG_UNUSED(static_oob);
+#endif
 	/* Address 0: the CDB allocator picks the next free unicast range. */
-	return bt_mesh_provision_adv(uuid, NET_IDX, 0, 0);
+	err = bt_mesh_provision_adv(uuid, NET_IDX, 0, 0);
+#ifdef CONFIG_CTAG_GW_SECURE
+	if (err != 0) {
+		memset(prov_oob, 0, sizeof(prov_oob));
+		prov_oob_set = false;
+	}
+#endif
+	return err;
 }
 
 void gw_mesh_node_configured(void *ctx, uint16_t addr)
@@ -387,6 +458,33 @@ void gw_mesh_node_delete(void *ctx, uint16_t addr)
 	}
 	gw_store_name(NULL, addr, NULL, 0u);
 }
+
+#ifdef CONFIG_CTAG_GW_SECURE
+static uint8_t forget_name(struct bt_mesh_cdb_node *node, void *user_data)
+{
+	ARG_UNUSED(user_data);
+	gw_store_name(NULL, node->addr, NULL, 0u);
+	return BT_MESH_CDB_ITER_CONTINUE;
+}
+
+/*
+ * v2 RELEASE and the factory reset (connect-setup.md 4.3, 5.1): the network
+ * goes - every node's name, the assignments, the CDB (keys included) and the
+ * gateway's own node state. The next boot creates a new network.
+ */
+void gw_mesh_wipe(void *ctx)
+{
+	ARG_UNUSED(ctx);
+	if (mesh_err == 0) {
+		bt_mesh_cdb_node_foreach(forget_name, NULL);
+		bt_mesh_cdb_clear();
+		if (bt_mesh_is_provisioned()) {
+			bt_mesh_reset();
+		}
+	}
+	gw_store_assignments(NULL, NULL, 0u);
+}
+#endif
 
 int gw_sha256(void *ctx, const uint8_t *data, size_t len, uint8_t out[32])
 {

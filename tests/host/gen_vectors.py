@@ -540,8 +540,76 @@ def gen_session(root: Path) -> Header:
     return h
 
 
+def gen_v2(root: Path) -> Header:
+    """protocol v2 (v2_secure.json): identities, key schedule, grant rules, one conversation."""
+    fx = load(root, "v2_secure.json")
+    h = Header("v_v2", ("ctag/proto_ids.h",))
+    ident, _ = h.hexblob(fx["authority_pub"])
+    h.body += [f"#define V_V2_AUTHORITY_PUB {ident}"]
+
+    h.body += ["struct v_v2_code {\n\tuint8_t role;\n\tuint32_t short_id;\n\tconst uint8_t *secret;\n"
+               "\tconst uint8_t *payload;\n};"]
+    rows = []
+    for c in fx["setup_codes"]:
+        secret, _ = h.hexblob(c["secret"])
+        payload, n = h.hexblob(c["payload"])
+        assert n == 15
+        rows.append(f"\t{{{c['role']}u, 0x{c['short_id']:08x}u, {secret}, {payload}}},")
+    h.body += ["static const struct v_v2_code v_v2_codes[] = {", *rows, "};"]
+
+    h.body += ["struct v_v2_identity {\n\tuint8_t role;\n\tconst uint8_t *ik_priv;\n\tconst uint8_t *ik_pub;\n"
+               "\tconst uint8_t *device_id;\n\tuint32_t short_id;\n};"]
+    rows = []
+    for i in fx["identities"]:
+        priv, _ = h.hexblob(i["ik_priv"])
+        pub, _ = h.hexblob(i["ik_pub"])
+        dev, _ = h.hexblob(i["device_id"])
+        rows.append(f"\t{{{i['role']}u, {priv}, {pub}, {dev}, 0x{i['short_id']:08x}u}},")
+    h.body += ["static const struct v_v2_identity v_v2_identities[] = {", *rows, "};"]
+
+    ks = fx["key_schedule"]
+    for key in ("setup_secret", "device_id", "k_setup", "static_oob", "root", "k_epoch", "h", "root_proof",
+                "maint_proof"):
+        ident, n = h.hexblob(ks[key])
+        h.body += [f"#define V_V2_KS_{key.upper()} {ident}", f"#define V_V2_KS_{key.upper()}_LEN {n}u"]
+    h.body += [f"#define V_V2_KS_TAG_ID 0x{ks['tag_id']:08x}u", f"#define V_V2_KS_EPOCH {ks['epoch']}u"]
+
+    h.body += ["struct v_v2_grant_case {\n\tconst char *name;\n\tuint8_t role;\n\tconst uint8_t *device_id;\n"
+               "\tuint8_t state;\n\tuint32_t gen;\n\tconst uint8_t *authority_pub;\n\tsize_t authority_len;\n"
+               "\tconst uint8_t *owner;\n\tsize_t owner_len;\n\tconst uint8_t *controller;\n"
+               "\tsize_t controller_len;\n\tconst uint8_t *grant;\n\tsize_t grant_len;\n\tconst uint8_t *sig;\n"
+               "\tsize_t sig_len;\n\tuint8_t ops; /* bit per grant op */\n\tconst uint8_t *challenge;\n"
+               "\tconst uint8_t *session_controller;\n\tint8_t setup_proof_ok; /* -1 = null */\n"
+               "\tuint8_t expect;\n};"]
+    rows = []
+    for c in fx["grant_cases"]:
+        own = c["ownership"]
+        dev, _ = h.hexblob(c["device_id"])
+        auth, an = h.hexblob(own["authority_pub"])
+        owner, on = h.hexblob(own["owner"])
+        ctl, cn = h.hexblob(own["controller"])
+        grant, gn = h.hexblob(c["grant"])
+        sig, sn = h.hexblob(c["sig"])
+        chal, _ = h.hexblob(c["challenge"])
+        sess, _ = h.hexblob(c["session_controller"])
+        ops = sum(1 << op for op in c["ops"])
+        proof = {None: -1, False: 0, True: 1}[c["setup_proof_ok"]]
+        rows.append(f"\t{{{c_str(c['name'])}, {c['role']}u, {dev}, {own['state']}u, {own['gen']}u, {auth}, {an}u, "
+                    f"{owner}, {on}u, {ctl}, {cn}u, {grant}, {gn}u, {sig}, {sn}u, 0x{ops:02x}u, {chal}, {sess}, "
+                    f"{proof}, {c['expect']}u}},")
+    h.body += ["static const struct v_v2_grant_case v_v2_grant_cases[] = {", *rows, "};"]
+
+    conv = fx["conversation"]
+    for key in ("ident", "controller_priv", "controller_pub", "tag_ik_priv", "prologue", "init_ephemeral",
+                "resp_ephemeral", "msg1", "msg2", "handshake_hash", "setup_secret", "grant", "sig", "proof_s",
+                "request_plain", "request_sealed", "answer_plain", "answer_sealed"):
+        ident, n = h.hexblob(conv[key])
+        h.body += [f"#define V_V2_CONV_{key.upper()} {ident}", f"#define V_V2_CONV_{key.upper()}_LEN {n}u"]
+    return h
+
+
 GENERATORS = (gen_crc32, gen_cobs, gen_serial, gen_serial_cbor, gen_mesh, gen_layouts, gen_render, gen_qr,
-              gen_fontpack, gen_fragments, gen_tag_txn, gen_enrollment, gen_session)
+              gen_fontpack, gen_fragments, gen_tag_txn, gen_enrollment, gen_session, gen_v2)
 
 
 def main() -> None:

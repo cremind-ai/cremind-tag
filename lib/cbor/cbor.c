@@ -28,6 +28,9 @@ enum limit {
 	L_MAX32,
 	L_PAYLOAD,
 	L_LAYOUT,
+	L_EQ32,
+	L_EQ64,
+	L_GRANT,
 };
 
 #define K(kind, limit) (uint8_t)((kind) << 4 | (limit))
@@ -99,6 +102,24 @@ static const uint8_t key_spec[] = {
 	[CTAG_CBOR_KEY_APP_IDX] = K(CTAG_CBOR_UINT, L_U16),
 	[CTAG_CBOR_KEY_STORED_EPOCH] = U32,
 	[CTAG_CBOR_KEY_ASSIGNED_COUNT] = U32,
+	/* protocol v2 (docs/connect-setup.md 5.3) */
+	[CTAG_CBOR_KEY_DEVICE_ID] = K(CTAG_CBOR_BSTR, L_EQ16),
+	[CTAG_CBOR_KEY_IK] = K(CTAG_CBOR_BSTR, L_EQ32),
+	[CTAG_CBOR_KEY_OWNER_STATE] = U32,
+	[CTAG_CBOR_KEY_GEN] = U32,
+	[CTAG_CBOR_KEY_AUTHORITY_ID] = K(CTAG_CBOR_BSTR, L_EQ16),
+	[CTAG_CBOR_KEY_CHALLENGE] = K(CTAG_CBOR_BSTR, L_EQ16),
+	[CTAG_CBOR_KEY_GRANT] = K(CTAG_CBOR_BSTR, L_GRANT),
+	[CTAG_CBOR_KEY_SIG] = K(CTAG_CBOR_BSTR, L_EQ64),
+	[CTAG_CBOR_KEY_STATIC_OOB] = K(CTAG_CBOR_BSTR, L_EQ32),
+	[CTAG_CBOR_KEY_TUNNEL] = K(CTAG_CBOR_UINT, L_U16),
+	[CTAG_CBOR_KEY_STATE] = U32,
+	[CTAG_CBOR_KEY_PROOF] = K(CTAG_CBOR_BSTR, L_EQ16),
+	[CTAG_CBOR_KEY_OWNER] = K(CTAG_CBOR_BSTR, L_EQ16),
+	[CTAG_CBOR_KEY_CONTROLLER_MATCH] = K(CTAG_CBOR_BOOL, L_NONE),
+	[CTAG_CBOR_KEY_ROOT_PROOF] = K(CTAG_CBOR_BSTR, L_EQ16),
+	[CTAG_CBOR_KEY_RELEASE_STAGE] = U32,
+	[CTAG_CBOR_KEY_OP_KEY] = K(CTAG_CBOR_BSTR, L_EQ32),
 };
 
 static uint8_t spec_of(uint64_t key)
@@ -131,6 +152,12 @@ static bool size_ok(uint8_t limit, size_t n)
 		return n <= CTAG_SERIAL_MAX_PAYLOAD;
 	case L_LAYOUT:
 		return n <= CTAG_LAYOUT_HARD_MAX;
+	case L_EQ32:
+		return n == 32u;
+	case L_EQ64:
+		return n == 64u;
+	case L_GRANT:
+		return n <= CTAG_GRANT_MAX;
 	default:
 		return true;
 	}

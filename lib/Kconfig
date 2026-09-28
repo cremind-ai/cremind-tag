@@ -66,6 +66,29 @@ config CTAG_CRYPTO_PSA
 	bool
 	depends on PSA_CRYPTO
 
+config CTAG_SECURE
+	bool "Protocol v2 secure layer (Noise* IK, HACL*)"
+	select CTAG_CRC32
+	help
+	  Device identity, the v2 key schedule, canonical grants and the
+	  device-side grant rules, the ownership record, secure-message
+	  framing, tunnel fragments and the responder-side secure endpoint
+	  of docs/connect-setup.md, on the vendored Noise*
+	  (Noise_IK_25519_ChaChaPoly_SHA256) and HACL* (X25519, Ed25519,
+	  ChaCha20-Poly1305, SHA-256, HMAC) of lib/third_party. Gateway,
+	  bridge and tag.
+
+config CTAG_SECURE_HEAP_SIZE
+	int "Secure heap for Noise* (bytes)"
+	depends on CTAG_SECURE
+	default 12288
+	help
+	  Noise* allocates its device, peer and session objects and a copy of
+	  every message it seals or opens (KaRaMeL's KRML_HOST_MALLOC). They
+	  live in this fixed sys_heap; a failed allocation fails the session,
+	  never the device. Peak use is about 1.2 KiB for a session plus twice
+	  the largest message sealed or opened at once (docs/firmware-libs.md).
+
 config CTAG_TXN
 	bool "Tag display transaction"
 	select CTAG_CRC32
