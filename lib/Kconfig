@@ -47,8 +47,38 @@ config CTAG_RENDER_QR_SLOTS
 config CTAG_FRAG
 	bool "GATT fragmentation"
 	help
-	  Fragment encoder and reassembler of docs/protocol.md 5.3. Tag and
-	  bridge.
+	  Fragment encoder and reassembler of docs/protocol.md 5.3. Tag,
+	  bridge and the gateway's own radio.
+
+config CTAG_SCHED
+	bool "Tag connection scheduler (the mesh suspend window)"
+	help
+	  The connection scheduler of docs/protocol.md 5.2: one connection
+	  attempt at a time, each in its own mesh suspend window, the
+	  rolling-minute rate limit, the per-tag back-off with its one quick
+	  retry, and up to CTAG_SCHED_LINKS tag connections at once. Pure
+	  logic: Bluetooth goes through struct sched_ops. Bridge and the
+	  gateway's own radio (docs/protocol.md 11).
+
+config CTAG_SCHED_LINKS
+	int "Tag connections the scheduler holds at once"
+	depends on CTAG_SCHED
+	default 1
+	range 1 4
+	help
+	  One struct sched_link each. The application sets it to its own
+	  count (bridge: CTAG_BRIDGE_SESSIONS, gateway: CTAG_GW_TAG_LINKS)
+	  and asserts that they match.
+
+config CTAG_SCHED_TAGS
+	int "Per-tag back-off entries"
+	depends on CTAG_SCHED
+	default 20
+	range 1 64
+	help
+	  Tags whose last failure the scheduler remembers (12 bytes each);
+	  when full, the entry expiring first is reused. The bridge keeps
+	  one per assignable tag (CTAG_BRIDGE_MAX_TAGS).
 
 config CTAG_SESSION
 	bool "Tag session handshake and records"

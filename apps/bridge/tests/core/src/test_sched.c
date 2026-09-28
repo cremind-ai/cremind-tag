@@ -6,8 +6,13 @@
 #include <errno.h>
 #include <string.h>
 
+#include <ctag/ctag_sched.h>
+
 #include "common.h"
-#include "sched.h"
+
+/* The bridge's sizes reach the shared scheduler (Kconfig.bridge defaults). */
+BUILD_ASSERT(SCHED_LINKS == CONFIG_CTAG_BRIDGE_SESSIONS, "one scheduler link per tag session");
+BUILD_ASSERT(SCHED_TAGS == CONFIG_CTAG_BRIDGE_MAX_TAGS, "one back-off entry per assignable tag");
 
 #define HCI_UNKNOWN_CONN_ID 0x02
 #define HCI_CONN_FAIL       0x3E

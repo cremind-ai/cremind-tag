@@ -11,8 +11,12 @@ All multi-byte integers are **little-endian** unless stated otherwise.
 
 ```
 Cremind ──HTTPS──▶ companion (PC) ──serial──▶ gateway ──mesh──▶ bridge ──BLE GATT──▶ tag
-          §7 connector API        §1               §2          §3,§4         §5,§6
+          §7 connector API        §1              │ §2          §3,§4         §5,§6
+                                                  └──────── BLE GATT (§11) ───────────▶ tag
 ```
+
+A gateway with its own tag links (§11) also reaches the tags in its range
+directly; bridges extend the range beyond it.
 
 ---
 
@@ -705,3 +709,125 @@ These close gaps the sections above leave open. The companion's simulator
 
 - `FLASH_TEST` reports `BUSY` for any test position inside the active slot or the
   slot directory, and tests the rest.
+
+---
+
+## 11. Tags on the gateway's own radio
+
+A gateway whose `HELLO` caps report `tag_links` > 0 (the nRF52840 gateways)
+also connects to tags itself, so a gateway alone serves the tags in its range
+and bridges only extend the range. The gateway renders nothing and holds no
+tag key: it relays whole messages between the companion and a tag, and the
+**companion runs the bridge side of the session** (§5.4–§5.6 and every §10
+rule) and renders the frame (§4.4) with the font pack it composed the layout
+with.
+
+```
+companion ──serial: TUNNEL_* (SESSION)──▶ gateway ──BLE GATT──▶ tag
+ session §5.4–§5.6, rendering §4.4         relay (§5.3 fragments)
+```
+
+### 11.1 Addressing
+
+In serial requests and events `bridge = GATEWAY_ADDR` (0x0001) names the
+gateway's own radio. The companion keeps the assignments, keys and jobs of
+the tags it serves this way itself: `ASSIGN_TAG`, `UNASSIGN_TAG`,
+`DELIVER_LAYOUT` and `TAG_COMMAND` never name `GATEWAY_ADDR`, and the gateway
+answers them `NOT_FOUND` as for an unknown bridge. `K_epoch` of such a tag
+never leaves the companion.
+
+### 11.2 Discovery
+
+`DISCOVER` with `bridge` 0 or `GATEWAY_ADDR` also opens a window of
+`duration_s` + 2 s on the gateway's own radio, as long as the one it keeps for
+a bridge's answers (with `tag_links` 0, `GATEWAY_ADDR` answers `NOT_FOUND`).
+Every v2 advertisement with the `SETUP` flag (and, when `tag_id` ≠ 0, that
+tag id) heard in the window becomes `EVT_DISCOVERED {bridge: GATEWAY_ADDR,
+tag_id, rssi, flags}`, at most once per (bridge, tag) every
+`DISCOVERED_MIN_INTERVAL_MS`, exactly like a bridge's.
+
+### 11.3 Tunnels on the own radio
+
+`TUNNEL_OPEN {op_id, bridge: GATEWAY_ADDR, tag_id, duration_s, mode}`:
+
+| `mode` | Characteristics | `EVT_TUNNEL OPEN` data | Messages |
+|---|---|---|---|
+| `PAIR` (absent) | `IDENT`, `PAIR` (connect-setup.md §7) | the `ident2` read from `IDENT` | `PAIR` messages both ways |
+| `SESSION` | `CAPS`, `CTRL`, `DATA`, `STATUS` (§5) | the `tag_caps` value read from `CAPS` | companion → tag: `CTRL` messages and `DATA` records; tag → companion: `CTRL` and `STATUS` messages |
+
+- **Refusals** (at once, in this order): `UNSUPPORTED` without tag links;
+  `INVALID` for `tag_id` 0, `duration_s` 0 or above 255, or an unknown `mode`;
+  `BUSY` (not remembered) when a tunnel to that tag is open or every own-radio
+  tunnel is taken (`CONFIG_CTAG_GW_RADIO_TUNNELS`, 8 on the nRF52840). A
+  `mode` other than `PAIR` through a bridge is `INVALID`, before the bridge is
+  looked up. Own-radio tunnels and mesh tunnels share one id space.
+- **Waiting for the tag.** The answer `{status OK, tunnel}` comes at once; the
+  tunnel then waits for the tag's advertisement (§5.1, `ver` 1 or 2) for
+  `duration_s`. The gateway connects under the rules of §5.2 exactly as a
+  bridge does: one connection attempt at a time, each in its own mesh suspend
+  window; the rate limit, the per-tag back-off and the one quick retry; never
+  while it provisions or configures a node; its own segmented sends finish
+  first (at most 500 ms, else the attempt waits for a later advertisement);
+  at most `tag_links` connections at once, a further one only while every
+  connected tunnel has nothing left to write. A tag not reached in time closes
+  the tunnel `TIMEOUT`; an attempt already running at that deadline decides
+  first (the connection and the resume: about 3.5 s at most).
+- **Connected.** GATT discovery of the tag service, the subscriptions of the
+  mode (`CTRL` indications and `STATUS` notifications, or `PAIR` indications),
+  then the read of `CAPS` or `IDENT`, whose value is `EVT_TUNNEL {OPEN, data,
+  rssi}` (`rssi`: the advertisement the gateway connected on).
+  A tag without the characteristics of the mode closes the tunnel
+  `UNSUPPORTED`; a failed GATT step or an empty read closes it `INVALID`, and
+  a setup not done within 5 s of the connection `TIMEOUT`. The companion
+  authenticates the value like one a bridge read: `CAPS` is bound into the
+  handshake transcript (§5.4), `ident2` into the Noise session.
+- **Sending.** `TUNNEL_SEND {tunnel, data}` carries one message. In a `SESSION`
+  tunnel its first byte picks the characteristic: `0x01`–`0x0F` `CTRL`
+  (at most `TAG_CTRL_MSG_MAX` bytes, written with response), `0x10`–`0x2F`
+  `DATA` (at most `TAG_RECORD_WIRE_MAX`, written without response); another
+  type is `INVALID`, a longer message `TOO_LARGE`. In a `PAIR` tunnel every
+  message goes to `PAIR` (at most `PAIR_MSG_MAX`). The gateway fragments it
+  (§5.3: its own `SEQ` per characteristic, from 0 at the connection) and
+  answers `OK` once the message is queued: two messages per tunnel, beyond
+  that (or before `OPEN`) `BUSY`. Written fragments are paced by the ATT
+  buffers, never by the serial link.
+- **Receiving.** Values are reassembled per characteristic (§5.3); each
+  complete message is `EVT_TUNNEL {DATA, data}` (best effort, as every
+  `EVT_TUNNEL`). The companion tells `CTRL` from `STATUS` messages by their
+  type byte (§5.4–§5.6). A §5.3 violation closes the tunnel `INVALID`.
+- **Closing.** `TUNNEL_CLOSE` disconnects, without an event; the tag sees
+  what it sees after a bridge's session. Otherwise `EVT_TUNNEL {CLOSED,
+  status}`: `DISCONNECTED` (the link dropped, or a write failed after its
+  `OK`), `TIMEOUT` (no message either way for `duration_s` + 5 s once
+  connected, as a mesh tunnel; a panel refresh sends nothing for up to its
+  refresh bound, so a `SESSION` tunnel's `duration_s` covers it), `INVALID`
+  (a §5.3 violation, or a write the tag refused with an ATT error),
+  `UNSUPPORTED`. Every close but `TUNNEL_CLOSE` counts as a failed session
+  for the tag's back-off (§5.2).
+
+### 11.4 The companion's side
+
+- It runs one session per tag at a time over a `SESSION` tunnel and closes the
+  tunnel when the session ends. The session is the bridge's: the `CAPS`
+  checks, the handshake with `CAPS` in the transcript, the tag's credits
+  counted per record (a `BUSY` from the gateway's two-message queue is
+  retried, never counted), the
+  deadlines and unauthenticated-status rules of §10 (a message lost on the
+  serial link is a link-level failure: the job stays pending), and the frame
+  or `CMD` jobs of §5.6.
+- It renders the frame by §4.4 from the layout and font pack it composed; the
+  golden fixtures bind its renderer and a bridge's bit for bit, so the digest
+  the tag checks is the one a bridge would send.
+- Its results have the fields of `EVT_RESULT` with `bridge: GATEWAY_ADDR`,
+  `mesh_ms` 0 and the gateway-side timing it measured.
+- Pairing a tag on the own radio is connect-setup.md §8.3 with the gateway as
+  the candidate: a `PAIR` tunnel to `GATEWAY_ADDR`.
+
+### 11.5 Costs
+
+- Each connection attempt pauses the gateway's mesh for about one second
+  (§5.2, at most 6 per minute): its sends to bridges and a node's
+  configuration wait meanwhile, as a bridge's own sends do, and `PROVISION`
+  answers `PROVISIONING_ACTIVE` (transient, §10: the companion retries).
+- `tag_links` is 2 on the nRF52840 gateways and 0 on the nRF52832 gateway,
+  whose RAM holds no connection.

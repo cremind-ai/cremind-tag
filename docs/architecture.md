@@ -3,13 +3,14 @@
 ```mermaid
 flowchart LR
     C["Cremind<br/>Durable events, Tags UI<br/>+ hardware runtime: queue, text layout, routing"]
-    G["nRF52840 gateway<br/>Zephyr Mesh provisioner"]
+    G["nRF52840 gateway<br/>Zephyr Mesh provisioner<br/>+ BLE relay to tags in range"]
     B["Powered bridge<br/>Zephyr Mesh relay<br/>+ BLE central + renderer"]
     T["Battery tag<br/>Zephyr BLE peripheral<br/>+ e-paper"]
 
     C <-->|"USB CDC / UART"| G
     G <-->|"Mesh: compact layout commands"| B
     B <-->|"BLE: images and refresh ACK"| T
+    G <-->|"BLE: the companion's tag sessions, relayed (nRF52840)"| T
 ```
 
 The gateway is plugged into a computer running Cremind: the Cremind server
@@ -36,8 +37,8 @@ never substituted to make a target pass.
 
 | Stage | Does | Never does |
 |---|---|---|
-| Cremind | Journals profile events in the source transaction; projects them into delivery jobs; its hardware runtime turns them into screens (Unicode layout with ICU + HarfBuzz), keeps the durable queue, speaks the gateway serial protocol, enrolls and flashes hardware, builds font packs; UI/CLI/API | Rendering pixels for delivery (bridges do that) |
-| Gateway | Mesh provisioner + configuration client; persists the network; injects layouts; returns results | Rendering, BLE connections to tags |
+| Cremind | Journals profile events in the source transaction; projects them into delivery jobs; its hardware runtime turns them into screens (Unicode layout with ICU + HarfBuzz), keeps the durable queue, speaks the gateway serial protocol, enrolls and flashes hardware, builds font packs; for tags on the gateway's own radio it runs the bridge side of the tag session and renders the frame itself ([protocol.md §11](protocol.md#11-tags-on-the-gateways-own-radio)); UI/CLI/API | Rendering pixels for tags behind a bridge (the bridge does that) |
+| Gateway | Mesh provisioner + configuration client; persists the network; injects layouts; returns results; on the nRF52840 also a BLE relay to the tags in its own range (connects under the bridge's §5.2 rules, carries whole session messages, fragmented per §5.3) | Rendering, holding tag keys, looking into relayed messages |
 | Bridge | Mesh relay; validates layouts; strip-renders bitmaps from its font pack; BLE central to tags; authenticated image transfer | Holding tag secrets |
 | Tag | Advertises briefly every 30 s; authenticates the bridge; writes authenticated image records into panel RAM; refreshes only after full validation; persists the result before ACKing | Fonts, layout, mesh |
 
@@ -62,7 +63,7 @@ twister check the firmware against them byte for byte.
 ```
 protocol/            spec.yaml (single source of truth) + golden fixtures shared with the host software
 include/ctag/        generated protocol headers + public headers of the firmware libraries
-lib/                 firmware libraries (portable C, host-testable): framing, layout, render, session, tag txn, fontpack, qr
+lib/                 firmware libraries (portable C, host-testable): framing, layout, render, session, tag txn, fontpack, qr, connection scheduler
 apps/gateway|bridge|tag   Zephyr applications (and their native_sim tests)
 boards/cremind/      HWMv2 boards for the four EPD tag boards
 dts/bindings/        panel and board bindings

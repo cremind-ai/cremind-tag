@@ -100,6 +100,14 @@ static int next_rc(void)
 	return rc;
 }
 
+/* docs/protocol.md 11.3: nothing reaches the mesh stack while it is suspended. */
+static void assert_mesh_running(void)
+{
+#ifdef CONFIG_CTAG_GW_RADIO
+	zassert_false(mock.suspended, "a mesh operation while the mesh is suspended");
+#endif
+}
+
 static int be_send(void *ctx, uint16_t dst, uint8_t op, const uint8_t *params, size_t len,
 		   uint32_t tag)
 {
@@ -107,6 +115,7 @@ static int be_send(void *ctx, uint16_t dst, uint8_t op, const uint8_t *params, s
 	int rc = next_rc();
 
 	(void)ctx;
+	assert_mesh_running();
 	zassert_true(mock.n_sent < ARRAY_SIZE(mock.sent), "send log full");
 	zassert_true(len <= CTAG_MESH_MAX_VENDOR_PARAMS, "params too long");
 	if (rc != 0) {
@@ -126,6 +135,7 @@ static int be_send(void *ctx, uint16_t dst, uint8_t op, const uint8_t *params, s
 static int be_cfg(void *ctx, uint16_t addr, uint8_t step, uint8_t arg, uint32_t tag)
 {
 	(void)ctx;
+	assert_mesh_running();
 	zassert_true(mock.n_cfg < ARRAY_SIZE(mock.cfg), "cfg log full");
 	if (mock.cfg_rc != 0) {
 		return mock.cfg_rc;
@@ -139,6 +149,7 @@ static int be_provision(void *ctx, const uint8_t uuid[16], const uint8_t *static
 	size_t i = mock.n_provision % 8;
 
 	(void)ctx;
+	assert_mesh_running();
 	if (mock.provision_rc != 0) {
 		return mock.provision_rc;
 	}
@@ -224,6 +235,90 @@ static void be_release(void *ctx)
 }
 #endif
 
+#ifdef CONFIG_CTAG_GW_RADIO
+static void be_listen(void *ctx, bool on)
+{
+	(void)ctx;
+	zassert_true(on != mock.listening, "radio_listen() only on a change");
+	mock.listening = on;
+	mock.listen_calls++;
+}
+
+static int be_suspend(void *ctx)
+{
+	(void)ctx;
+	mock.suspends++;
+	if (mock.suspend_rc == 0 || mock.suspend_rc == -EALREADY) {
+		mock.suspended = true;
+	}
+	return mock.suspend_rc;
+}
+
+static int be_resume(void *ctx)
+{
+	(void)ctx;
+	mock.resumes++;
+	if (mock.resume_rc == 0 || mock.resume_rc == -EALREADY) {
+		mock.suspended = false;
+	}
+	return mock.resume_rc;
+}
+
+static int be_connect(void *ctx, uint8_t link, const struct sched_peer *peer, uint32_t timeout_ms)
+{
+	(void)ctx;
+	zassert_true(mock.suspended, "5.2: connecting only while the mesh is suspended");
+	zassert_true(link < CONFIG_CTAG_GW_TAG_LINKS);
+	mock.connects++;
+	mock.connect_link = link;
+	mock.connect_peer = *peer;
+	mock.connect_timeout = timeout_ms;
+	return mock.connect_rc;
+}
+
+static int be_disconnect(void *ctx, uint8_t link)
+{
+	(void)ctx;
+	zassert_true(link < CONFIG_CTAG_GW_TAG_LINKS);
+	mock.disconnects++;
+	mock.disconnect_link = link;
+	return 0;
+}
+
+static int be_setup(void *ctx, uint8_t link, uint8_t mode)
+{
+	(void)ctx;
+	zassert_false(mock.suspended, "5.2 step 8: GATT only after the resume");
+	mock.setups++;
+	mock.setup_link = link;
+	mock.setup_mode = mode;
+	return mock.setup_rc;
+}
+
+static int be_link_write(void *ctx, uint8_t link, uint8_t chr, const uint8_t *value, size_t len)
+{
+	int rc = 0;
+
+	(void)ctx;
+	if (mock.write_rc_n > 0u) {
+		rc = mock.write_rc[0];
+		memmove(&mock.write_rc[0], &mock.write_rc[1], (mock.write_rc_n - 1u) * sizeof(int));
+		mock.write_rc_n--;
+	}
+	if (rc != 0) {
+		return rc; /* refused: not recorded */
+	}
+	zassert_true(mock.n_writes < ARRAY_SIZE(mock.writes), "write log full");
+	zassert_true(len >= 2u && len <= CTAG_ATT_VALUE_MAX, "fragment of %u bytes", (unsigned)len);
+	mock.writes[mock.n_writes].link = link;
+	mock.writes[mock.n_writes].chr = chr;
+	mock.writes[mock.n_writes].len = (uint8_t)len;
+	memcpy(mock.writes[mock.n_writes].data, value, len);
+	mock.n_writes++;
+	return 0;
+}
+#endif
+
 static const struct gw_backend backend = {
 	.write = be_write,
 	.reboot = be_reboot,
@@ -240,6 +335,15 @@ static const struct gw_backend backend = {
 	.store_owner = be_store_owner,
 	.random = be_random,
 	.release = be_release,
+#endif
+#ifdef CONFIG_CTAG_GW_RADIO
+	.radio_listen = be_listen,
+	.radio_suspend = be_suspend,
+	.radio_resume = be_resume,
+	.link_connect = be_connect,
+	.link_disconnect = be_disconnect,
+	.link_setup = be_setup,
+	.link_write = be_link_write,
 #endif
 };
 
@@ -682,7 +786,7 @@ bool field_has(const struct frame *fr, uint8_t key)
 uint32_t counter(const char *name)
 {
 	struct ctag_cbor_field f = {.key = CTAG_CBOR_KEY_COUNTERS};
-	struct ctag_cbor_counter items[80];
+	struct ctag_cbor_counter items[96];
 	uint16_t rid = host_send(CTAG_SERIAL_MSG_GET_COUNTERS, NULL, 0u, 1u);
 	const struct frame *r;
 	int n;

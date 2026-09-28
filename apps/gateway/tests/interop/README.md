@@ -96,4 +96,8 @@ What this does **not** cover: the Zephyr mesh stack itself (provisioning
 PDUs, the static OOB exchange, the configuration client's messages,
 segmentation, `send_cb` timing), USB CDC ACM enumeration, the nRF UART driver,
 the factory-reset button and settings storage — those are hardware tests
-(docs/gateway-firmware.md §13).
+(docs/gateway-firmware.md §13). Nor the tags on the gateway's own radio
+(docs/protocol.md §11): the simulated network has no Bluetooth, so both
+builds leave `CONFIG_CTAG_GW_RADIO` off (a gateway without tag links); the
+core's side of them is the `gw_radio` suite of `tests/core`
+(docs/gateway-firmware.md §16.9).

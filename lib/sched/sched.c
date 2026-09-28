@@ -1,12 +1,24 @@
-/* Tag connection scheduler: the mesh suspend window of docs/protocol.md 5.2. */
+/*
+ * Tag connection scheduler: the mesh suspend window of docs/protocol.md 5.2
+ * (include/ctag/ctag_sched.h). Portable C: no Zephyr or Bluetooth calls, the
+ * sizes from ctag_sched.h.
+ */
 #include <errno.h>
 #include <string.h>
 
-#include <zephyr/sys/util.h>
+#include <ctag/ctag_sched.h>
 
-#include "sched.h"
+#define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 
-BUILD_ASSERT(SCHED_LINKS >= 1 && SCHED_LINKS <= 2, "one or two tag sessions at once");
+static uint32_t min_u32(uint32_t a, uint32_t b)
+{
+	return a < b ? a : b;
+}
+
+static uint32_t max_u32(uint32_t a, uint32_t b)
+{
+	return a > b ? a : b;
+}
 
 static uint32_t now(const struct sched *s)
 {
@@ -48,7 +60,7 @@ static void rearm(struct sched *s)
 		uint32_t dl = l->t_state + SCHED_DISCONNECT_WAIT_MS;
 
 		if (l->state == SCHED_LINK_DISCONNECTING) {
-			next = MIN(next, after(t, dl) ? 0u : dl - t);
+			next = min_u32(next, after(t, dl) ? 0u : dl - t);
 		}
 	}
 	s->ops->timer(s->ctx, next);
@@ -67,7 +79,7 @@ static struct sched_backoff *backoff_entry(struct sched *s, uint32_t tag_id)
 {
 	size_t i;
 
-	for (i = 0; i < ARRAY_SIZE(s->backoff); i++) {
+	for (i = 0; i < ARRAY_LEN(s->backoff); i++) {
 		if ((s->backoff[i].flags & SCHED_BO_USED) && s->backoff[i].tag_id == tag_id) {
 			return &s->backoff[i];
 		}
@@ -86,14 +98,14 @@ static void backoff(struct sched *s, uint32_t tag_id, uint8_t status, bool quick
 	size_t i;
 
 	s->last_status = status;
-	for (i = 0; b == NULL && i < ARRAY_SIZE(s->backoff); i++) {
+	for (i = 0; b == NULL && i < ARRAY_LEN(s->backoff); i++) {
 		if (!(s->backoff[i].flags & SCHED_BO_USED)) {
 			b = &s->backoff[i]; /* a free entry */
 		}
 	}
 	if (b == NULL) {
 		b = &s->backoff[0]; /* else the one expiring first */
-		for (i = 1; i < ARRAY_SIZE(s->backoff); i++) {
+		for (i = 1; i < ARRAY_LEN(s->backoff); i++) {
 			if (after(b->at, s->backoff[i].at)) {
 				b = &s->backoff[i];
 			}
@@ -219,7 +231,7 @@ bool sched_deaf(const struct sched *s, uint32_t t, uint32_t heard_ms, uint32_t l
 		return false;
 	}
 	for (i = 0; i < SCHED_LINKS; i++) {
-		idle_for = MIN(idle_for, t - s->links[i].t_state);
+		idle_for = min_u32(idle_for, t - s->links[i].t_state);
 	}
 	return t - heard_ms >= limit_ms && idle_for >= limit_ms;
 }
@@ -272,7 +284,7 @@ static void resume_after_attempt(struct sched *s, bool session, uint8_t fail_sta
 	uint32_t t = now(s);
 
 	s->last_suspend_ms = t - s->t_suspend;
-	s->c.suspend_max_ms = MAX(s->c.suspend_max_ms, s->last_suspend_ms);
+	s->c.suspend_max_ms = max_u32(s->c.suspend_max_ms, s->last_suspend_ms);
 	if (err == 0 || err == -EALREADY) {
 		s->mesh_suspended = false;
 		if (session && l->conn_up) {
@@ -537,7 +549,7 @@ static void initiator_timeout(struct sched *s, uint32_t t)
 			s->c.reboots++;
 			s->ops->reboot(s->ctx);
 		}
-		s->retry_ms = MIN(2u * s->retry_ms, SCHED_RESUME_RETRY_MAX);
+		s->retry_ms = min_u32(2u * s->retry_ms, SCHED_RESUME_RETRY_MAX);
 		arm(s, s->retry_ms);
 		break;
 	default:

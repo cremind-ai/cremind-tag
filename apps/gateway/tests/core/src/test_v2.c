@@ -915,6 +915,41 @@ ZTEST(gw_v2, test_tunnel_close_timeout_and_failed_send)
 	zassert_equal(status, CTAG_STATUS_OK);
 }
 
+#ifndef CONFIG_CTAG_GW_RADIO
+/* protocol.md 11: a gateway without tag links has no own radio. */
+ZTEST(gw_v2, test_gateway_addr_without_tag_links)
+{
+	struct ctag_cbor_field open[5] = {
+		GW_F_UINT(CTAG_CBOR_KEY_OP_ID, 30u),
+		GW_F_UINT(CTAG_CBOR_KEY_BRIDGE, GW_ADDR),
+		GW_F_UINT(CTAG_CBOR_KEY_TAG_ID, 0x1234u),
+		GW_F_UINT(CTAG_CBOR_KEY_DURATION_S, 30u),
+		GW_F_UINT(CTAG_CBOR_KEY_MODE, CTAG_TUNNEL_MODE_SESSION),
+	};
+	struct ctag_cbor_field caps = {.key = CTAG_CBOR_KEY_CAPS};
+	struct ctag_cbor_field links = {.key = CTAG_CBOR_KEY_TAG_LINKS};
+	uint16_t rid;
+
+	core_session();
+	zassert_equal(request_status(CTAG_SERIAL_MSG_TUNNEL_OPEN, open, 4u), CTAG_STATUS_UNSUPPORTED);
+	open[0] = GW_F_UINT(CTAG_CBOR_KEY_OP_ID, 31u);
+	zassert_equal(request_status(CTAG_SERIAL_MSG_TUNNEL_OPEN, open, 5u), CTAG_STATUS_UNSUPPORTED);
+	/* SESSION is for the own radio only */
+	open[0] = GW_F_UINT(CTAG_CBOR_KEY_OP_ID, 32u);
+	open[1] = GW_F_UINT(CTAG_CBOR_KEY_BRIDGE, BRIDGE_A);
+	zassert_equal(request_status(CTAG_SERIAL_MSG_TUNNEL_OPEN, open, 5u), CTAG_STATUS_INVALID);
+	zassert_equal(sent_count(CTAG_MESH_OP_TUNNEL_OPEN), 0u);
+	zassert_equal(discover(33u, GW_ADDR, 30u, 0u), CTAG_STATUS_NOT_FOUND);
+	/* INFO caps: no tag_links */
+	rid = host_send(CTAG_SERIAL_MSG_INFO, NULL, 0u, 1u);
+	host_read();
+	decode(response(rid), &caps, 1u);
+	zassert_true(caps.present);
+	zassert_ok(ctag_cbor_decode(caps.v.str.ptr, caps.v.str.len, &links, 1u));
+	zassert_false(links.present);
+}
+#endif
+
 ZTEST(gw_v2, test_caps2_status_reaches_the_inventory)
 {
 	struct ctag_mesh_caps2_status c = {.device_id = {0xD0, 1, 2}, .gen = 3u, .owner_state = 1u};

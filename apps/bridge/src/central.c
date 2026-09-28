@@ -27,6 +27,10 @@
 
 LOG_MODULE_REGISTER(bridge_central, LOG_LEVEL_INF);
 
+/* The shared scheduler (lib/sched) is sized by Kconfig.bridge: a link per tag
+ * session, a back-off entry per assignable tag. */
+BUILD_ASSERT(SCHED_LINKS == CONFIG_CTAG_BRIDGE_SESSIONS, "one scheduler link per tag session");
+BUILD_ASSERT(SCHED_TAGS == CONFIG_CTAG_BRIDGE_MAX_TAGS, "one back-off entry per assignable tag");
 /* One connection per link; the DATA fragments of every link in flight at once
  * stay below the ATT buffers, so a write never blocks the work queue. */
 BUILD_ASSERT(CONFIG_BT_MAX_CONN >= SCHED_LINKS, "a connection per tag session");

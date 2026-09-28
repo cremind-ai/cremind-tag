@@ -3,11 +3,14 @@
  * main thread once start-up is done (cooperative, CONFIG_MAIN_THREAD_PRIORITY,
  * so no second stack is spent). Bluetooth callbacks (mesh model handlers,
  * send callbacks, provisioning and configuration-client callbacks, the scan
- * listener) copy what they got into a message queue and return at once; the
- * UART interrupt fills a ring. The loop drains both, feeds the core, and
- * sleeps until the core's next deadline or the next wake-up. Nothing here
- * blocks the Bluetooth stack.
+ * listeners, and with the own radio the connection, GATT and value
+ * callbacks of central.c) copy what they got into a message queue and return
+ * at once; the UART interrupt fills a ring. The loop drains both, feeds the
+ * core, and sleeps until the core's next deadline or the next wake-up.
+ * Nothing here blocks the Bluetooth stack.
  */
+#include <string.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 
@@ -24,6 +27,17 @@ void gw_post(const struct gw_evt *e)
 		atomic_inc(&gw_evq_dropped); /* the protocol's retries recover */
 	}
 	k_sem_give(&gw_wake_sem);
+}
+
+bool gw_post_advert(const struct gw_evt *e)
+{
+	/* A tag advertises again 250 ms later (5.1): never at the cost of a
+	 * mesh, provisioning or link event. */
+	if (k_msgq_num_used_get(&gw_evq) >= CONFIG_CTAG_GW_EVQ_DEPTH / 2) {
+		return false;
+	}
+	gw_post(e);
+	return true;
 }
 
 void gw_wake(void)
@@ -66,6 +80,27 @@ static void dispatch(const struct gw_evt *e, int64_t now)
 		break;
 	case GW_EVT_PROV_AUTH:
 		gw_core_prov_auth(gw, now);
+		break;
+#endif
+#ifdef CONFIG_CTAG_GW_RADIO
+	case GW_EVT_TAG_ADV: {
+		struct sched_peer peer = {.type = e->data[0]};
+
+		memcpy(peer.a, &e->data[1], sizeof(peer.a));
+		gw_core_tag_adv(gw, &peer, e->tag, e->op, (uint8_t)e->u16, e->rssi, now);
+		break;
+	}
+	case GW_EVT_CONN:
+	case GW_EVT_DISCONN:
+	case GW_EVT_GATT:
+		gw_central_event(gw, e, now);
+		break;
+	case GW_EVT_LINK_VALUE:
+		gw_core_link_rx(gw, (uint8_t)e->addr, e->op, e->err == 0 ? e->data : NULL, e->len,
+				now);
+		break;
+	case GW_EVT_LINK_WRITTEN:
+		gw_core_link_written(gw, (uint8_t)e->addr, e->op, e->err, now);
 		break;
 #endif
 	default:

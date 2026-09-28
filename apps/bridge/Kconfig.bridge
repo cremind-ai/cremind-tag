@@ -102,4 +102,13 @@ config CTAG_BRIDGE_MAINT_CREDITS
 	help
 	  The receive ring must hold this many maximum-size encoded frames.
 
+# The tag connection scheduler (lib/sched, CONFIG_CTAG_SCHED in prj.conf):
+# one link per tag session and one back-off entry per assignable tag
+# (central.c asserts both).
+config CTAG_SCHED_LINKS
+	default CTAG_BRIDGE_SESSIONS if CTAG_SCHED
+
+config CTAG_SCHED_TAGS
+	default CTAG_BRIDGE_MAX_TAGS if CTAG_SCHED
+
 endmenu

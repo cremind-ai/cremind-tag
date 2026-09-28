@@ -38,6 +38,15 @@ struct cfg_call {
 	uint32_t tag;
 };
 
+#ifdef CONFIG_CTAG_GW_RADIO
+struct radio_write { /* a fragment the core handed to link_write() */
+	uint8_t link;
+	uint8_t chr;
+	uint8_t len;
+	uint8_t data[CTAG_ATT_VALUE_MAX];
+};
+#endif
+
 struct mock {
 	struct sent sent[512];
 	size_t n_sent;
@@ -69,6 +78,29 @@ struct mock {
 	bool owner_fail;
 	bool random_fail; /* the backend's RNG (challenges) fails */
 	size_t releases;
+#ifdef CONFIG_CTAG_GW_RADIO
+	/* the own radio (every mesh send asserts the mesh is not suspended) */
+	bool listening;       /* the last radio_listen() */
+	size_t listen_calls;
+	bool suspended;       /* the mesh: between a successful suspend and resume */
+	int suspend_rc;       /* bt_mesh_suspend() / bt_mesh_resume() results */
+	int resume_rc;
+	size_t suspends, resumes;
+	int connect_rc;
+	size_t connects;
+	uint8_t connect_link;
+	struct sched_peer connect_peer;
+	uint32_t connect_timeout;
+	size_t disconnects;
+	uint8_t disconnect_link;
+	int setup_rc;
+	size_t setups;
+	uint8_t setup_link, setup_mode;
+	int write_rc[8]; /* results of the next link writes (then 0) */
+	size_t write_rc_n;
+	struct radio_write writes[256];
+	size_t n_writes;
+#endif
 };
 
 extern struct mock mock;

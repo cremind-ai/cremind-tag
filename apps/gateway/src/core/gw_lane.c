@@ -6,6 +6,8 @@
  * through it: LAYOUT_BEGIN/CHUNK, ASSIGN_SET, TAG_CMD and the configuration
  * client's AppKey Add. Unsegmented messages (<= 11 access bytes) queue in a
  * small ring that is re-offered when the stack is out of advertising buffers.
+ * While the mesh is suspended for a tag connection on the own radio
+ * (gw_mesh_paused(), docs/protocol.md 11.3) both wait the same way.
  */
 #include <errno.h>
 #include <string.h>
@@ -37,6 +39,16 @@ static void lane_go(struct gw_core *g)
 	l->tag = (l->tag_seq << 8) | who;
 	l->retry_at = 0;
 	l->watchdog_at = g->now + GW_LANE_WATCHDOG_MS;
+	if (gw_mesh_paused(g)) {
+		/* 5.2: the mesh is suspended for a tag connection; offered again
+		 * later, as after a buffer shortage (not a failed attempt). */
+		l->tag = 0u;
+		l->retry_at = g->now + GW_RETRY_MS;
+#ifdef CONFIG_CTAG_GW_RADIO
+		g->radio.c.mesh_paused++;
+#endif
+		return;
+	}
 	if (who == GW_REQ_DELIVERY) {
 		gw_delivery_lane_go(g);
 	} else if (who == GW_REQ_CFG) {
@@ -236,6 +248,14 @@ bool gw_unseg_send(struct gw_core *g, uint16_t dst, uint8_t op, const uint8_t *p
 	}
 	if (u->retry_at != 0) {
 		return queued; /* waiting for buffers */
+	}
+	if (u->count > 0u && gw_mesh_paused(g)) {
+		/* The mesh is suspended for a tag connection: after the resume. */
+		u->retry_at = g->now + GW_RETRY_MS;
+#ifdef CONFIG_CTAG_GW_RADIO
+		g->radio.c.mesh_paused++;
+#endif
+		return queued;
 	}
 	while (u->count > 0u) {
 		struct gw_unseg *m = &u->q[u->head];

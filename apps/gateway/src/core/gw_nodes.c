@@ -227,6 +227,11 @@ struct gw_req_result gw_provision(struct gw_core *g, uint64_t op_id, const uint8
 	if (gw_node_count(g) >= CTAG_MAX_BRIDGES) {
 		return (struct gw_req_result){CTAG_STATUS_NO_RESOURCES, T_FULL};
 	}
+	if (gw_mesh_paused(g)) {
+		/* A tag connection on the own radio holds the mesh suspended for
+		 * about a second (protocol.md 11.5): retry, as for a busy stack. */
+		return (struct gw_req_result){CTAG_STATUS_PROVISIONING_ACTIVE, NULL};
+	}
 	/* v2: authenticated with the label's static OOB only (connect-setup.md 3.4). */
 	err = g->be->provision(g->be->ctx, uuid, static_oob);
 	if (gw_is_retryable(err) || err == -EALREADY) {
@@ -353,6 +358,15 @@ static void cfg_issue(struct gw_core *g)
 		/* Segmented (19 parameter bytes): through the lane. */
 		c->lane_busy = true;
 		gw_lane_request(g, GW_REQ_CFG);
+		return;
+	}
+	if (gw_mesh_paused(g)) {
+		/* The mesh is suspended for a tag connection: after the resume. */
+		c->attempts--;
+		c->retry_at = g->now + GW_RETRY_MS;
+#ifdef CONFIG_CTAG_GW_RADIO
+		g->radio.c.mesh_paused++;
+#endif
 		return;
 	}
 	err = g->be->mesh_cfg(g->be->ctx, c->addr, c->step, cfg_arg(c), 0u);

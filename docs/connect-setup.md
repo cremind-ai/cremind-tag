@@ -356,21 +356,24 @@ recommissioned over local USB.
 | Type | Name | Payload → answer |
 |---|---|---|
 | 0x11 | `PROVISION` | v2 adds `static_oob` (bstr 32, **required** for v2 bridges) |
-| 0x16 | `DISCOVER` | `{op_id, bridge (0 = all), duration_s ≤ 120, tag_id (0 = any)}` → `ACCEPTED`; `EVT_DISCOVERED`s |
-| 0x33 | `TUNNEL_OPEN` | `{op_id, bridge, tag_id (0 = the bridge itself), duration_s}` → `{status: OK, tunnel}` (`BUSY` while the bridge holds another tunnel); `EVT_TUNNEL`s; idle tunnels close after `duration_s` + 5 s |
-| 0x34 | `TUNNEL_SEND` | `{tunnel, data ≤ 400}` → `{status}`; one message per tunnel in flight (`BUSY` until it is through the mesh: retry), `TOO_LARGE` above 400 bytes |
+| 0x16 | `DISCOVER` | `{op_id, bridge (0 = all, GATEWAY_ADDR = the gateway's own radio), duration_s ≤ 120, tag_id (0 = any)}` → `ACCEPTED`; `EVT_DISCOVERED`s |
+| 0x33 | `TUNNEL_OPEN` | `{op_id, bridge, tag_id (0 = the bridge itself), duration_s, mode?}` → `{status: OK, tunnel}` (`BUSY` while the bridge holds another tunnel); `EVT_TUNNEL`s; idle tunnels close after `duration_s` + 5 s. `bridge` `GATEWAY_ADDR`: a tag on the gateway's own radio, `mode` `SESSION` for its frame session (protocol.md §11) |
+| 0x34 | `TUNNEL_SEND` | `{tunnel, data ≤ 400}` → `{status}`; one message per tunnel in flight (`BUSY` until it is through the mesh: retry), `TOO_LARGE` above 400 bytes; the gateway's own radio queues two |
 | 0x35 | `TUNNEL_CLOSE` | `{tunnel}` → `{status}` |
 | 0x8A | `EVT_TUNNEL` | `{tunnel, bridge, tag_id, state (OPEN 1, DATA 2, CLOSED 3), data?, status?}` (not retained) |
 | 0x8B | `EVT_DISCOVERED` | `{bridge, tag_id, rssi, flags}` (not retained; at most one per tag and bridge per 5 s) |
 
 `ASSIGN_TAG`'s `key` is `K_epoch` v2 for v2 tags. Keys only ever travel inside
-a secure session.
+a secure session. A gateway whose caps report `tag_links` also reaches tags
+on its own radio (protocol.md §11): for those the worker keeps `K_epoch`
+itself and runs the frame session through a `SESSION` tunnel.
 
 ### 5.3 CBOR keys (v2 additions)
 
 `device_id 64, ik 65, owner_state 66, gen 67, authority_id 68, challenge 69,
 grant 70, sig 71, static_oob 72, tunnel 73, state 74, proof 75, owner 76,
-controller_match 77, root_proof 78, release_stage 79, op_key 80`.
+controller_match 77, root_proof 78, release_stage 79, op_key 80, mode 81,
+tag_links 82`.
 
 ### 5.4 Bridge maintenance port v2
 
@@ -411,6 +414,9 @@ a session that passed `MAINT_AUTH` (`maint_proof` with its `mk`).
   session above it then fails and is opened again).
 - **Discovery** reports only v2 tags advertising setup mode (§7.1), never
   assigned tags; discovery results are candidates, not inventory.
+- A gateway with tag links (protocol.md §11) needs no mesh for a tag in its
+  own range: its `DISCOVER` window and `PAIR` tunnels use its own radio
+  (`bridge` `GATEWAY_ADDR`), with the same messages up the tunnel.
 
 ---
 
@@ -467,7 +473,8 @@ enable content.*
    reconciled from `STATUS` (owned by our authority at `gen_to`).
 6. Cremind marks the binding `paired`; the first authenticated heartbeat after
    the claim marks it `ready` and the session `completed`. The page shows
-   **Gateway connected** and **Add bridge**.
+   **Gateway connected**, **Add tag** (a gateway with tag links serves the
+   tags in its range itself, protocol.md §11) and **Add bridge**.
 
 Unplugging and re-plugging the gateway needs no new flow: the worker finds it
 again by `device_id` on whatever port it appears.
@@ -492,16 +499,20 @@ again by `device_id` on whatever port it appears.
 
 1. **Add tag** → scan or type the code.
 2. `POST /api/tags/discovery {role: tag, setup_code}`: every ready bridge of the
-   profile listens for the code's `tag_id` in setup mode. "Waiting for the tag to
-   wake" is normal: a tag advertises every 30 s.
-3. Candidates are bridges with room; the strongest recent signal among them is
-   recommended. With exactly one eligible bridge the page proceeds directly;
-   otherwise it shows the choice before **Pair**.
+   profile, and every ready gateway with tag links on its own radio, listens
+   for the code's `tag_id` in setup mode. "Waiting for the tag to wake" is
+   normal: a tag advertises every 30 s.
+3. Candidates are the bridges and gateways with room; the strongest recent
+   signal among them is recommended. With exactly one eligible candidate the
+   page proceeds directly; otherwise it shows the choice before **Pair**.
 4. The worker stages `root` (vault `pending`), opens a tunnel through the chosen
-   bridge, takes `IDENT`, asks for a `PAIR` grant, runs Noise, sends `PAIR`,
-   checks `proof_d`, then assigns the tag (`ASSIGN_TAG`, epoch above the tag's
-   stored epoch, `K_epoch` v2) and sends `CLEAR`. **Ready** only after the tag's
-   authenticated clear acknowledgement (`EVT_RESULT OK`).
+   bridge (or on the gateway's own radio: `bridge` `GATEWAY_ADDR`), takes
+   `IDENT`, asks for a `PAIR` grant, runs Noise, sends `PAIR`, checks
+   `proof_d`, then assigns the tag (`ASSIGN_TAG` to the bridge, epoch above the
+   tag's stored epoch, `K_epoch` v2; on the gateway's own radio the worker
+   keeps the assignment itself) and sends `CLEAR`. **Ready** only after the
+   tag's authenticated clear acknowledgement (`EVT_RESULT OK`, or the worker's
+   own session result on the gateway's radio).
 5. First successful setup of a profile's first tag turns on "Send this profile's
    activity" by default (a switch on the success step); re-pairing or recovering
    existing hardware keeps the current preference. **Send test** delivers a

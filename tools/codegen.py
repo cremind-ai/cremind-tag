@@ -261,6 +261,7 @@ def check_spec(spec: dict[str, Any], messages: list[Message]) -> None:
         ("v2.owner_states", spec["v2"]["owner_states"], "value"),
         ("v2.links", spec["v2"]["links"], "value"),
         ("v2.tunnel_states", spec["v2"]["tunnel_states"], "value"),
+        ("v2.tunnel_modes", spec["v2"]["tunnel_modes"], "value"),
         ("v2.pair_kinds", spec["v2"]["pair_kinds"], "value"),
         ("v2.adv_flags", spec["v2"]["adv_flags"], "value"),
     ]:
@@ -532,6 +533,7 @@ def gen_ids_h(spec: dict[str, Any], sha: str, text: str) -> str:
     enum("ctag_owner_state", "CTAG_OWNER_", items(v2["owner_states"]), "Device ownership states.")
     enum("ctag_link", "CTAG_LINK_", items(v2["links"]), "Noise prologue link byte.")
     enum("ctag_tunnel_state", "CTAG_TUNNEL_", items(v2["tunnel_states"]), "EVT_TUNNEL states.")
+    enum("ctag_tunnel_mode", "CTAG_TUNNEL_MODE_", items(v2["tunnel_modes"]), "TUNNEL_OPEN modes.")
     enum("ctag_pair_kind", "CTAG_PAIR_KIND_", items(v2["pair_kinds"]),
          "First byte of a PAIR / tunnel message.")
     enum("ctag_adv_flag", "CTAG_ADV_FLAG_", items(v2["adv_flags"]), "Tag advertising flags.")

@@ -20,11 +20,11 @@
 #include <zephyr/kernel.h>
 
 #include <ctag/ctag_cbor.h>
+#include <ctag/ctag_sched.h>
 
 #include "bflash.h"
 #include "delivery.h"
 #include "fontstore.h"
-#include "sched.h"
 #include "tagsess.h"
 
 /* The firmware version: apps/bridge/VERSION (tools/version.py keeps it equal

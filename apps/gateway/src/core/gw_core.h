@@ -27,10 +27,17 @@
 #ifdef CONFIG_CTAG_GW_SECURE
 #include <ctag/ctag_secure.h>
 #endif
+#ifdef CONFIG_CTAG_GW_RADIO
+#include <ctag/ctag_frag.h>
+#include <ctag/ctag_sched.h>
+#endif
 
 #include "gw_ring.h"
 
-#define GW_ADDR               0x0001u /* the gateway's primary element (2) */
+#define GW_ADDR               0x0001u /* the gateway's primary element (2); its own radio (11) */
+#if GW_ADDR != CTAG_GATEWAY_ADDR
+#error "GW_ADDR must be spec.yaml GATEWAY_ADDR"
+#endif
 #define GW_UNSEG_MAX          11u     /* access PDU bytes sent unsegmented (4-byte TransMIC) */
 #define GW_SEND_RETRIES       3u      /* 3.2 rule 1 */
 #define GW_INCOMPLETE_ROUNDS  3u      /* 3.2 rule 3 */
@@ -66,6 +73,17 @@ struct gw_assign {
 	uint32_t tag_id;
 	uint32_t epoch;
 };
+
+#ifdef CONFIG_CTAG_GW_RADIO
+/* A tag's characteristics as the own radio uses them (docs/protocol.md 5, 11). */
+enum gw_chr {
+	GW_CHR_CTRL = 0, /* SESSION: written with response, indications */
+	GW_CHR_DATA,     /* SESSION: written without response */
+	GW_CHR_STATUS,   /* SESSION: notifications */
+	GW_CHR_PAIR,     /* PAIR: written with response, indications */
+	GW_CHR_COUNT,
+};
+#endif
 
 struct gw_backend {
 	void *ctx;
@@ -106,6 +124,32 @@ struct gw_backend {
 	/* RELEASE committed: wipe the mesh network, the CDB, names and
 	 * assignments (the core reboots once the answer is out). */
 	void (*release)(void *ctx);
+#endif
+#ifdef CONFIG_CTAG_GW_RADIO
+	/* Tags on the own radio (docs/protocol.md 11). The core wants tag
+	 * advertisements (gw_core_tag_adv()) while on: an own-radio tunnel
+	 * waits for its tag or a DISCOVER window is open. */
+	void (*radio_listen)(void *ctx, bool on);
+	/* bt_mesh_suspend() / bt_mesh_resume() around a connection attempt
+	 * (5.2): 0, -EALREADY or -errno. */
+	int (*radio_suspend)(void *ctx);
+	int (*radio_resume)(void *ctx);
+	/* Connect the link to the advertiser (bt_conn_le_create(), timeout_ms);
+	 * the outcome arrives through gw_core_link_connected(). */
+	int (*link_connect)(void *ctx, uint8_t link, const struct sched_peer *peer,
+			    uint32_t timeout_ms);
+	/* Disconnect the link, or cancel its attempt (bt_conn_disconnect()). */
+	int (*link_disconnect)(void *ctx, uint8_t link);
+	/* GATT setup for the tunnel mode: discovery of the tag service, the
+	 * subscriptions (CTRL indications + STATUS notifications, or PAIR
+	 * indications), then the read of CAPS (SESSION) or IDENT (PAIR); the
+	 * outcome arrives through gw_core_link_ready(). */
+	int (*link_setup)(void *ctx, uint8_t link, uint8_t mode);
+	/* One 5.3 fragment to chr (enum gw_chr): CTRL and PAIR with response,
+	 * DATA without; its completion arrives through gw_core_link_written().
+	 * Returns 0, -EAGAIN/-ENOMEM/-ENOBUFS (no buffer: offered again later)
+	 * or another -errno (the link failed). */
+	int (*link_write)(void *ctx, uint8_t link, uint8_t chr, const uint8_t *value, size_t len);
 #endif
 };
 
@@ -428,6 +472,75 @@ struct gw_v2 {
 };
 #endif
 
+#ifdef CONFIG_CTAG_GW_RADIO
+/* Messages queued per link (11.3: two per tunnel, BUSY beyond). */
+#define GW_RADIO_TXQ 2u
+/* The largest message either way: a PAIR message, a DATA record or STATUS record. */
+#define GW_RADIO_MSG_MAX                                                                           \
+	(CTAG_PAIR_MSG_MAX > CTAG_TAG_RECORD_WIRE_MAX ? CTAG_PAIR_MSG_MAX : CTAG_TAG_RECORD_WIRE_MAX)
+/* Reassembly: CTRL + STATUS (SESSION) or PAIR (PAIR) share one buffer. */
+#define GW_RADIO_RX_BUF                                                                            \
+	(CTAG_PAIR_MSG_MAX > CTAG_TAG_CTRL_MSG_MAX + CTAG_TAG_RECORD_WIRE_MAX                      \
+		 ? CTAG_PAIR_MSG_MAX                                                               \
+		 : CTAG_TAG_CTRL_MSG_MAX + CTAG_TAG_RECORD_WIRE_MAX)
+
+enum gw_rt_state {
+	GW_RT_FREE = 0,
+	GW_RT_WAITING, /* for its tag's advertisement (the scheduler may be connecting) */
+	GW_RT_SETUP,   /* connected: GATT discovery, subscriptions, the read of CAPS / IDENT */
+	GW_RT_OPEN,    /* EVT_TUNNEL OPEN sent: messages both ways */
+};
+
+/* A tunnel on the gateway's own radio (docs/protocol.md 11.3). */
+struct gw_rtunnel {
+	uint8_t state;     /* enum gw_rt_state */
+	uint8_t mode;      /* enum ctag_tunnel_mode */
+	uint8_t timeout_s; /* duration_s */
+	uint8_t link;      /* its connection, SCHED_NO_LINK before */
+	int8_t rssi;       /* of the advertisement the connection was made on */
+	uint16_t id;       /* in the mesh tunnels' id space */
+	uint32_t tag_id;
+	int64_t deadline; /* WAITING: the tag not reached; SETUP: the setup bound; OPEN: idle */
+};
+
+struct gw_rmsg { /* a message waiting to be written */
+	uint8_t chr; /* enum gw_chr */
+	uint16_t len;
+	uint8_t data[GW_RADIO_MSG_MAX];
+};
+
+/* One tag connection: the transmit queue and fragment state of its tunnel. */
+struct gw_rlink {
+	int8_t tunnel;    /* index of the bound tunnel, -1 = none */
+	int8_t adv_rssi;  /* the advertisement that started its attempt */
+	uint8_t inflight; /* fragments handed to the host whose completion is pending */
+	uint8_t q_head, q_count;
+	uint16_t off;     /* next byte of the message at the queue's head */
+	int64_t retry_at; /* the host had no buffer: offer the fragment again then (0 = none) */
+	struct ctag_frag_tx tx[GW_CHR_COUNT]; /* 5.3: own SEQ per characteristic, 0 at connect */
+	struct ctag_frag_rx rx[2];            /* SESSION: CTRL, STATUS; PAIR: PAIR */
+	uint8_t rxbuf[GW_RADIO_RX_BUF];
+	struct gw_rmsg q[GW_RADIO_TXQ];
+};
+
+struct gw_radio_counters {
+	uint32_t adverts, tunnels, mesh_paused, stray;
+};
+
+struct gw_radio {
+	struct sched sched;
+	struct gw_rtunnel tunnels[CONFIG_CTAG_GW_RADIO_TUNNELS];
+	struct gw_rlink links[SCHED_LINKS];
+	struct gw_radio_counters c;
+	int64_t sched_at;    /* the scheduler's one-shot timer ... */
+	bool sched_armed;    /* ... when armed */
+	bool listening;      /* the last radio_listen() */
+	bool mesh_suspended; /* between the scheduler's suspend and its resume */
+	uint32_t disc_tag;   /* the DISCOVER window: tag filter (0 = any) ... */
+	int64_t disc_until;  /* ... open until then (0 = closed) */
+};
+#endif
+
 struct gw_core {
 	const struct gw_backend *be;
 	struct gw_info info;
@@ -466,6 +579,9 @@ struct gw_core {
 	struct gw_scratch scratch;
 #ifdef CONFIG_CTAG_GW_SECURE
 	struct gw_v2 v2;
+#endif
+#ifdef CONFIG_CTAG_GW_RADIO
+	struct gw_radio radio;
 #endif
 };
 
@@ -518,6 +634,31 @@ void gw_core_secure_init(struct gw_core *g, const uint8_t ik_priv[32], const uin
  */
 void gw_core_prov_security(struct gw_core *g, int64_t now);
 void gw_core_prov_auth(struct gw_core *g, int64_t now);
+#endif
+
+#ifdef CONFIG_CTAG_GW_RADIO
+/*
+ * The own radio (docs/protocol.md 11). A tag's connectable advertisement
+ * (5.1: company MESH_COMPANY_ID, ver 1 or 2, tag_id, flags), heard while the
+ * core listens (backend radio_listen).
+ */
+void gw_core_tag_adv(struct gw_core *g, const struct sched_peer *peer, uint32_t tag_id, uint8_t ver,
+		     uint8_t flags, int8_t rssi, int64_t now);
+/* bt_conn_cb.connected for the link's attempt (hci_err 0 = connected). */
+void gw_core_link_connected(struct gw_core *g, uint8_t link, uint8_t hci_err, int64_t now);
+void gw_core_link_disconnected(struct gw_core *g, uint8_t link, uint8_t reason, int64_t now);
+/* The link's GATT setup ended: OK with the value read (CAPS or ident2), or
+ * UNSUPPORTED (no tag service or characteristic of the mode), INVALID (a GATT
+ * step failed) or TIMEOUT. */
+void gw_core_link_ready(struct gw_core *g, uint8_t link, uint8_t status, const uint8_t *value,
+			size_t len, int64_t now);
+/* A notification or indication of chr (one 5.3 fragment; value NULL: it did
+ * not fit the event). */
+void gw_core_link_rx(struct gw_core *g, uint8_t link, uint8_t chr, const uint8_t *value, size_t len,
+		     int64_t now);
+/* A fragment handed to link_write() completed: err 0, an ATT error (> 0, a
+ * write with response) or -errno. */
+void gw_core_link_written(struct gw_core *g, uint8_t link, uint8_t chr, int err, int64_t now);
 #endif
 
 /* Timers and the transmit pump; call after any of the above and whenever
@@ -629,10 +770,13 @@ void gw_serial_forget(struct gw_core *g);
 void gw_serial_reboot_after_answer(struct gw_core *g);
 
 /* gw_tunnel.c: DISCOVER and mesh tunnels */
+#define GW_DISCOVER_GRACE_MS 2000 /* DISCOVERED already on its way when a window ends */
+#define GW_TUNNEL_GRACE_MS   5000 /* idle tunnels: beyond the endpoint's own timeout */
 struct gw_req_result gw_discover(struct gw_core *g, uint16_t bridge, uint32_t duration_s,
 				 uint32_t tag_id);
+/* mode: enum ctag_tunnel_mode (TUNNEL_OPEN without one: PAIR). */
 struct gw_req_result gw_tunnel_open(struct gw_core *g, uint16_t bridge, uint32_t tag_id,
-				    uint32_t duration_s, uint16_t *tunnel);
+				    uint32_t duration_s, uint32_t mode, uint16_t *tunnel);
 struct gw_req_result gw_tunnel_send(struct gw_core *g, uint32_t tunnel, const uint8_t *data,
 				    size_t len);
 struct gw_req_result gw_tunnel_close(struct gw_core *g, uint32_t tunnel);
@@ -643,6 +787,33 @@ void gw_tunnel_timers(struct gw_core *g);
 int64_t gw_tunnel_deadline(const struct gw_core *g);
 /* Close every tunnel without events (RELEASE). */
 void gw_tunnel_reset(struct gw_core *g);
+/* A fresh non-zero tunnel id, used by no mesh or own-radio tunnel. */
+uint16_t gw_tunnel_new_id(struct gw_core *g);
+/* EVT_TUNNEL {tunnel, bridge, tag_id, state, data?, status? (>= 0), rssi?} (best effort). */
+void gw_tunnel_event(struct gw_core *g, uint16_t id, uint16_t bridge, uint32_t tag_id,
+		     uint8_t state, const uint8_t *data, size_t len, int status, const int8_t *rssi);
+/* A DISCOVER candidate heard by src (a bridge, or GW_ADDR: the own radio):
+ * EVT_DISCOVERED at most once per (src, tag) per DISCOVERED_MIN_INTERVAL_MS. */
+void gw_discovered(struct gw_core *g, uint16_t src, uint32_t tag_id, int8_t rssi, uint8_t flags);
+#endif
+
+#ifdef CONFIG_CTAG_GW_RADIO
+/* gw_radio.c: tags on the gateway's own radio (docs/protocol.md 11) */
+void gw_radio_init(struct gw_core *g);
+/* DISCOVER's window on the own radio (duration_s 0 closes it). */
+void gw_radio_discover(struct gw_core *g, uint32_t duration_s, uint32_t tag_id);
+struct gw_req_result gw_radio_open(struct gw_core *g, uint32_t tag_id, uint32_t duration_s,
+				   uint32_t mode, uint16_t *tunnel);
+/* TUNNEL_SEND / TUNNEL_CLOSE of an own-radio tunnel; false = no such tunnel. */
+bool gw_radio_send(struct gw_core *g, uint32_t tunnel, const uint8_t *data, size_t len,
+		   struct gw_req_result *r);
+bool gw_radio_close(struct gw_core *g, uint32_t tunnel, struct gw_req_result *r);
+bool gw_radio_has_tunnel(const struct gw_core *g, uint32_t tunnel);
+void gw_radio_timers(struct gw_core *g);
+int64_t gw_radio_deadline(const struct gw_core *g);
+/* Close every own-radio tunnel and take every link down, without events (RELEASE). */
+void gw_radio_reset(struct gw_core *g);
+size_t gw_radio_counters(const struct gw_core *g, struct ctag_cbor_counter *items, size_t max);
 #endif
 
 /* Seconds since boot, and since a timestamp. */
@@ -654,6 +825,22 @@ static inline uint32_t gw_uptime_s(const struct gw_core *g)
 static inline int64_t gw_min_deadline(int64_t a, int64_t b)
 {
 	return a < b ? a : b;
+}
+
+/*
+ * The mesh is suspended for a tag connection attempt on the own radio
+ * (docs/protocol.md 5.2, 11.3): nothing is handed to the mesh stack
+ * meanwhile. The lane, the unsegmented queue and the configuration client
+ * wait as for a buffer shortage and go on after the resume.
+ */
+static inline bool gw_mesh_paused(const struct gw_core *g)
+{
+#ifdef CONFIG_CTAG_GW_RADIO
+	return g->radio.mesh_suspended;
+#else
+	(void)g;
+	return false;
+#endif
 }
 
 #define GW_NEVER INT64_MAX

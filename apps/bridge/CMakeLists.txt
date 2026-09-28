@@ -21,7 +21,6 @@ target_sources(app PRIVATE
   src/core/bflash.c
   src/core/fontstore.c
   src/core/delivery.c
-  src/core/sched.c
   src/core/tagsess.c
   src/core/maint.c
   src/main.c

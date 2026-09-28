@@ -14,12 +14,16 @@ implements the same rules; §12 lists every place the firmware differs and why.
 ownership, Noise IK sessions, static-OOB provisioning, DISCOVER, tunnels) is
 built with `CONFIG_CTAG_GW_SECURE` on the nRF52840 targets and described in
 [§15](#15-protocol-v2-config_ctag_gw_secure); the nRF52832 gateway stays on
-protocol v1 (§15.12). Sections 1–14 describe v1 and what v2 keeps.
+protocol v1 (§15.12). Sections 1–14 describe v1 and what v2 keeps. The
+nRF52840 gateways also connect to the tags in their own range, as a BLE
+relay for the companion's tag sessions (`CONFIG_CTAG_GW_RADIO`,
+[protocol.md §11](protocol.md#11-tags-on-the-gateways-own-radio),
+[§16](#16-tags-on-the-gateways-own-radio-config_ctag_gw_radio)).
 
 | Target | Board | Protocol | Status | Memory |
 |---|---|---|---|---|
-| `gateway-nrf52840dk` | `nrf52840dk/nrf52840` | v2 | builds, `verify_stack.py` 16/16, meets its targets; not yet run on hardware | [§8](#8-memory) |
-| `gateway-nrf52840dongle` | `nrf52840dongle/nrf52840` | v2 | builds, `verify_stack.py` 16/16, meets its targets; not yet run on hardware | [§8](#8-memory) |
+| `gateway-nrf52840dk` | `nrf52840dk/nrf52840` | v2, 2 tag links | builds, `verify_stack.py` 16/16, meets its targets; not yet run on hardware | [§8](#8-memory) |
+| `gateway-nrf52840dongle` | `nrf52840dongle/nrf52840` | v2, 2 tag links | builds, `verify_stack.py` 16/16, meets its targets; not yet run on hardware | [§8](#8-memory) |
 | `gateway-nrf52dk` | `nrf52dk/nrf52832` (stand-in for the nRF52832 + CH340 board) | v1 | builds, `verify_stack.py` 16/16; **4.5 KiB RAM free with a reduced queue and unmeasured stacks — subject to resource qualification**; too small for v2 (a v2 fit build overflows RAM by 12 KB, §15.12) | [§8](#8-memory) |
 
 Build: `python tools/build.py gateway-nrf52840dk gateway-nrf52840dongle
@@ -52,10 +56,12 @@ PyYAML); see [building.md](building.md).
                 │  gw_nodes.c    node table, provisioning, configuration, removal,    │
                 │                ASSIGN/UNASSIGN/TAG_CMD, scan, TAG_SEEN, inventory   │
                 │  gw_ring.c     FIFO byte arena (layouts, best-effort events)        │
+                │  v2: gw_secure.c, gw_tunnel.c (§15); gw_radio.c the own radio (§16) │
                 └───────────────────────┬─────────────────────────────────────────────┘
                                         │ struct gw_backend (write, mesh_send, mesh_cfg,
                                         ▼ provision, CDB, settings, SHA-256, counters)
           mesh.c (models, send_cb, cfg client, PB-ADV, CDB) · store.c (settings) · uart_io.c
+          · central.c (tag links: scan listener, connections, GATT, §16)
 ```
 
 - **One context owns all protocol state.** Every Bluetooth callback only
@@ -110,7 +116,7 @@ error in the `mesh_init` counter and requests to bridges fail.
 | Unknown type | `UNSUPPORTED`. `FONT_*` and `FLASH_TEST` are bridge maintenance-port messages: `UNSUPPORTED` here, as in the simulator. |
 | Malformed payload / missing required field | `INVALID` (`text` "malformed CBOR payload" / "missing field"), counted in `invalid`, never remembered as an op result. Required fields are those of `cbor_msgs.py` `REQUESTS`. |
 | Before HELLO | nothing is answered (`overruns`). Frames flagged RESPONSE or EVENT are ignored (`unexpected_frames`). |
-| HELLO (§10) | Exempt from credits. Requires `proto` and `name`; `proto` ≠ 1 answers `VERSION_MISMATCH` and opens no session. Drops unsent answers and queued best-effort events, sets the gateway's send window to `SERIAL_DEFAULT_CREDITS` + the request's grant byte, answers at once with grant byte 0 and `caps {max_frame 4096, credits 4, role GATEWAY, board, max_bridges 5, max_tags 20}`, then re-sends every retained event. |
+| HELLO (§10) | Exempt from credits. Requires `proto` and `name`; `proto` ≠ 1 answers `VERSION_MISMATCH` and opens no session. Drops unsent answers and queued best-effort events, sets the gateway's send window to `SERIAL_DEFAULT_CREDITS` + the request's grant byte, answers at once with grant byte 0 and `caps {max_frame 4096, credits 4, role GATEWAY, board, max_bridges 5, max_tags 20}` (with tag links also `tag_links 2`, §16), then re-sends every retained event. |
 | Credits (§1.3) | `caps.credits` = `CONFIG_CTAG_GW_SERIAL_CREDITS` (4) answer slots. A request is processed when its frame completes; its answer waits in a slot until the gateway holds a host credit, and **the request's credit is returned in the grant byte of its own answer**, so a host that respects credits never has more than four requests outstanding. The gateway sends only while it holds host credits; each received frame's grant byte adds to them. A frame the host sent without credit is processed if a slot is free, else dropped (`overruns`); `credit_violations` counts them. |
 | Order of output | HELLO answer, then answers, then retained events not yet sent this session, then best-effort events. |
 | Retained events (§1.2) | `EVT_PROVISIONED`, `EVT_NODE_CONFIGURED`, `EVT_NODE_REMOVED`, `EVT_ASSIGN_RESULT`, `EVT_RESULT` get `seq` from 1 per boot and are kept encoded in a ring of `SERIAL_EVENT_RETAIN` (16) slots of 104 bytes (`EVT_RESULT` is at most 100) until `EVENT_ACK {seq}` (cumulative). Overflow drops the oldest (`events_dropped`). Counters `retained` and `event_seq` show the ring. |
@@ -135,7 +141,7 @@ hash Zephyr's `APP_BUILD_VERSION` records), `boot_id`, `caps` and `counters`;
 `queue_depth`, `layout_arena_used`, `nodes`, `assignments`, `uptime_s`, and
 from the platform `uart_rx_bytes`, `uart_tx_bytes`, `uart_rx_overflow`,
 `uart_rx_paused`, `mesh_init`, `mesh_start_errors`, `cfg_send_errors`,
-`evq_dropped`.
+`evq_dropped`; v2 adds its own (§15), tag links theirs (§16.7).
 
 **Serial driver.** `uart_io.c` uses the interrupt-driven UART API on every
 link (the nRF UARTE, the device_next CDC ACM UART, the native PTY UART). When
@@ -372,6 +378,9 @@ every bridge must then be reset and provisioned again.
 | `CTAG_GW_SECURE` | y | n | protocol v2 (§15) |
 | `CTAG_SECURE_HEAP_SIZE` | 12288 | — | the Noise*/HACL* heap: one session plus the largest message sealed or opened (§15.11) |
 | `CTAG_GW_TUNNELS` / `CTAG_GW_DISCOVERED_SLOTS` | 2 / 16 | — | tunnels open at once / `EVT_DISCOVERED` rate-limit entries |
+| `CTAG_GW_RADIO` / `CTAG_GW_TAG_LINKS` / `CTAG_GW_RADIO_TUNNELS` / `CTAG_GW_LINK_INFLIGHT` | y / 2 / 8 / 4 | — | tags on the own radio: connections at once (`caps.tag_links`), own-radio tunnels, `DATA` fragments in flight per link (§16.7) |
+| `BT_CENTRAL`, `BT_GATT_CLIENT`, `BT_MAX_CONN` | y, y, 2 | n, n, — | the tag links' central (§16.7) |
+| `BT_ATT_TX_COUNT` / `BT_L2CAP_TX_BUF_COUNT` / `BT_BUF_ACL_TX_COUNT` | 12 / 12 / 12 | — | above both links' `DATA` fragments in flight (asserted) |
 | `BT_MESH_ECDH_P256_HMAC_SHA256_AES_CCM`, `BT_MESH_OOB_AUTH_REQUIRED` | y, y | —, — | static OOB over HMAC-SHA256 (§15.7) |
 | `MAIN_STACK_SIZE` (start-up + loop) | 12288 (v2) | 3072 | the v2 crypto runs on the loop: 9,916 B worst static chain (§15.11) |
 | `SYSTEM_WORKQUEUE_STACK_SIZE` | 4096 | 2560 | |
@@ -380,7 +389,7 @@ every bridge must then be reset and provisioned again.
 | `BT_MESH_SETTINGS_WORKQ_STACK_SIZE` | 1700 | 1400 | |
 | `MBEDTLS_PSA_KEY_SLOT_COUNT` | 24 | 20 | persistent mesh keys incl. one device key per CDB node |
 | `BT_MESH_ADV_BUF_COUNT` / `RX_SEG_MSG_COUNT` | 16 / 4 | 10 / 2 | |
-| `BT_BUF_EVT_RX_COUNT` | 10 | 4 | no connections: few HCI event buffers |
+| `BT_BUF_EVT_RX_COUNT` | 16 | 4 | nRF52832: no connections, few HCI event buffers; nRF52840: more than its ACL TX buffers (the tag links) |
 
 The nRF52840 stacks are the Zephyr mesh provisioner sample's
 thread-analysis figures (+50 %); the nRF52832 ones are estimates. Both must be
@@ -398,20 +407,24 @@ shipping), manufacturer "Cremind", product "Cremind Tag gateway".
 ## 8. Memory
 
 `tools/build.py` (NCS v3.4.1, Zephyr controller, `--no-sysbuild`), 2026-09-28,
-protocol v2 on the nRF52840 targets:
+protocol v2 with two tag links on the nRF52840 targets:
 
 | Target | Flash used / code partition | Headroom (min 15 %) | RAM used / RAM | RAM free | Stack check |
 |---|---|---|---|---|---|
-| `gateway-nrf52840dk` (v2) | 289,156 / 1,015,808 B (28.5 %) | 71.5 % | 127,348 / 262,144 B | 134,796 B | pass 16/16 |
-| `gateway-nrf52840dongle` (v2) | 285,704 / 880,640 B (32.4 %) | 67.6 % | 127,284 / 262,144 B | 134,860 B | pass 16/16 |
+| `gateway-nrf52840dk` (v2, tag links) | 359,552 / 1,015,808 B (35.4 %) | 64.6 % | 142,144 / 262,144 B | 120,000 B | pass 16/16 |
+| `gateway-nrf52840dongle` (v2, tag links) | 356,072 / 880,640 B (40.4 %) | 59.6 % | 142,016 / 262,144 B | 120,128 B | pass 16/16 |
 | `gateway-nrf52dk` (v1) | 198,896 / 499,712 B (39.8 %) | 60.2 % | 60,912 / 65,536 B | **4,624 B** | pass 16/16 |
+| `gateway-nrf52840dk` without tag links (same tree, same day) | 289,392 / 1,015,808 B (28.5 %) | 71.5 % | 127,348 / 262,144 B | 134,796 B | pass 16/16 |
 | `gateway-nrf52840dk` as v1 (before v2, same day) | 229,912 / 1,015,808 B (22.6 %) | 77.4 % | 100,372 / 262,144 B | 161,772 B | pass 16/16 |
 | debug (`debug/rtt.conf`) nRF52840 / nRF52832, v1, before the 104-byte event slots (+128 B RAM since) | 299,052 / 255,764 B | | 103,252 / 63,408 B | 158,892 / 2,128 B | |
 
 Protocol v2 costs the nRF52840 **+59.2 KB of flash and +27.0 KB of RAM**
-(§15.11 itemises both). The nRF52832 build (v1) is 132 B of flash and 64 B
-of RAM above the earlier figures (shared code: the v2 CBOR keys, the core's
-64-bit retained-event cursor; not itemised further).
+(§15.11 itemises both); the tag links on the own radio **+70.2 KB of flash
+and +14.8 KB of RAM** more (§16.8: mostly the Bluetooth central and GATT
+client). The nRF52832 build (v1) is unchanged by the tag links (it has
+none): 132 B of flash and 64 B of RAM above the earlier figures (shared
+code: the v2 CBOR keys, the core's 64-bit retained-event cursor; not
+itemised further).
 
 The protocol v1 finalisation (`EVT_RESULT` with `flags` and `stored_epoch`)
 cost 48–64 B of flash and 128 B of RAM on each: the 16 retained event slots grew
@@ -425,7 +438,8 @@ Bluetooth RX thread 2,624, ISR stack 2,112, mesh advertiser 2,112, controller
 RX PDUs 1,732, mesh settings work queue 1,472, HCI RX buffers 1,032, mbedTLS
 heap 1,024, `gw_evq` 1,024, controller threads 1,472, mesh segmentation 1,504
 (segment buffers, `seg_rx`, `seg_tx`), UART rings 1,024. On the nRF52840 the
-core is 39,168 B (a 20 KiB arena) and USB adds ~5 KiB.
+core is 45,112 B (a 20 KiB arena, the v2 state and the own radio's 2,528 B)
+and USB adds ~5 KiB.
 
 **nRF52832 verdict.** The application fits with 4.5 KiB spare only after
 reducing the delivery queue (a 5 KiB layout arena), the event and HCI buffers
@@ -477,7 +491,9 @@ or `nrfjprog -f NRF52 --program build/gateway-nrf52840dk/zephyr.hex --sectoreras
   `crc_errors`, `overruns`, `credit_violations`, `uart_rx_overflow`; mesh
   problems in `mesh_send_failures`, `mesh_busy`, `commit_resends`,
   `chunks_resent`, `stale_status`, `unexpected_mesh`; lost events in
-  `events_dropped` (retained ring overflow) and `evq_dropped`.
+  `events_dropped` (retained ring overflow) and `evq_dropped`; tag links in
+  `attempts`, `connect_failed`, `sessions_fail`, `rate_limited`,
+  `mesh_paused`, `radio_adv_dropped`, `gatt_failures` (§16.7).
 - **RTT build** (logs and the thread analyzer on RTT, the serial link
   untouched), in the toolchain container:
 
@@ -525,8 +541,10 @@ twister, 2026-09-28):
   streaming COBS transmitter equal to the library encoder across the 254-byte
   block boundary.
 
-**Protocol v2** (`ctag.gateway.core.v2`, 79 tests; 2026-09-28 twister: v1
-61 and v2 79 on both platforms, 280 test cases, all passing; the same sources with
+**Protocol v2** (`ctag.gateway.core.v2`, 103 tests with the own radio's 24
+of §16.9; `ctag.gateway.core.v2.noradio`, 80: v2 without tag links, as the
+interop build; 2026-09-28 twister: v1 61, v2 103 and v2 without tag links 80
+on both platforms, 488 test cases, all passing; the same sources with
 `CONFIG_CTAG_GW_SECURE`, `lib/secure` linked, a 24 KiB secure heap shared by
 the gateway and the test's Noise initiator). Every suite above runs again
 *through a secure session* — the test host opens Noise IK as the pinned
@@ -550,16 +568,21 @@ static OOB (required; `SECURITY_CONFIG` for no static OOB offered, a failed
 exchange and the deadline after the capabilities; `TIMEOUT` before them),
 DISCOVER (rate limit, window, idempotency), tunnels (round trip with
 fragmentation through the lane, reassembly, gaps, busy, too large, close,
-idle timeout, failed send), CAPS2 in the inventory. Between tests the
-harness frees both Noise objects and asserts the secure heap is empty.
+idle timeout, failed send), CAPS2 in the inventory, and without tag links
+`GATEWAY_ADDR` refused (`UNSUPPORTED` / `NOT_FOUND`, no `tag_links`). Between
+tests the harness frees both Noise objects and asserts the secure heap is
+empty. With tag links, the `gw_radio` suite (§16.9) runs too, and the mocked
+backend fails any mesh send, configuration step or provisioning while the
+mesh is suspended, in every suite.
 
 Run: `west twister -T /work/apps/gateway/tests/core -p native_sim -p native_sim/native/64 -x ZEPHYR_EXTRA_MODULES=/work --outdir /build/twister-gw-core`
 (after `apt-get install -y make`).
 
 **Interop test** (`apps/gateway/tests/interop`, [README](../apps/gateway/tests/interop/README.md)):
 the gateway core, loop and UART glue on a native PTY UART with a simulated
-mesh, driven by the companion's real `GatewayClient`. 2026-09-28: **8/8
-scenarios pass** —
+mesh, driven by the companion's real `GatewayClient`. It has no Bluetooth
+and builds without `CONFIG_CTAG_GW_RADIO` (the option's default), v1 and
+v2 alike. 2026-09-28: **8/8 scenarios pass** —
 
 | Scenario | Result |
 |---|---|
@@ -669,7 +692,7 @@ results in the board's qualification report.
   once the loop's worst-case pass time is measured.
 - v1 (the nRF52832): PB-ADV without OOB authentication (protocol §2): provision
   in a controlled environment. v2 authenticates with static OOB (§15.7).
-- v2: see §15.13.
+- v2: see §15.13; the tag links on the own radio: §16.10.
 
 ---
 
@@ -844,7 +867,10 @@ opens a window of `duration_s` + 2 s for its answers. Each `DISCOVERED` inside
 its bridge's window becomes a best-effort `EVT_DISCOVERED {bridge, tag_id,
 rssi, flags}`, at most one per `(bridge, tag)` per 5 s (16 entries;
 `discovered`, `discovered_limited`). Outside a window it is
-`unexpected_mesh`. Candidates are never kept or listed.
+`unexpected_mesh`. Candidates are never kept or listed. With tag links,
+`bridge` 0 also opens a window on the gateway's own radio and
+`GATEWAY_ADDR` opens only that one (§16.5); without, `GATEWAY_ADDR` is
+`NOT_FOUND`.
 
 ### 15.9 Tunnels
 
@@ -862,7 +888,10 @@ new one). The CLOSE flag (data = status) is `EVT_TUNNEL {state CLOSED,
 status}`. A tunnel without traffic for its `duration_s` + 5 s is closed with
 `TIMEOUT` both ways. `EVT_TUNNEL` is best effort, sealed like every event.
 The gateway never looks into tunnel messages: the worker's Noise session
-runs end to end with the bridge's or tag's endpoint.
+runs end to end with the bridge's or tag's endpoint. `TUNNEL_OPEN` takes an
+optional `mode` (absent = `PAIR`); `SESSION` through a bridge is `INVALID`.
+`bridge` `GATEWAY_ADDR` opens a tunnel on the gateway's own radio (§16.2;
+`UNSUPPORTED` without tag links), in the same id space.
 
 ### 15.10 Factory reset (connect-setup.md §4.3)
 
@@ -955,3 +984,287 @@ v2 deployment uses an nRF52840 gateway (DK or Dongle).
 - The bridge and tag firmware sides (their endpoints, `CAPS2_STATUS`,
   `DISCOVERED`, `TUNNEL_UP`) are other applications' work; the gateway's
   side is tested against the native_sim network of `tests/interop`.
+
+---
+
+## 16. Tags on the gateway's own radio (`CONFIG_CTAG_GW_RADIO`)
+
+The normative description is [protocol.md §11](protocol.md#11-tags-on-the-gateways-own-radio)
+(with [connect-setup.md](connect-setup.md) §5.2, §6 and §8.3). The nRF52840
+gateways (`socs/nrf52840.conf`) also connect to the tags in their range,
+as a thin BLE relay: the companion runs the tag session (protocol.md
+§5.4–§5.6 and every §10 rule) and renders (§4.4); the gateway connects to
+the tag, sets GATT up and carries whole messages between the serial tunnel
+messages and the tag's characteristics, fragmented and reassembled per §5.3.
+It renders nothing, holds no tag key and never looks into a message. HELLO
+and INFO report `caps.tag_links` = `CONFIG_CTAG_GW_TAG_LINKS` (2); the
+nRF52832 gateway (v1) has none.
+
+### 16.1 Architecture
+
+```
+ Bluetooth contexts (central.c)                                        the gateway loop
+ scan listener: ADV_IND with the 5.1 data, ─── GW_EVT_TAG_ADV ────────▶ gw_core_tag_adv()
+   only while the core listens, dropped once gw_evq is half full
+ connected / disconnected ──────────────────── GW_EVT_CONN / _DISCONN ─┐ central.c: bt_conn refs,
+ discovery / subscribe / read callbacks ────── GW_EVT_GATT ────────────┤ the GATT setup's steps ─▶
+                                                                       │ gw_core_link_connected/
+                                                                       │ _disconnected/_ready()
+ notifications, indications ────────────────── GW_EVT_LINK_VALUE ─────▶ gw_core_link_rx()
+ write response, sent callback ─────────────── GW_EVT_LINK_WRITTEN ───▶ gw_core_link_written()
+
+ src/core/gw_radio.c: own-radio tunnels, per-link transmit queues and 5.3 state, the
+ sched_ops of lib/sched (5.2) ── struct gw_backend ──▶ central.c: radio_listen,
+ radio_suspend / radio_resume (bt_mesh_suspend/resume), link_connect (bt_conn_le_create),
+ link_disconnect (bt_conn_disconnect), link_setup, link_write (bt_gatt_*)
+```
+
+- The core stays Bluetooth-free (§1): `gw_radio.c` owns the tunnels and the
+  links and drives the connection scheduler (`lib/sched`,
+  [firmware-libs.md](firmware-libs.md#ctag_sched--tag-connection-scheduler-52)),
+  whose operations it implements over the core's own state and the backend.
+  The native_sim tests run it with a mocked backend (§16.9).
+- `central.c` runs the Bluetooth procedures the core asks for. Every
+  callback only posts a `gw_evt` (§1); the discovery and read callbacks also
+  collect handles and value bytes into their link's record, which the loop
+  reads only after that procedure's completion event (the queue orders
+  them). The setup's steps — the tag service, the characteristics of the
+  mode, their CCC descriptors, the subscriptions, the read — run on the loop.
+- Tags are heard through the mesh's own scan (`bt_le_scan_cb_register()`,
+  beside the unprovisioned-beacon listener of §3): the gateway never starts
+  or stops scanning. The listener takes connectable `ADV_IND`s with the §5.1
+  manufacturer data (company `MESH_COMPANY_ID`, `ver` 1 or 2) and posts them
+  only while the core listens (backend `radio_listen`: an own-radio tunnel
+  waits for its tag, or a DISCOVER window is open), and not once the event
+  queue is half full (`radio_adv_dropped`: a tag advertises again 250 ms
+  later), so advertisements never crowd out mesh or link events.
+
+### 16.2 Tunnels
+
+`TUNNEL_OPEN {op_id, bridge GATEWAY_ADDR, tag_id, duration_s, mode?}`
+(protocol.md §11.3; `mode` absent = `PAIR`), checked in this order:
+
+| Condition | Answer |
+|---|---|
+| no tag links (`CONFIG_CTAG_GW_RADIO` off) | `UNSUPPORTED` |
+| `tag_id` 0, `duration_s` 0 or above 255, a `mode` other than `PAIR` (0) and `SESSION` (1) | `INVALID` |
+| a tunnel to that tag exists, or all `CONFIG_CTAG_GW_RADIO_TUNNELS` (8) are taken | `BUSY` (not remembered) |
+| otherwise | `{status OK, tunnel}` at once; the tunnel waits for its tag |
+
+`mode` `SESSION` (or any mode but `PAIR`) through a bridge is `INVALID`,
+before the bridge is looked up. Own-radio tunnels take their ids from the
+mesh tunnels' counter and never share one; `TUNNEL_SEND` and
+`TUNNEL_CLOSE` find the id in whichever table holds it, and a repeated
+`op_id` answers the same id with `detail DUPLICATE` (§15.9). `ASSIGN_TAG`,
+`UNASSIGN_TAG`, `DELIVER_LAYOUT`, `TAG_COMMAND` and the node requests
+naming `GATEWAY_ADDR` answer `NOT_FOUND`: the gateway is not in its node
+table (protocol.md §11.1).
+
+```
+WAITING ──its tag's advertisement (ver 1 or 2)──▶ the scheduler (§16.4): suspend, connect, resume
+   │  not connected within duration_s ─▶ EVT_TUNNEL CLOSED TIMEOUT (an attempt already
+   │  running at the deadline decides first: at most 3.5 s later)
+   ▼ connected, the mesh resumed
+SETUP  link_setup(mode): the tag service; CAPS, CTRL, DATA, STATUS (SESSION) or IDENT, PAIR;
+   │   their CCCs; subscriptions (CTRL indications + STATUS notifications, or PAIR indications);
+   │   the read of CAPS (18 B) or IDENT (ident2, 91 B, a long read)
+   │  no service, characteristic or CCC of the mode ─▶ CLOSED UNSUPPORTED
+   │  a GATT step failed, nothing read, a value above 154 B ─▶ CLOSED INVALID
+   │  not done within 5 s of the connection ─▶ CLOSED TIMEOUT
+   ▼
+OPEN   EVT_TUNNEL {OPEN, data = the value read, rssi = the advertisement the connection was made on}
+   │  TUNNEL_CLOSE ─▶ the link goes down, no event
+   │  the link dropped ─▶ CLOSED DISCONNECTED
+   │  a 5.3 violation, or a value longer than the event holds ─▶ CLOSED INVALID
+   │  a write the tag refused (an ATT error) ─▶ CLOSED INVALID; any other failed write ─▶ DISCONNECTED
+   └  duration_s + 5 s without a message either way ─▶ CLOSED TIMEOUT
+```
+
+Every close but `TUNNEL_CLOSE` and RELEASE is `EVT_TUNNEL {CLOSED, status}`
+(best effort, like every `EVT_TUNNEL`) and hands the link back to the
+scheduler with that status: a failure starts the tag's back-off (protocol.md
+§5.2 step 2), the host's own close does not. A tunnel closed while its tag
+is being connected leaves an unwanted connection: it is taken down as soon
+as it is up, without GATT.
+
+### 16.3 Messages
+
+- **Sending.** `TUNNEL_SEND {tunnel, data}` carries one message. `SESSION`:
+  its first byte picks the characteristic — `0x01`–`0x0F` `CTRL` (at most
+  `TAG_CTRL_MSG_MAX`, 64), `0x10`–`0x2F` `DATA` (at most
+  `TAG_RECORD_WIRE_MAX`, 205); an empty message or another type is
+  `INVALID`, a longer one `TOO_LARGE`. `PAIR`: every message to `PAIR` (at
+  most `PAIR_MSG_MAX`, 320). Then `BUSY` before OPEN or with two messages
+  queued (a link's queue holds two); else the message is queued and answered
+  `OK`.
+- Messages leave in order and **one at a time**, cut by `ctag_frag_next()`
+  into ATT values of `ATT_VALUE_MAX` (20) bytes with the gateway's own `SEQ`
+  per characteristic, from 0 at the connection and continuous across
+  messages. `CTRL` and `PAIR` fragments are written with response, one
+  outstanding; `DATA` fragments without response, `CONFIG_CTAG_GW_LINK_INFLIGHT`
+  (4) outstanding. A message is done when its last fragment completed (the
+  write response or the sent callback); the next one starts then. A host out
+  of buffers (`-EAGAIN`, `-ENOMEM`, `-ENOBUFS`) is offered the same fragment,
+  with the same `SEQ`, again after 100 ms. Writes are paced by the ATT
+  buffers, never by the serial link.
+- **Receiving.** `SESSION` reassembles `CTRL` indications (≤ 64 bytes) and
+  `STATUS` notifications (≤ 205) separately, `PAIR` its indications (≤ 320);
+  each complete message is `EVT_TUNNEL {DATA, data}`. Values before OPEN, or
+  on a characteristic the mode does not use, are dropped (`radio_stray`).
+- Every message either way (accepted, written, received) restarts the idle
+  deadline.
+
+### 16.4 The mesh around a connection (protocol.md §5.2)
+
+The gateway connects under the bridge's rules with the bridge's code:
+`lib/sched` ([bridge-firmware.md §4](bridge-firmware.md#4-tag-connection-scheduler-protocolmd-52))
+with these operations:
+
+| `sched_ops` | The gateway |
+|---|---|
+| `has_work(tag)` | an own-radio tunnel waits for the tag |
+| `node_ready` | no provisioning, configuration or removal runs (and no reboot is pending) |
+| `mesh_busy` | the segmented lane (§4) has a send active or queued, or the unsegmented queue is not empty: they finish first (polled every 20 ms, at most 500 ms, else the attempt waits for a later advertisement, `deferred`) |
+| `link_idle(link)` | its tunnel is OPEN with nothing queued or in flight: a further connection starts only then |
+| `mesh_suspend` / `mesh_resume` | `bt_mesh_suspend()` / `bt_mesh_resume()` (`-EALREADY` counts as done) |
+| `conn_create` | `bt_conn_le_create()` to the advertiser: scan interval = window = 30 ms, connection interval 30–50 ms, latency 0, supervision timeout 4 s, create timeout `BRIDGE_CONN_ATTEMPT_MS` (1 s) |
+| `conn_cancel`, `disconnect` | `bt_conn_disconnect()` |
+| `session_start` | binds the waiting tunnel to the link and starts its GATT setup |
+| `session_abort` | `EVT_TUNNEL CLOSED` with the status (`DISCONNECTED` when the link dropped) |
+| `timer`, `now`, `reboot` | a core deadline run by `gw_core_poll()`, the core's clock, the backend's reboot (protocol.md §5.2 step 7) |
+
+So: one attempt at a time, each in its own suspend window; at most 6
+attempts per rolling minute; a 15 s per-tag back-off after a failure, with
+one quick retry inside the tag's advertising window after `CONNECT_FAILED`;
+at most `CTAG_GW_TAG_LINKS` (2) connections. The advertisement that started
+an attempt gives the tunnel's `rssi`.
+
+**While the mesh is suspended nothing reaches the mesh stack**
+(`gw_mesh_paused()`): the lane and the unsegmented queue wait as for a
+buffer shortage (offered again every 100 ms, counted in `mesh_paused`), a
+configuration step waits the same way, and `PROVISION` answers
+`PROVISIONING_ACTIVE` (transient, never remembered: the companion retries).
+The resume releases them at once. What bridges send to the gateway
+meanwhile is lost or re-sent by them (protocol.md §11.5: about one second
+per attempt).
+
+### 16.5 DISCOVER
+
+`DISCOVER` with `bridge` 0 (every configured bridge and the own radio) or
+`GATEWAY_ADDR` (the own radio only) opens a window of `duration_s` + 2 s on
+the own radio, as a bridge's (§15.8); `duration_s` 0 closes it. Every `ver` 2
+advertisement with the `SETUP` flag (and the request's `tag_id`, unless 0)
+heard in the window is `EVT_DISCOVERED {bridge GATEWAY_ADDR, tag_id, rssi,
+flags}`, rate-limited in the same `(bridge, tag)` table as the bridges'
+candidates (5 s, `discovered_limited`).
+
+### 16.6 RELEASE
+
+RELEASE (§15.6) closes every own-radio tunnel and takes their links down,
+without events, before the reboot.
+
+### 16.7 Configuration and counters
+
+| Option | nRF52840 | Meaning |
+|---|---:|---|
+| `CTAG_GW_RADIO` | y | tag links (depends on `CTAG_GW_SECURE`; selects `CTAG_SCHED` and `CTAG_FRAG`) |
+| `CTAG_GW_TAG_LINKS` | 2 | connections at once = `caps.tag_links` = `CTAG_SCHED_LINKS` (asserted) |
+| `CTAG_GW_RADIO_TUNNELS` | 8 | own-radio tunnels, waiting or connected |
+| `CTAG_GW_LINK_INFLIGHT` | 4 | `DATA` fragments handed to the host at once, per link |
+| `CTAG_SCHED_TAGS` | 8 | the scheduler's per-tag back-off entries |
+| `BT_CENTRAL`, `BT_GATT_CLIENT`, `BT_MAX_CONN` | y, y, 2 | the bridge's central options, with `BT_GATT_CACHING=n` and `BT_GAP_AUTO_UPDATE_CONN_PARAMS=n` |
+| `BT_L2CAP_TX_MTU` / `BT_BUF_ACL_RX_SIZE` / `BT_BUF_ACL_TX_SIZE` | 23 / 27 / 27 | ATT MTU 23: fragments of `ATT_VALUE_MAX` bytes |
+| `BT_ATT_TX_COUNT`, `BT_L2CAP_TX_BUF_COUNT`, `BT_BUF_ACL_TX_COUNT` | 12 | above both links' `DATA` in flight (2 × 4, asserted in `central.c`): a write from the loop never waits for a buffer (the host allocates with `K_FOREVER` outside the system work queue) |
+| `BT_BUF_EVT_RX_COUNT` | 16 | more HCI event buffers than ACL TX buffers, as the bridge |
+
+Counters (INFO / GET_COUNTERS): `radio_adverts` (advertisements the core
+got), `radio_tunnels` (opened), `radio_stray` (link events no tunnel
+wanted), `mesh_paused` (mesh sends held back while suspended, per retry),
+the scheduler's `attempts`, `suspend_count`, `suspend_fail`,
+`suspend_max_ms`, `resume_fail`, `connect_failed`, `quick_retries`,
+`deferred`, `rate_limited`, `backoff_skips`, `sessions_ok`, `sessions_fail`
+(a session: a connected tunnel), and from `central.c` `radio_adv_dropped`
+and `gatt_failures`. INFO then carries 82 counters (`MAX_COUNTERS` 88: 96
+keys at most with INFO's top-level keys, firmware-libs.md `ctag_cbor`) in
+about 1.3 KB of the 2,560-byte transmit frame.
+
+### 16.8 Resources
+
+`gateway-nrf52840dk` against the same tree without `CONFIG_CTAG_GW_RADIO`
+(2026-09-28, §8): **+70,160 B of flash and +14,796 B of RAM** (the Dongle
++70,368 / +14,732 B against the earlier v2 figures). By symbol (the ELF's
+`nm -S -l`), flash: the Zephyr controller's central role and connections
+(`ull_conn`, the LL control procedures, `lll_conn`, `ull_central`) +32.1 KB,
+the host's connections, L2CAP, ATT and GATT client +25.8 KB, `gw_radio.c`
+3.9 KB, `central.c` 2.9 KB, `lib/sched` 2.2 KB, `lib/frag` 0.2 KB, the rest
+of the gateway 0.5 KB. RAM: host buffers and connection objects +7.3 KB
+(16 HCI event buffers of 4.9 KB, ATT, ACL and L2CAP pools), the controller's
+two connection contexts and control procedures +4.3 KB, the core +2.5 KB
+(two links of 1,016 B — a two-message queue of 324-byte entries and a
+320-byte reassembly buffer each — eight tunnels of 24 B, the scheduler
+260 B), `central.c`'s link records 632 B. 120 KB of RAM stay free.
+
+Stacks: the Bluetooth calls (`bt_mesh_suspend()`, `bt_conn_le_create()`,
+`bt_gatt_*()`) run on the gateway loop (the main thread, 12 KiB), outside
+the Ed25519 chain of §15.11 that sized it; the callbacks put a 172-byte
+`gw_evt` on the Bluetooth RX thread's stack, as the mesh handlers already
+do. Neither is measured yet (§10).
+
+### 16.9 Tests
+
+`gw_radio` (24 tests in `ctag.gateway.core.v2`, which enables
+`CONFIG_CTAG_GW_RADIO`; the mocked backend records the radio operations,
+asserts that connections start only while the mesh is suspended and GATT
+only after the resume, and fails any mesh send, configuration step or
+provisioning while it is suspended):
+
+- caps `tag_links` in HELLO and INFO;
+- TUNNEL_OPEN: `INVALID` for tag 0, duration 0 and 256, an unknown mode and
+  `SESSION` through a bridge; `BUSY` (not remembered) for a second tunnel to
+  a tag and beyond eight; the repeated `op_id`; ids shared with mesh
+  tunnels, each id reaching its own table; `ASSIGN_TAG`, `UNASSIGN_TAG`,
+  `TAG_COMMAND`, `DELIVER_LAYOUT`, `IDENTIFY_NODE`, `REMOVE_NODE` to
+  `GATEWAY_ADDR` `NOT_FOUND`;
+- advertisement (ver 1) → suspend → create (the advertiser, 1 s) →
+  connected → resume → setup → `EVT_TUNNEL OPEN` with CAPS and the
+  advertisement's RSSI; one attempt at a time; `BUSY` before OPEN; a value
+  before OPEN dropped; `PAIR` with ident2, `PAIR` messages written with
+  response and reassembled; setup `UNSUPPORTED`, `INVALID`, nothing read, a
+  refused setup and the 5 s bound;
+- `CTRL` fragments one at a time, `DATA` fragments four in flight with their
+  own `SEQ`, `SEQ` continuing across messages; `INVALID` types and empty
+  messages, `TOO_LARGE`, two queued then `BUSY`; a host buffer shortage
+  retried with the same `SEQ`; an ATT error (`INVALID`), a failed `DATA`
+  completion and a refused write (`DISCONNECTED`, after the `OK`);
+- `CTRL` and `STATUS` reassembled separately, interleaved; a `SEQ` gap, an
+  overlong message and an oversized value (`INVALID`);
+- `TUNNEL_CLOSE` (the link down, no event, no back-off), closed while
+  waiting and while connecting; a dropped link (`DISCONNECTED`, then the
+  back-off); the waiting and idle timeouts and what restarts the latter; an
+  attempt running at the waiting deadline (reached: OPEN; failed: `TIMEOUT`
+  at once);
+- DISCOVER on the own radio: the filter, versions and flags, the rate
+  limit, the window's end, `bridge` 0 beside a bridge's candidate, duration
+  0, 121 s;
+- a delivery, an IDENTIFY and a PROVISION while the mesh is suspended (held,
+  then sent at the resume; `PROVISIONING_ACTIVE`, then accepted); an attempt
+  waiting for a segmented send, and deferred after 500 ms; no attempt while
+  provisioning or configuring; the rate limit across seven tags; a second
+  link only while the first idles, a third tag waiting for a free link,
+  links failing independently; RELEASE.
+
+`ctag.gateway.core.v2.noradio` (v2 without tag links, as the interop build)
+checks that `GATEWAY_ADDR` stays refused (protocol.md §11). The interop
+build has no Bluetooth and no tag links (§11, "Interop test").
+
+### 16.10 Open items
+
+- Nothing of it has run on hardware: a connection while the mesh is
+  suspended, the GATT setup and the long IDENT read against a real tag, the
+  write pacing, the controller's scheduling of two links beside the mesh's
+  scanning and advertising, and the stack use on the loop and the Bluetooth
+  RX thread (§10) are verified only by building and on native_sim.
+- The tag firmware does not serve `IDENT` / `PAIR` yet (connect-setup.md
+  §7.2): `PAIR` tunnels on the own radio are tested against the mock only.
+- No GATT handle cache (the bridge keeps one per tag): every connection
+  discovers the tag service again, a few connection events.

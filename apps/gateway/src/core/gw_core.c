@@ -18,6 +18,9 @@ void gw_core_init(struct gw_core *g, const struct gw_backend *be, const struct g
 	g->xfer_id = (uint16_t)(info->boot_id ^ (info->boot_id >> 16));
 	gw_serial_init(g);
 	gw_lane_init(g);
+#ifdef CONFIG_CTAG_GW_RADIO
+	gw_radio_init(g);
+#endif
 }
 
 void gw_core_start(struct gw_core *g, int64_t now)
@@ -92,6 +95,10 @@ void gw_core_send_end(struct gw_core *g, uint32_t tag, int err, int64_t now)
 void gw_core_poll(struct gw_core *g, int64_t now)
 {
 	g->now = now;
+#ifdef CONFIG_CTAG_GW_RADIO
+	/* First: a resume releases the sends that waited for it (below). */
+	gw_radio_timers(g);
+#endif
 	gw_lane_timers(g);
 	gw_delivery_timers(g);
 	gw_nodes_timers(g);
@@ -110,6 +117,9 @@ int64_t gw_core_next_deadline(const struct gw_core *g)
 	d = gw_min_deadline(d, gw_nodes_deadline(g));
 #ifdef CONFIG_CTAG_GW_SECURE
 	d = gw_min_deadline(d, gw_tunnel_deadline(g));
+#endif
+#ifdef CONFIG_CTAG_GW_RADIO
+	d = gw_min_deadline(d, gw_radio_deadline(g));
 #endif
 	d = gw_min_deadline(d, gw_serial_deadline(g));
 	return d;
@@ -170,6 +180,9 @@ size_t gw_core_counters(const struct gw_core *g, struct ctag_cbor_counter *items
 	memcpy(items, all, n * sizeof(all[0]));
 #ifdef CONFIG_CTAG_GW_SECURE
 	n += gw_v2_counters(g, &items[n], max - n);
+#endif
+#ifdef CONFIG_CTAG_GW_RADIO
+	n += gw_radio_counters(g, &items[n], max - n);
 #endif
 	if (g->be->counters != NULL && n < max) {
 		n += g->be->counters(g->be->ctx, &items[n], max - n);
