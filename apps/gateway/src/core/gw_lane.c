@@ -41,6 +41,10 @@ static void lane_go(struct gw_core *g)
 		gw_delivery_lane_go(g);
 	} else if (who == GW_REQ_CFG) {
 		gw_cfg_lane_go(g);
+#ifdef CONFIG_CTAG_GW_SECURE
+	} else if (who >= GW_REQ_TUNNEL0) {
+		gw_tunnel_lane_go(g, (uint8_t)(who - GW_REQ_TUNNEL0));
+#endif
 	} else {
 		gw_op_lane_go(g, (uint8_t)(who - GW_REQ_OP0));
 	}
@@ -115,6 +119,10 @@ static void lane_finish(struct gw_core *g, bool ok)
 		gw_delivery_lane_done(g, ok);
 	} else if (who == GW_REQ_CFG) {
 		gw_cfg_lane_done(g, ok);
+#ifdef CONFIG_CTAG_GW_SECURE
+	} else if (who >= GW_REQ_TUNNEL0) {
+		gw_tunnel_lane_done(g, (uint8_t)(who - GW_REQ_TUNNEL0), ok);
+#endif
 	} else {
 		gw_op_lane_done(g, (uint8_t)(who - GW_REQ_OP0), ok);
 	}

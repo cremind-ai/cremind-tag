@@ -20,6 +20,10 @@ Conventions:
   product `uint32_t`.
 - Only `ctag_cbor` (zcbor) and the PSA backend of `ctag_session` need Zephyr;
   everything else also builds on the host.
+- `ctag_secure` (protocol v2) is the exception to "allocates nothing": the
+  vendored Noise* allocates, so the library owns one bounded heap and one
+  RNG provider, and is used by one thread at a time
+  ([below](#ctag_secure--protocol-v2-secure-endpoint-connect-setupmd-25)).
 
 ## Overview
 
@@ -33,7 +37,8 @@ Conventions:
 | `ctag_session` | `CONFIG_CTAG_SESSION` | `ctag_session.h`, `ctag_crypto.h` | bridge (client), tag (server) |
 | `ctag_txn` | `CONFIG_CTAG_TXN` | `ctag_txn.h` | tag |
 | `ctag_enroll` | `CONFIG_CTAG_ENROLL` | `ctag_enroll.h` | tag |
-| `ctag_crc32` | selected (`CONFIG_CTAG_CRC32`) | `ctag_crc32.h` | frame, render, txn, enroll |
+| `ctag_secure` | `CONFIG_CTAG_SECURE` | `ctag_secure.h` | gateway (protocol v2); the bridge and tag endpoints later |
+| `ctag_crc32` | selected (`CONFIG_CTAG_CRC32`) | `ctag_crc32.h` | frame, render, txn, enroll, secure |
 | `ctag_utf8` | selected (`CONFIG_CTAG_UTF8`) | `ctag_utf8.h` | cbor, render |
 
 `CTAG_RENDER` selects `CTAG_LAYOUT`; `CTAG_CBOR` selects `ZCBOR` and
@@ -168,6 +173,8 @@ uint8_t ctag_cbor_key_kind(uint32_t key);
   at most 72 keys held at once (INFO: 8 top-level keys before a counters map
   of up to 64, `MAINT_COUNTERS` and the gateway's `MAX_COUNTERS`) and 383 map
   entries (GET_INVENTORY with 5 bridges and `CONFIG_CTAG_GW_ASSIGN_MAX` = 128).
+  A protocol v2 gateway (`MAX_COUNTERS` 72, three more keys per inventory
+  item) stays within the limits: at most 80 keys held at once and 398 entries.
   The old scan re-scanned every earlier entry, nested maps included, for each
   new key: N^depth work. A 680-byte payload of 7 nested levels × 32 entries
   did not finish in 84 s on a desktop; it now takes 3921 steps.
@@ -428,6 +435,126 @@ Checks, as `enrollment.py` does: length 48, magic `'CTAG'`, CRC-32 over bytes
 `OK` or `SECURITY_CONFIG` with `*out` zeroed. Pass the UICR address directly,
 e.g. `(const uint8_t *)&NRF_UICR->CUSTOMER[0]`; an erased UICR fails the magic.
 
+## ctag_secure — protocol v2 secure endpoint (connect-setup.md §2–§5)
+
+The device side of protocol v2 for every role: identity, the key schedule,
+canonical grants and the device's grant rules, the ownership record,
+secure-message framing, tunnel fragments, the Noise IK responder and the v2
+secure messages. It mirrors the companion's `cremind_tag.secure`
+(`identity.py`, `grants.py`, `noise.py`, `messages.py`, `device.py`) and is
+tested against `protocol/fixtures/v2_secure.json`. Primitives are the
+formally verified HACL* and the handshake the verified Noise* IK
+([`lib/third_party/hacl`](../lib/third_party/hacl/README.md),
+[`lib/third_party/noise_ik`](../lib/third_party/noise_ik/README.md): upstream
+commits, licences, the one patch).
+
+```c
+/* primitives, identity, key schedule */
+void ctag_secure_sha256(...); void ctag_secure_hmac_sha256(...);
+int  ctag_secure_hkdf(ikm, ikm_len, salt, salt_len, info, info_len /* <= 63 */, out, len /* 1..32 */);
+void ctag_secure_x25519_public(priv, pub);
+bool ctag_secure_grant_sig_ok(authority_pub, grant, len, sig);   /* Ed25519 over "cremind-tag/v2/grant" | grant */
+bool ctag_secure_equal(a, b, len);                                /* constant time */
+void ctag_secure_wipe(p, len);
+void ctag_secure_device_id(role, ik_pub, out16); uint32_t ctag_secure_short_id(device_id);
+void ctag_secure_authority_id(...); ctag_secure_k_setup(...); ctag_secure_static_oob(...);
+void ctag_secure_k_epoch(root, tag_id, epoch, out16);             /* K_epoch v2 */
+void ctag_secure_proof_s(...); ctag_secure_proof_d(...); ctag_secure_root_proof(...); ctag_secure_maint_proof(...);
+void ctag_secure_setup_payload(role, short_id, secret, out15);
+/* grants */
+int  ctag_grant_encode(const struct ctag_grant *g, uint8_t *buf, size_t size);
+int  ctag_grant_decode(const uint8_t *raw, size_t len, struct ctag_grant *g);   /* canonical only */
+uint8_t ctag_grant_check(const struct ctag_grant_ctx *c, grant, len, sig, sig_len, struct ctag_grant *g, bool *decoded);
+/* ownership record (176 bytes, CRC-32) */
+void ctag_owner_record_encode(r, out); int ctag_owner_record_decode(r, in, len);
+bool ctag_owner_record_load(r, in, len, gen_floor);              /* the boot rule */
+/* secure messages, tunnel fragments */
+void ctag_secure_hdr_pack(h, out4); int ctag_secure_hdr_unpack(h, in, len);
+int  ctag_tunnel_frag(len, off, &seq, &flags); void ctag_tunnel_rx_init(...); int ctag_tunnel_rx_feed(...);
+/* Noise IK (Noise*) */
+int  ctag_noise_accept(nz, s_priv, prologue, plen, msg1, len, msg2, rs, h);      /* responder */
+int  ctag_noise_connect(...); int ctag_noise_finish(...);                         /* initiator (tests, tools) */
+int  ctag_noise_seal(nz, pt, len, out, size); int ctag_noise_unseal(nz, ct, len, &pt, &pt_len);
+/* the endpoint (device.py SecureDevice) */
+void ctag_secure_keys_init(k, role, ik_priv, factory_secret, board, fw...);
+void ctag_secure_ep_init(ep, keys, rec, ops /* persist, random */);
+int  ctag_secure_draw_challenge(ep); int ctag_secure_ident2(ep, out);
+int  ctag_secure_open(ep, link, msg1, len, msg2);                 /* SECURE_OPEN / tunnel HANDSHAKE */
+int  ctag_secure_seal(ep, ...); int ctag_secure_unseal(ep, ...); void ctag_secure_close(ep);
+bool ctag_secure_controller_match(ep);
+void ctag_secure_handle(ep, type, const struct ctag_secure_req *req, struct ctag_secure_answer *ans);
+int  ctag_secure_answer_encode(ans, buf, size);                   /* canonical CBOR answer */
+```
+
+- **Grants.** `ctag_grant_decode` accepts exactly the canonical CBOR of
+  `Grant.encode()` (a map of the keys 0–9 in order, shortest integers, exact
+  byte-string lengths, version 2, a known op and role, ≤ `GRANT_MAX`), so the
+  signed bytes and the checked fields cannot differ. `ctag_grant_check` runs
+  the rules in `check_grant`'s order — decode, signature length, device /
+  role / op, the challenge (constant time), `STALE_GENERATION`, the
+  controller, the Ed25519 signature, then ownership and the setup proof — and
+  returns the first failure's status; every `grant_cases` fixture passes.
+- **Endpoint.** `ctag_secure_handle` implements `device.py` rule for rule:
+  STATUS (the owner only to the pinned controller), CLAIM and RECOVER
+  (gateway), RELEASE (the tag's two stages: stage 0 draws a pending override
+  secret, stage 1 by the same controller releases; a REKEY clears a pending
+  release), PAIR (setup proof and `proof_d`; `LOCKED`, failure counter
+  `CTAG_SECURE_MAX_FAILURES` behind `ctag_secure_pairing_paused`), REKEY,
+  MAINT_AUTH and RECOMMISSION (bridge, over the serial link only: `NOT_OWNER`
+  through a tunnel; RECOMMISSION of an UNOWNED bridge is `INVALID`). A single
+  challenge is used up by every grant check; `INVALID` without grant or
+  signature keeps it. A new record goes through `ops.persist` first:
+  `STORAGE_ERROR` when it fails, and the record in RAM does not change. The
+  answer (`struct ctag_secure_answer`) carries the status, the answer fields
+  and the side effects the application acts on (`released`,
+  `recommissioned`, `rekeyed`). Secrets on the stack are wiped after use.
+- **Sessions.** `ctag_secure_open` replaces any session; the session's
+  controller is the Noise initiator's static key; `session_serial` changes
+  whenever a session opens or closes, so an application can bind queued
+  answers to their session. A message that fails to decrypt ends the
+  session. The responder of this Noise* instantiation only accepts known
+  peers: `noise.c` recovers the initiator's key from message 1 with Noise*'s
+  own primitives, registers it and lets the verified state machine
+  authenticate the message (one extra X25519; see the Noise* README).
+- **Heap.** `KRML_HOST_MALLOC/CALLOC/FREE` go to a `sys_heap` of
+  `CONFIG_CTAG_SECURE_HEAP_SIZE` bytes (default 12,288; a first-fit pool of
+  `CTAG_SECURE_HEAP_SIZE` in host builds); every block is wiped when freed.
+  Each Noise* call runs under a `setjmp` guard: a failed allocation, a failed
+  RNG draw or a KaRaMeL abort long-jumps out, the heap is wiped and
+  re-initialised, every Noise object of the old heap epoch is dropped, and the
+  call returns `-ENOMEM`, `-EIO` or `-EFAULT` — the session fails, never the
+  device. `ctag_secure_heap_stats()` gives size, use, peak and failures.
+  Measured (host allocator): device 248 B, peer 112 B, responder handshake
+  peak +1,096 B leaving a 776-byte session, sealing *n* bytes ≈ +2*n* (4,061 B:
+  +8,184 B), opening *n* bytes peaks ≈ 2*n* and holds *n* until
+  `ctag_noise_unseal_done`.
+- **Randomness.** `sys_csrand_get()` on Zephyr (set another provider with
+  `ctag_secure_rng_set`); a failure is `-EIO`, never a weak ephemeral.
+  `ctag_secure_test_ephemeral()` fixes the next ephemeral for the byte-exact
+  fixture conversation.
+
+Cost in the nRF52840 gateway (`zephyr.map`, `-Os`): HACL* 35.9 KB (X25519
+13,962 B, Ed25519 12,800, ChaCha20-Poly1305 4,982, SHA-2 3,692, HMAC 424),
+Noise* 7,535, the library itself 7,987; RAM: the heap plus 243 B.
+
+**Stack** (Cortex-M4, GCC 14.3 `-Os`, `-fstack-usage -fcallgraph-info=su`,
+worst path): a grant check (`ctag_secure_handle` → `ctag_grant_check` →
+`Hacl_Ed25519_verify`) needs **9,188 B** — `Hacl_Ed25519_verify` alone has a
+6,432-byte frame (two tables of precomputed points for the double scalar
+multiplication); `ctag_secure_open` 3,324 B (X25519: `Field51_fmul2` 1,520);
+sealing and opening a transport message are bounded by the same X25519 chain
+(≤ 3,020 B, statically). The gateway gives its loop 12 KiB
+([gateway-firmware.md §15.11](gateway-firmware.md#1511-resources)). A bridge
+or tag that verifies grants with this Ed25519 needs the same ~9.2 KB on the
+verifying thread — beyond what an nRF51 or nRF52810/811 tag can spare; those
+need a smaller-stack Ed25519 verification (not part of this library yet). The
+vendored sources are compiled verbatim with KaRaMeL's configuration
+force-included (`lib/secure/ctag_krml.h`) and the warnings the generated code
+raises disabled; the library's own sources use the full warning set.
+vendored sources are compiled verbatim with KaRaMeL's configuration
+force-included (`lib/secure/ctag_krml.h`) and the warnings the generated code
+raises disabled; the library's own sources use the full warning set.
+
 ## ctag_crc32, ctag_utf8
 
 `uint32_t ctag_crc32(uint32_t crc, const void *data, size_t len)` has zlib
@@ -451,7 +578,8 @@ acceptance of Python's `bytes.decode("utf-8")`.
 | Enrollment | host, ztest | `enrollment.json` |
 | Mutation robustness (layouts → renderer, font packs → reader, COBS, fragments) | host, ztest | — |
 | Session: K_epoch, handshake from both roles over the fixture CAPS, a relayed CAPS (the bridge's AUTH is the fixture's, the tag refuses it), no CAPS refused, ERROR pack/unpack and the fixture ERROR{STALE_EPOCH, 4}, records both ways, tampered/replayed/skipped records, handshake failures, backend sanity | ztest (PSA via Mbed TLS) | `session.json` |
-| CBOR: every fixture payload encoded byte for byte and decoded field for field (nested maps, counters), arrays of maps, strictness rules, encoder rejections; work bounds (the review's nested-map payloads, work counted by `ctag_cbor_steps` under `CTAG_CBOR_STEPS`), scan limits, duplicate keys per map, INFO and GET_INVENTORY at their largest | ztest | `serial_frames.json` |
+| CBOR: every fixture payload encoded byte for byte and decoded field for field (nested maps, counters), arrays of maps, strictness rules, encoder rejections; work bounds (the review's nested-map payloads, work counted by `ctag_cbor_steps` under `CTAG_CBOR_STEPS`), scan limits, duplicate keys per map, INFO and GET_INVENTORY at their largest; the v2 keys' kinds | ztest | `serial_frames.json` |
+| v2 (`test_secure.c`, 13 tests): identities, the key schedule (HKDF, `k_setup`, `static_oob`, `K_epoch` v2, the proofs, setup payloads), every `grant_cases` rule in order, strict grant decoding (non-canonical forms, lengths, big generations), the byte-exact conversation (ident2, Noise IK messages 1 and 2, `h`, the sealed PAIR request and answer both ways, a replay ending the session), handshake errors, the gateway, tag and bridge rules of `device.py` (single-use challenges, persist failures, STATUS privacy, two-stage release and its cancellation by REKEY, locked bridges, MAINT_AUTH / RECOMMISSION only over serial, recommission of an unowned bridge refused), the ownership record (round trip, the boot rule, every corruption), tunnel fragments and reassembly, heap exhaustion and RNG failure at every allocation of a handshake and a transport message | host, ztest | `v2_secure.json` |
 
 C test vectors are generated from the JSON fixtures at build time by
 [`tests/host/gen_vectors.py`](../tests/host/gen_vectors.py) (standard library
@@ -471,8 +599,13 @@ cmake -S tests/host -B /tmp/hsan -DCMAKE_C_FLAGS="-O1 -g -fsanitize=address,unde
 
 The libraries and tests build with `-std=c99 -Wall -Wextra -Wpedantic
 -Wconversion -Wsign-conversion -Wshadow -Wundef -Wstrict-prototypes
--Wmissing-prototypes -Wcast-qual -Wvla -Werror`; the one exception is the
-vendored qrcodegen, compiled verbatim with the compiler's default warnings.
+-Wmissing-prototypes -Wcast-qual -Wvla -Werror`; the exceptions are the
+vendored qrcodegen, compiled verbatim with the compiler's default warnings,
+and the vendored Noise* and HACL* (the defaults minus the unused-variable,
+unused-parameter, unused-function and infinite-recursion warnings their
+generated code raises, as Noise*'s own Makefile does; the host tests build
+them with `KRML_VERIFIED_UINT128`, the portable 128-bit arithmetic the
+Cortex-M targets use).
 Verified with GCC 15.2 (Windows, x86-64) and GCC 13.3 (Linux: x86-64, `-m32`,
 `-O2`, `-Os -m32`, ASan + UBSan).
 

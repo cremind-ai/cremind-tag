@@ -15,7 +15,8 @@ Cremind ──sync/events──▶ jobs ─▶ card set per tag ─▶ composed 
 Related documents: [connector API](connector-api.md) (the wire contract with
 Cremind) · [simulator](simulator.md) · [enrollment](enrollment.md) ·
 [fonts](fonts.md) and [font packs](fontpack.md) · [screen layout](layout.md) ·
-[protocols](protocol.md) · [security](security.md).
+[protocols](protocol.md) · [security](security.md) · [Cremind Connect packaging](connect-packaging.md)
+(the companion as an installable per-user service, for people without Python or `uv`).
 
 ## 1. Install
 

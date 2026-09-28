@@ -17,13 +17,24 @@ ZTEST_SUITE(gw_nodes, NULL, NULL, before, NULL, NULL);
 
 static uint16_t provision(uint64_t op_id, const uint8_t *uuid, const char *name)
 {
-	struct ctag_cbor_field f[3] = {
+	static const uint8_t oob[32] = {0x0B, 0x0B};
+	struct ctag_cbor_field f[4] = {
 		GW_F_UINT(CTAG_CBOR_KEY_OP_ID, op_id),
 		GW_F_BSTR(CTAG_CBOR_KEY_UUID, uuid, 16u),
+		/* v2: static_oob is required */
+		GW_F_BSTR(CTAG_CBOR_KEY_STATIC_OOB, oob, sizeof(oob)),
 		GW_F_TSTR(CTAG_CBOR_KEY_NAME, name, name != NULL ? strlen(name) : 0u),
 	};
+	size_t n = IS_ENABLED(CONFIG_CTAG_GW_SECURE) ? 3u : 2u;
 
-	return host_send(CTAG_SERIAL_MSG_PROVISION, f, name != NULL ? 3u : 2u, 1u);
+	if (!IS_ENABLED(CONFIG_CTAG_GW_SECURE)) {
+		f[2] = f[3];
+	}
+	if (name != NULL) {
+		f[n] = f[3];
+		n++;
+	}
+	return host_send(CTAG_SERIAL_MSG_PROVISION, f, n, 1u);
 }
 
 static uint8_t status_of(uint16_t rid)

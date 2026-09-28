@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from cremind_tag.connector.models import EventsPage, Job, ProfileSettings, SyncResult, TagInfo
 from cremind_tag.daemon import QUEUE_MIGRATIONS, open_database
@@ -48,9 +51,9 @@ def outbox(s: QueueStore, kind: str) -> list[dict[str, Any]]:
 
 def test_schema_version(tmp_path: Path) -> None:
     with open_database(tmp_path / "c.sqlite3") as db:
-        assert db.schema_version == QUEUE_MIGRATIONS[-1].version == 4
+        assert db.schema_version == QUEUE_MIGRATIONS[-1].version == 5
     with open_database(tmp_path / "c.sqlite3") as db:  # re-open: nothing to do
-        assert [v for v, _, _ in db.applied_migrations()] == [1, 2, 3, 4]
+        assert [v for v, _, _ in db.applied_migrations()] == [1, 2, 3, 4, 5]
 
 
 def test_a_v2_database_upgrades(tmp_path: Path) -> None:
@@ -66,12 +69,21 @@ def test_a_v2_database_upgrades(tmp_path: Path) -> None:
             conn.execute("INSERT INTO tag_views (tag_id, epoch, blocked_reason, updated_at)"
                          " VALUES (?, 1, 'stale_epoch', 'now')", (TAG,))
     with open_database(path) as db:
-        assert db.schema_version == 4
+        assert db.schema_version == 5
         s = QueueStore(db)
         rev = s.get_revision(TAG, 1)
         assert rev is not None and rev.not_found_count == 0 and rev.state == "sent"
         view = s.get_view(TAG)  # v4: an existing view gets no floor
         assert view is not None and view.epoch_floor == 0 and view.blocked_reason == "stale_epoch"
+        with db.transaction() as conn:  # v5: the rebuilt table kept its rows, indexes and constraints
+            conn.execute("INSERT INTO revisions (tag_id, revision, epoch, purpose, layout, layout_digest,"
+                         " content_key, op_id, state, created_at, created_ts) VALUES (?, 2, 1, 'setup_code', x'00',"
+                         " 'd', 'k2', 8, 'pending', 'now', 0)", (TAG,))
+        assert s.get_revision(TAG, 2) is not None
+        with pytest.raises(sqlite3.IntegrityError), db.transaction() as conn:
+            conn.execute("INSERT INTO revisions (tag_id, revision, epoch, layout, layout_digest, content_key,"
+                         " op_id, state, created_at, created_ts) VALUES (?, 3, 1, x'00', 'd', 'k3', 7, 'pending',"
+                         " 'now', 0)", (TAG,))  # op_id 7 is taken: the unique index survived
 
 
 def test_events_page_commits_jobs_cursor_and_accepted_together(tmp_path: Path) -> None:

@@ -51,8 +51,9 @@ TRANSIENT_STEP = frozenset({Status.TIMEOUT, Status.BUSY, Status.NO_RESOURCES, St
 TRANSIENT_ACK = frozenset({Status.BUSY, Status.NO_RESOURCES, Status.PROVISIONING_ACTIVE})
 NOT_FOUND_ESCALATE = 3
 """``NOT_FOUND`` results of one step before it fails (§10: ambiguous in ``EVT_RESULT``)."""
-OWNERSHIP_KINDS = frozenset({"assign_tag", "clear_tag"})
-"""Run to completion even past their expiry; Cremind accepts a late ``succeeded`` (connector-api.md)."""
+OWNERSHIP_KINDS = frozenset({"assign_tag", "clear_tag", "run_operation"})
+"""Run to completion even past their expiry; Cremind accepts a late ``succeeded`` (connector-api.md). A
+``run_operation``'s operation has its own deadline and state in Cremind, which the agent follows."""
 
 STEP_TIMEOUT_S = {"assign": 60.0, "unassign": 60.0, "provision": 180.0, "configure": 180.0, "remove": 90.0,
                   "clear": 900.0}
@@ -120,6 +121,9 @@ class CommandExecutor:
             return "mesh"
         if row.kind == "install_fontpack":
             return f"bridge:{args.get('bridge_hw_id')}"
+        if row.kind == "run_operation":
+            # Ownership changes one at a time; a discovery (a bounded scan) runs beside them.
+            return "operation:discovery" if args.get("kind") == "discovery" else "operations"
         return f"command:{row.command_id}"
 
     def submit(self, row: CommandRow) -> asyncio.Task[None]:
@@ -555,6 +559,13 @@ class CommandExecutor:
         svc.request_inventory()
         svc.wake_scheduler()
         return {"bridge_hw_id": hw_id, "fontpack_id": pack_hex, "slot": result.slot, "skipped": result.skipped}
+
+    async def _do_run_operation(self, row: CommandRow) -> dict[str, Any]:
+        """A Cremind Connect operation (docs/connect-setup.md §9.4), run by the worker's agent."""
+        agent = self.svc.agent
+        if agent is None:
+            raise CommandError("this companion does not run Cremind Connect operations (a manual setup)")
+        return await agent.run_operation(row, self)
 
     async def _do_collect_diagnostics(self, row: CommandRow) -> dict[str, Any]:
         svc = self.svc

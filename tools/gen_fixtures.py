@@ -789,6 +789,13 @@ def mesh_fixture() -> dict[str, Any]:
         MeshOp.TAG_CMD: dict(update_id=0x1F2E3D4C5B6A79, tag_id=0x1A2B3C4D, epoch=3, cmd=1),
         MeshOp.IDENTIFY: dict(seconds=10),
         MeshOp.TAG_SEEN: dict(tag_id=0x1A2B3C4D, rssi=-61, battery_mv=2950, flags=0x05),
+        MeshOp.TUNNEL_OPEN: dict(tunnel=0x0102, tag_id=0x1A2B3C4D, timeout_s=30),
+        MeshOp.TUNNEL_DATA: dict(tunnel=0x0102, seq=0, flags=0x01, data=bytes(range(40))),
+        MeshOp.TUNNEL_CLOSE: dict(tunnel=0x0102, status=int(Status.TIMEOUT)),
+        MeshOp.DISCOVER: dict(duration_s=60, tag_id=0),
+        MeshOp.DISCOVERED: dict(tag_id=0x1A2B3C4D, rssi=-70, flags=0x08),
+        MeshOp.CAPS2_STATUS: dict(device_id=bytes(range(16)), gen=3, owner_state=1),
+        MeshOp.TUNNEL_UP: dict(tunnel=0x0102, seq=1, flags=0x02, data=bytes(range(20))),
     }
     vectors = []
     for op, cls in MESH_MESSAGES.items():
@@ -1103,6 +1110,159 @@ def tag_txn_fixture() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Protocol v2 (docs/connect-setup.md)
+# ---------------------------------------------------------------------------
+
+
+def v2_fixture() -> dict[str, Any]:
+    from cremind_tag.protocol.ids import GrantOp, Link, OwnerState
+    from cremind_tag.protocol.msgs import Ident2
+    from cremind_tag.secure import grants, identity, noise
+    from cremind_tag.secure.codes import SetupPayload, format_code
+    from cremind_tag.secure.messages import SecureMessage
+
+    def key(seed: int) -> bytes:
+        return hashlib.sha256(b"cremind-tag/v2/fixture" + bytes([seed])).digest()
+
+    # --- setup codes
+    codes = []
+    for role, short, secret in [(NodeRole.TAG, 0x1A2B3C4D, bytes(range(10))),
+                                (NodeRole.BRIDGE, 0x00000001, bytes(range(0xF0, 0xFA))),
+                                (NodeRole.TAG, 0xFFFFFFFE, bytes(10))]:
+        p = SetupPayload(role, short, secret)
+        codes.append({"role": int(role), "short_id": short, "secret": _hex(secret), "payload": _hex(p.pack()),
+                      "code": p.code(), "qr": p.qr_text()})
+
+    # --- identities
+    ids = []
+    for seed, role in [(1, NodeRole.GATEWAY), (2, NodeRole.BRIDGE), (3, NodeRole.TAG)]:
+        priv = key(seed)
+        pub = identity.x25519_public(priv)
+        dev = identity.device_id(role, pub)
+        ids.append({"role": int(role), "ik_priv": _hex(priv), "ik_pub": _hex(pub), "device_id": _hex(dev),
+                    "short_id": identity.short_id(dev)})
+
+    # --- key schedule
+    tag_dev = bytes.fromhex(ids[2]["device_id"])
+    secret = bytes(range(10))
+    root = key(10)
+    h = key(11)
+    k_set = identity.k_setup(secret, tag_dev)
+    schedule = {
+        "setup_secret": _hex(secret), "device_id": _hex(tag_dev), "k_setup": _hex(k_set),
+        "static_oob": _hex(identity.static_oob(secret, tag_dev)), "root": _hex(root), "tag_id": 0x1A2B3C4D,
+        "epoch": 3, "k_epoch": _hex(identity.k_epoch_v2(root, 0x1A2B3C4D, 3)), "h": _hex(h),
+        "root_proof": _hex(identity.root_proof(root, h)), "maint_proof": _hex(identity.maint_proof(root, h)),
+    }
+
+    # --- grants and the device rules (connect-setup.md 3.1), in check order
+    auth_sk = key(20)
+    auth_pub = identity.ed25519_public(auth_sk)
+    owner = bytes(range(0x40, 0x50))
+    controller = identity.x25519_public(key(21))
+    challenge = bytes(range(0x80, 0x90))
+    gw_dev = bytes.fromhex(ids[0]["device_id"])
+
+    def g(op: GrantOp = GrantOp.CLAIM, *, dev: bytes = gw_dev, role: NodeRole = NodeRole.GATEWAY,
+          apub: bytes = auth_pub, own: bytes = owner, ctl: bytes = controller, gen: int = 0,
+          gen_to: int | None = None, chal: bytes = challenge) -> bytes:
+        return grants.Grant(op, dev, role, apub, own, ctl, gen, gen + 1 if gen_to is None else gen_to, chal).encode()
+
+    claim = g()
+    sig = grants.sign(claim, auth_sk)
+    other_sk = key(22)
+    other_pub = identity.ed25519_public(other_sk)
+    owned_by_us = {"state": int(OwnerState.OWNED), "gen": 1, "authority_pub": _hex(auth_pub), "owner": _hex(owner),
+                   "controller": _hex(controller)}
+    unowned = {"state": int(OwnerState.UNOWNED), "gen": 0, "authority_pub": "", "owner": "", "controller": ""}
+    recover_other = g(GrantOp.RECOVER, gen=1, apub=other_pub)
+    cases = [
+        ("claim ok", unowned, claim, sig, [GrantOp.CLAIM], None, Status.OK),
+        ("not canonical", unowned, claim[:-1], sig, [GrantOp.CLAIM], None, Status.GRANT_INVALID),
+        ("short signature", unowned, claim, sig[:-1], [GrantOp.CLAIM], None, Status.GRANT_INVALID),
+        ("other device", unowned, g(dev=bytes(16)), None, [GrantOp.CLAIM], None, Status.GRANT_INVALID),
+        ("op not carried by this message", unowned, g(GrantOp.RECOVER), None, [GrantOp.CLAIM], None,
+         Status.GRANT_INVALID),
+        ("wrong challenge", unowned, g(chal=bytes(16)), None, [GrantOp.CLAIM], None, Status.GRANT_INVALID),
+        ("stale generation", unowned, g(gen=4), None, [GrantOp.CLAIM], None, Status.STALE_GENERATION),
+        ("generation jump", unowned, g(gen_to=2), None, [GrantOp.CLAIM], None, Status.STALE_GENERATION),
+        ("other controller", unowned, g(ctl=bytes(32)), None, [GrantOp.CLAIM], None, Status.GRANT_INVALID),
+        ("bad signature", unowned, claim, bytes(64), [GrantOp.CLAIM], None, Status.GRANT_INVALID),
+        ("owned: recover ok", owned_by_us, g(GrantOp.RECOVER, gen=1), None, [GrantOp.RECOVER], None, Status.OK),
+        ("owned: claim again", owned_by_us, g(GrantOp.CLAIM, gen=1), None, [GrantOp.CLAIM], None, Status.NOT_OWNER),
+        ("owned: other authority", owned_by_us, recover_other, grants.sign(recover_other, other_sk),
+         [GrantOp.RECOVER], None, Status.NOT_OWNER),
+        ("owned: other owner", owned_by_us, g(GrantOp.RECOVER, gen=1, own=bytes(16)), None, [GrantOp.RECOVER],
+         None, Status.NOT_OWNER),
+        ("tag pair ok", {**unowned}, g(GrantOp.PAIR, dev=tag_dev, role=NodeRole.TAG), None, [GrantOp.PAIR], True,
+         Status.OK),
+        ("tag pair bad setup proof", {**unowned}, g(GrantOp.PAIR, dev=tag_dev, role=NodeRole.TAG), None,
+         [GrantOp.PAIR], False, Status.PROOF_FAILED),
+    ]
+    grant_cases = []
+    for name, own_state, raw, signature, ops, setup_ok, expected in cases:
+        signature = grants.sign(raw, auth_sk) if signature is None else signature
+        dev = tag_dev if "tag" in name else gw_dev
+        role = NodeRole.TAG if "tag" in name else NodeRole.GATEWAY
+        own = grants.DeviceOwnership(role, dev, OwnerState(own_state["state"]), own_state["gen"],
+                                     bytes.fromhex(own_state["authority_pub"]), bytes.fromhex(own_state["owner"]),
+                                     bytes.fromhex(own_state["controller"]))
+        status, _ = grants.check_grant(own, raw, signature, challenge=challenge, session_controller=controller,
+                                       expected_ops=set(ops), setup_proof_ok=setup_ok)
+        assert status == expected, (name, status)
+        grant_cases.append({"name": name, "role": int(role), "device_id": _hex(dev), "ownership": own_state,
+                            "grant": _hex(raw), "sig": _hex(signature), "ops": [int(o) for o in ops],
+                            "challenge": _hex(challenge), "session_controller": _hex(controller),
+                            "setup_proof_ok": setup_ok, "expect": int(expected)})
+
+    # --- a byte-exact secure conversation: worker -> tag PAIR through a tunnel
+    tag_priv = bytes.fromhex(ids[2]["ik_priv"])
+    tag_pub = bytes.fromhex(ids[2]["ik_pub"])
+    ctl_priv = key(21)
+    ident = Ident2(2, int(NodeRole.TAG), tag_dev, tag_pub, int(OwnerState.UNOWNED), 0, bytes(16), challenge,
+                   int(Board.HEMA_NRF52811), 0, 2, 0)
+    prologue = noise.prologue(Link.TUNNEL, tag_dev)
+    init = noise.Initiator(ctl_priv, tag_pub, prologue, ephemeral=lambda: key(30))
+    resp = noise.Responder(tag_priv, prologue, ephemeral=lambda: key(31))
+    msg1 = init.write_message1()
+    resp.read_message1(msg1)
+    msg2, r_sess = resp.write_message2()
+    _, i_sess = init.read_message2(msg2)
+    hh = i_sess.handshake_hash
+    pair_grant = g(GrantOp.PAIR, dev=tag_dev, role=NodeRole.TAG, ctl=controller)
+    pair_sig = grants.sign(pair_grant, auth_sk)
+    k_tag = identity.k_setup(secret, tag_dev)
+    p_s = identity.proof_s(k_tag, hh, pair_grant)
+    request = SecureMessage(int(SerialMsg.PAIR), 0, 1, cbor_msgs.encode_request(SerialMsg.PAIR, {
+        "grant": pair_grant, "sig": pair_sig, "proof": p_s, "op_key": root})).pack()
+    answer = SecureMessage(int(SerialMsg.PAIR), int(SerialFlag.RESPONSE), 1, cbor_msgs.encode_response(
+        SerialMsg.PAIR, {"status": 0, "gen": 1, "proof": identity.proof_d(k_tag, hh, p_s)})).pack()
+    sealed_request = i_sess.encrypt(request)
+    assert r_sess.decrypt(sealed_request) == request
+    sealed_answer = r_sess.encrypt(answer)
+    assert i_sess.decrypt(sealed_answer) == answer
+    conversation = {
+        "ident": _hex(ident.pack()), "controller_priv": _hex(ctl_priv), "controller_pub": _hex(controller),
+        "tag_ik_priv": _hex(tag_priv), "prologue": _hex(prologue), "init_ephemeral": _hex(key(30)),
+        "resp_ephemeral": _hex(key(31)), "msg1": _hex(msg1), "msg2": _hex(msg2), "handshake_hash": _hex(hh),
+        "setup_secret": _hex(secret), "grant": _hex(pair_grant), "sig": _hex(pair_sig), "proof_s": _hex(p_s),
+        "request_plain": _hex(request), "request_sealed": _hex(sealed_request),
+        "answer_plain": _hex(answer), "answer_sealed": _hex(sealed_answer),
+    }
+    return {
+        "description": "Protocol v2 (docs/connect-setup.md): setup codes, identities, the key schedule, grant "
+                       "rules in check order (expect = status code), and one byte-exact secure conversation "
+                       "(Noise IK through a tunnel, then PAIR). Keys are SHA-256('cremind-tag/v2/fixture' | seed).",
+        "authority_pub": _hex(auth_pub),
+        "setup_codes": codes,
+        "identities": ids,
+        "key_schedule": schedule,
+        "grant_cases": grant_cases,
+        "conversation": conversation,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -1129,6 +1289,7 @@ def build_all() -> dict[str, bytes]:
         "session.json": _json(session_fixture(pack)),
         "enrollment.json": _json(enrollment_fixture()),
         "tag_txn.json": _json(tag_txn_fixture()),
+        "v2_secure.json": _json(v2_fixture()),
     }
 
 

@@ -60,6 +60,14 @@ static void dispatch(const struct gw_evt *e, int64_t now)
 	case GW_EVT_PROV_CLOSED:
 		gw_core_prov_closed(gw, now);
 		break;
+#ifdef CONFIG_CTAG_GW_SECURE
+	case GW_EVT_PROV_SECURITY:
+		gw_core_prov_security(gw, now);
+		break;
+	case GW_EVT_PROV_AUTH:
+		gw_core_prov_auth(gw, now);
+		break;
+#endif
 	default:
 		break;
 	}

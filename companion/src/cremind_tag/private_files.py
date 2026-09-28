@@ -58,6 +58,8 @@ def _win() -> tuple[object, object]:
     advapi32.GetTokenInformation.restype = wintypes.BOOL
     advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
         wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.ULONG)]
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
@@ -96,15 +98,43 @@ def current_user_sid() -> str:
         if not advapi32.GetTokenInformation(token, _TOKEN_USER, buffer, size, ctypes.byref(size)):  # type: ignore[attr-defined]
             raise _winerror("GetTokenInformation")
         sid_pointer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]  # TOKEN_USER.User.Sid
-        text = wintypes.LPWSTR()
-        if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(text)):  # type: ignore[attr-defined]
-            raise _winerror("ConvertSidToStringSidW")
-        try:
-            return str(text.value)
-        finally:
-            kernel32.LocalFree(ctypes.cast(text, ctypes.c_void_p))  # type: ignore[attr-defined]
+        return _sid_text(advapi32, kernel32, sid_pointer)
     finally:
         kernel32.CloseHandle(token)  # type: ignore[attr-defined]
+
+
+def canonical_sid(sid: str) -> str:
+    """``sid`` in ``S-1-…`` form, Windows only.
+
+    SDDL writes some accounts as a two-letter alias, among them ``LA``, the built-in Administrator
+    (the user GitHub's Windows runners run as): compared as text with :func:`current_user_sid`, the
+    owner would look like a stranger.
+    """
+    if sid.startswith("S-"):
+        return sid
+    import ctypes
+
+    advapi32, kernel32 = _win()
+    pointer = ctypes.c_void_p()
+    if not advapi32.ConvertStringSidToSidW(sid, ctypes.byref(pointer)):  # type: ignore[attr-defined]
+        raise _winerror(f"ConvertStringSidToSidW({sid})")
+    try:
+        return _sid_text(advapi32, kernel32, pointer)
+    finally:
+        kernel32.LocalFree(pointer)  # type: ignore[attr-defined]
+
+
+def _sid_text(advapi32: object, kernel32: object, sid_pointer: object) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    text = wintypes.LPWSTR()
+    if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(text)):  # type: ignore[attr-defined]
+        raise _winerror("ConvertSidToStringSidW")
+    try:
+        return str(text.value)
+    finally:
+        kernel32.LocalFree(ctypes.cast(text, ctypes.c_void_p))  # type: ignore[attr-defined]
 
 
 def restrict_to_owner(path: Path | str) -> None:
@@ -169,8 +199,15 @@ def access_problem(path: Path | str) -> str | None:
     if sddl.startswith("D:NO_ACCESS_CONTROL") or sddl == "D:":
         return "it has no access control list (everyone can access it)"
     others = sorted({sid for kind, _rights, sid in _ACE.findall(sddl)
-                     if kind in ("A", "OA") and sid not in _TRUSTED_ALIASES and sid != me})
+                     if kind in ("A", "OA") and sid not in _TRUSTED_ALIASES and not _is_account(sid, me)})
     return f"its ACL also grants access to {', '.join(others)}" if others else None
+
+
+def _is_account(sid: str, account: str) -> bool:
+    try:
+        return canonical_sid(sid) == account
+    except OSError:  # an alias this Windows does not know is somebody else
+        return False
 
 
 def protection_label() -> str:

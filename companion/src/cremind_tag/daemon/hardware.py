@@ -76,11 +76,16 @@ class HardwareWorker:
         self.commands_claimed = 0
         self._inventory_wanted = asyncio.Event()
         self._inventory_wanted.set()
+        self._heartbeat_wanted = asyncio.Event()
         self.inventory_done = asyncio.Event()
         self._claim_retry: dict[str, tuple[int, float]] = {}  # command id -> (failed claims, next try)
 
     def request_inventory(self) -> None:
         self._inventory_wanted.set()
+
+    def request_heartbeat(self) -> None:
+        """Send the next heartbeat now (e.g. right after a gateway claim: it completes the setup)."""
+        self._heartbeat_wanted.set()
 
     async def run(self) -> None:
         tasks = [asyncio.create_task(self._guard(self._inventory_loop()), name="hardware inventory"),
@@ -211,6 +216,7 @@ class HardwareWorker:
     async def _heartbeat_loop(self) -> None:
         backoff = Backoff(1.0, self.svc.settings.connector_retry_max_s)
         while True:
+            self._heartbeat_wanted.clear()
             try:
                 result = await self.client.heartbeat(await self.build_heartbeat())
                 self.heartbeats += 1
@@ -226,7 +232,8 @@ class HardwareWorker:
             except ConnectorError as exc:
                 delay = min(backoff.next(), self.svc.settings.heartbeat_s)
                 log.info("hardware: heartbeat failed (%s); retry in %.1fs", exc, delay)
-            await asyncio.sleep(delay)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._heartbeat_wanted.wait(), delay)
 
     async def build_heartbeat(self) -> dict[str, Any]:
         svc = self.svc
@@ -265,6 +272,8 @@ class HardwareWorker:
                 devices.append({"hw_id": bridge.hw_id, "kind": "bridge", "status": "ok" if connected else "offline"})
         if svc.gateway_hw_id:
             devices.append({"hw_id": svc.gateway_hw_id, "kind": "gateway", "status": "ok" if connected else "offline"})
+        if svc.agent is not None:
+            await svc.agent.decorate_heartbeat(devices)  # live generations (a restore's reconciling)
         return {"companion": {"version": __version__, "host": socket.gethostname(), "started_at": svc.started_at},
                 "queue": {"depth": stats["depth"], "oldest_age_s": stats["oldest_age_s"]},
                 "devices": devices}

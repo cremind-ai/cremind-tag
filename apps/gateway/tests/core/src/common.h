@@ -60,14 +60,66 @@ struct mock {
 	size_t stored_name_len;
 	size_t reboots;
 	size_t tx_room; /* bytes the "UART" accepts per write (SIZE_MAX = all) */
+	/* v2 */
+	uint8_t provision_oob[8][32];
+	bool provision_oob_set[8];
+	uint8_t stored_owner[176];
+	size_t owner_writes;
+	uint32_t stored_floor;
+	bool owner_fail;
+	bool random_fail; /* the backend's RNG (challenges) fails */
+	size_t releases;
 };
 
 extern struct mock mock;
 
-/* Fresh core with no session: BRIDGE_A (configured) and BRIDGE_B (not). */
+/* Fresh core with no session: BRIDGE_A (configured) and BRIDGE_B (not).
+ * v2: owned by the test authority, the test worker's key pinned. */
 void core_reset(void);
-/* A HELLO'd session with a large host window. */
+/* A HELLO'd session with a large host window; v2: then SECURE_OPEN as the
+ * current worker (requests and answers are sealed from here on). */
 void core_session(void);
+
+#ifdef CONFIG_CTAG_GW_SECURE
+#include <ctag/ctag_secure.h>
+
+/* The test authority, owner and worker keys. */
+extern const uint8_t test_auth_sk[32];
+extern const uint8_t test_owner[16];
+extern const uint8_t test_worker[32]; /* the pinned controller's private key */
+extern const uint8_t test_other[32];  /* another computer's controller key */
+
+/* v2: a fresh core that is unowned (factory state). */
+void core_reset_unowned(void);
+/* v2: a fresh core from these stored bytes and floor (the boot rule). */
+void core_reset_record(const uint8_t *rec, size_t len, uint32_t floor);
+/* v2: the worker key the next core_session()/host_open() uses. */
+void host_use_worker(const uint8_t priv[32]);
+/* v2: SECURE_OPEN from the current worker (after HELLO); returns its status. */
+uint8_t host_open(void);
+/* The same, granting this many credits with the SECURE_OPEN frame. */
+uint8_t host_open_credits(uint8_t credits);
+/* The same, with every gateway allocation after the first n failing. */
+uint8_t host_open_fail_after(int32_t n);
+/* v2: the host session is open (host_send seals). */
+bool host_sealed(void);
+/* v2: forget the host session (the next host_send goes in plaintext). */
+void host_forget(void);
+/* Send a request in plaintext whatever the session. */
+uint16_t host_send_plain(uint8_t type, const struct ctag_cbor_field *f, size_t n, uint8_t credits);
+/* A SECURE_DATA frame with these raw bytes as its data. */
+uint16_t host_send_secure_raw(const uint8_t *data, size_t len, uint8_t credits);
+/* Seal a secure message of this type/flags/rid with fields; returns the ciphertext length. */
+int host_seal(uint8_t type, uint8_t flags, uint16_t rid, const struct ctag_cbor_field *f, size_t n,
+	      uint8_t *out, size_t size);
+/* The gateway's current challenge through STATUS (sealed). */
+void host_challenge(uint8_t out[16]);
+/* A grant of op for the gateway toward controller (the worker's public key). */
+void host_grant(uint8_t op, const uint8_t controller[32], const uint8_t challenge[16],
+		uint32_t gen_from, uint8_t *grant, size_t *len, uint8_t sig[64]);
+/* CLAIM/RECOVER/RELEASE with a fresh challenge and a grant for the current worker. */
+uint8_t host_grant_request(uint8_t type, uint8_t op, uint32_t gen_from);
+#endif
 /* Advance the clock and run the core's timers. */
 void advance(int64_t ms);
 

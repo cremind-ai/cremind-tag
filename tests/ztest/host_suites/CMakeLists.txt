@@ -18,6 +18,7 @@ target_sources(app PRIVATE
   ${host}/src/test_frag.c
   ${host}/src/test_txn.c
   ${host}/src/test_enroll.c
-  ${host}/src/test_fuzz.c)
+  ${host}/src/test_fuzz.c
+  ${host}/src/test_secure.c)
 target_include_directories(app PRIVATE ${host}/src ${host}/../../lib/third_party/qrcodegen)
 ctag_test_vectors(app ${PYTHON_EXECUTABLE})

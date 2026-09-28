@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, get_args
@@ -42,10 +43,17 @@ class ManifestError(ValueError):
 
 def repo_root() -> Path:
     """The cremind-tag checkout: ``$CREMIND_TAG_REPO``, else the nearest parent
-    of the working directory or of this package that holds ``fonts/manifest.yaml``."""
+    of the working directory or of this package that holds ``fonts/manifest.yaml``.
+
+    A packaged (frozen) program has no checkout and never guesses one from the
+    working directory or its own location: only ``$CREMIND_TAG_REPO`` counts; its
+    fonts come from the font asset bundle (``cremind_tag.resources``)."""
     env = os.environ.get("CREMIND_TAG_REPO")
     if env:
         return Path(env)
+    if getattr(sys, "frozen", False):
+        raise ManifestError("this packaged program has no cremind-tag checkout: its fonts come from the font asset "
+                            "bundle (cremind_tag.resources); set CREMIND_TAG_REPO to use a checkout")
     for start in (Path.cwd(), Path(__file__).resolve()):
         for candidate in (start, *start.parents):
             if (candidate / "fonts" / "manifest.yaml").is_file():

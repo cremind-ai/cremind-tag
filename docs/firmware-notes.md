@@ -178,6 +178,28 @@ build.
 - Samples: Z `samples/bluetooth/mesh_provisioner` (closest to the gateway);
   `nrf/samples/bluetooth/mesh/chat` (vendor model reference). No sample combines
   mesh + central + Zephyr controller.
+- **Static OOB provisioning (protocol v2, verified 2026-09-28).** Kconfig
+  (`subsys/bluetooth/mesh/Kconfig:369-378`): `BT_MESH_ECDH_P256_HMAC_SHA256_AES_CCM`
+  (default y) and `BT_MESH_OOB_AUTH_REQUIRED` ("OOB authentication mandates to
+  use HMAC SHA256", depends on it; it sets the OOB-required bit of the
+  *provisionee's* capabilities). `CMAC_AES128_AES_CCM` stays on by default.
+  Provisioner (`provisioner.c`): on the Capabilities PDU `prov_capabilities()`
+  fills `struct bt_mesh_dev_capabilities {elem_count, algorithms,
+  pub_key_type, oob_type, output_size, output_actions, input_size,
+  input_actions}`, calls the application's `bt_mesh_prov.capabilities`
+  callback, then `prov_check_method()`; for static OOB that check only tests
+  `caps->oob_type` (`BT_MESH_STATIC_OOB_AVAILABLE` = BIT(0),
+  `BT_MESH_OOB_AUTH_REQUIRED` = BIT(1)). The method is chosen from the
+  callback: `bt_mesh_auth_method_set_static(const uint8_t *static_val, uint8_t
+  size)` (`provisioner.c:759`), `bt_mesh_auth_method_set_input(action, size)`
+  (`:739`). The provisioner prefers HMAC-SHA256 when the device offers it.
+  A failed provisioning (the device's Provisioning Failed, a confirmation
+  mismatch) reaches the application only as `link_close` without
+  `node_added`: no reason code.
+- **Wiping a network**: `bt_mesh_cdb_clear()` (`cdb.h:126`) removes every
+  node, subnet and app key of the CDB (and their settings);
+  `bt_mesh_reset()` (`main.h:629`) unprovisions the local node. The gateway
+  then reboots so the next `bt_mesh_cdb_create()` starts a new network.
 
 ## 4. BLE central (bridge)
 
@@ -212,6 +234,20 @@ build.
   3 × `psa_mac_compute` 936 B; multi-part HMAC 752 B; SHA-256 streaming 376 B;
   CCM-8 enc+dec 192 B 1192 B (incl. 408 B test buffers). Op structs: MAC 352 B,
   AEAD 344 B, hash 232 B.
+- **Protocol v2 crypto does not use PSA**: `lib/secure` runs the verified
+  HACL* and Noise* (firmware-libs.md `ctag_secure`). Kernel pieces it uses:
+  `sys_heap_init/alloc/free` and `sys_heap_usable_size()`
+  (`include/zephyr/sys/sys_heap.h:219`, to wipe a whole block on free) for the
+  KaRaMeL allocator, and `sys_csrand_get()` (`include/zephyr/random/random.h:68`)
+  for ephemerals, challenges and identity keys.
+- **native_sim and KaRaMeL**: native_sim in this SDK builds against the host
+  C library (`CONFIG_EXTERNAL_LIBC=y`) and defines `__linux__`, so KaRaMeL's
+  `lowstar_endianness.h` includes `<endian.h>`, whose `htole64()` & co. glibc
+  defines only with `_DEFAULT_SOURCE`: without it the vendored code links
+  against undefined functions. `lib/CMakeLists.txt` compiles `ctag_secure` and
+  its vendored sources with `-U__linux__ -D_DEFAULT_SOURCE` on
+  `CONFIG_ARCH_POSIX`; the nRF targets take the header's generic
+  `__BYTE_ORDER__` branch.
 
 ## 6. Boards (HWMv2)
 

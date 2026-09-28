@@ -17,7 +17,7 @@
 # field is always present on the wire). Only trailing fields may have one.
 # Narrative, flows and rationale live in docs/protocol.md.
 
-spec_version: 1
+spec_version: 2
 
 # ---------------------------------------------------------------------------
 # Global limits and timing. Firmware Kconfig defaults and companion constants
@@ -90,6 +90,28 @@ constants:
   ICON_SIZES:               {value: [16, 24, 32, 48], doc: "Icon strike sizes in pixels"}
   FONTPACK_WORKING_SPACE:   {value: 16777216, doc: "16 MiB bridge working space in the flash sizing rule (production parts; development boards may configure a smaller one, docs/fontpack.md §3)"}
   FONTPACK_DIR_SIZE:        {value: 65536, doc: "Slot directory area at the START OF THE WORKING SPACE (offset 2 * slot_size), docs/fontpack.md §3"}
+  # ---- protocol v2 (docs/connect-setup.md) ----
+  SECURE_PROTO_VERSION:     {value: 2,     doc: "Secure-setup protocol version reported by IDENTIFY / IDENT and the v2 advertising ver byte (serial framing keeps PROTO_VERSION)"}
+  DEVICE_ID_LEN:            {value: 16,    doc: "device_id = SHA-256(label | role | ik_pub)[0:16]"}
+  IDENTITY_KEY_LEN:         {value: 32,    doc: "X25519 identity / controller public key length"}
+  AUTHORITY_KEY_LEN:        {value: 32,    doc: "Ed25519 authority public key length"}
+  GRANT_SIG_LEN:            {value: 64,    doc: "Ed25519 signature length of a grant"}
+  GRANT_MAX:                {value: 192,   doc: "Largest canonical CBOR grant a device accepts"}
+  CHALLENGE_LEN:            {value: 16,    doc: "Single-use device challenge carried by IDENTIFY / IDENT"}
+  OWNER_LEN:                {value: 16,    doc: "Owner = profile UUID bytes"}
+  PROOF_LEN:                {value: 16,    doc: "Truncated HMAC proofs (setup, root, maintenance)"}
+  SETUP_SECRET_LEN:         {value: 10,    doc: "Factory setup secret (80 bits) printed on bridge/tag labels"}
+  SETUP_PAYLOAD_LEN:        {value: 15,    doc: "Setup code payload: (0x20|role) u8, short_id u32le, setup secret"}
+  SETUP_CODE_LEN:           {value: 25,    doc: "Setup code symbols: 24 Crockford base32 + 1 check symbol"}
+  SETUP_CODE_POLY:          {value: 0x25,  doc: "GF(32) modulus x^5+x^2+1; check = sum over data symbols v_i (i from 0) of alpha^(i+1) * v_i with alpha = 2: catches every single substitution and adjacent transposition"}
+  OP_KEY_LEN:               {value: 32,    doc: "Tag operational root / bridge maintenance key length"}
+  STATIC_OOB_LEN:           {value: 32,    doc: "Mesh static OOB value length (HMAC-SHA256 provisioning)"}
+  TUNNEL_DATA_MAX:          {value: 150,   doc: "Payload bytes per mesh TUNNEL_DATA fragment"}
+  TUNNEL_MSG_MAX:           {value: 400,   doc: "Largest reassembled tunnel message (serial TUNNEL_SEND data)"}
+  PAIR_MSG_MAX:             {value: 320,   doc: "Largest reassembled message on the tag PAIR characteristic"}
+  DISCOVER_MAX_S:           {value: 120,   doc: "Longest DISCOVER window"}
+  DISCOVERED_MIN_INTERVAL_MS: {value: 5000, doc: "EVT_DISCOVERED at most once per (bridge, tag) per this interval"}
+  SECURE_MAX_FAILURES:      {value: 3,     doc: "Consecutive failed proofs before a tag skips its next wake window"}
 
 # ---------------------------------------------------------------------------
 # Status codes shared by serial responses/events, mesh STATUS/RESULT messages,
@@ -130,6 +152,12 @@ status_codes:
   PROVISIONING_ACTIVE:   {value: 31, doc: "Refused while provisioning/configuration is in progress"}
   EXPIRED:               {value: 32, doc: "Job TTL elapsed before delivery"}
   SUPERSEDED:            {value: 33, doc: "Replaced by a newer revision for the same tag/slot"}
+  AUTH_REQUIRED:         {value: 34, doc: "v2: the request needs a secure session (plaintext refused)"}
+  NOT_OWNER:             {value: 35, doc: "v2: the session's controller may not do this in the device's ownership state"}
+  GRANT_INVALID:         {value: 36, doc: "v2: grant malformed, wrong device/role/challenge/controller, or bad signature"}
+  STALE_GENERATION:      {value: 37, doc: "v2: grant gen_from is not the device's current generation"}
+  PROOF_FAILED:          {value: 38, doc: "v2: setup, root or maintenance proof did not verify"}
+  LOCKED:                {value: 39, doc: "v2: pairing is locked (removed bridge awaiting recommissioning, anti-brute-force pause)"}
 
 # Stages a delivery moves through (Cremind shows them; receipts carry them).
 delivery_stages:
@@ -232,6 +260,23 @@ serial:
     app_idx: 61
     stored_epoch: 62  # uint32 the tag's stored epoch as last reported by the tag (0 = unknown)
     assigned_count: 63  # uint in a bridge's caps map: the tags assigned on the bridge itself (CAPS_STATUS.assigned)
+    device_id: 64     # bstr[16] v2 canonical device identity
+    ik: 65            # bstr[32] v2 X25519 identity public key
+    owner_state: 66   # uint v2 owner_states
+    gen: 67           # uint32 v2 ownership generation
+    authority_id: 68  # bstr[16] v2 pinned authority id (present when owned)
+    challenge: 69     # bstr[16] v2 single-use device challenge
+    grant: 70         # bstr v2 canonical CBOR grant
+    sig: 71           # bstr[64] v2 Ed25519 grant signature
+    static_oob: 72    # bstr[32] v2 mesh static OOB value (PROVISION)
+    tunnel: 73        # uint v2 tunnel id
+    state: 74         # uint v2 tunnel_states (EVT_TUNNEL)
+    proof: 75         # bstr[16] v2 setup / maintenance proof
+    owner: 76         # bstr[16] v2 pinned owner (profile UUID)
+    controller_match: 77  # bool v2 the session's controller is the pinned one
+    root_proof: 78    # bstr[16] v2 HMAC(root, label | h) from an owned tag
+    release_stage: 79 # uint v2 RELEASE stage (0 prepare, 1 commit)
+    op_key: 80        # bstr[32] v2 operational root (tag) / maintenance key (bridge) in PAIR and REKEY
   message_types:
     # --- requests (host -> device); the device answers with RESPONSE + {status, ...}
     HELLO:           {value: 0x01, dir: h2d, doc: "{proto, name} -> {status, proto, fw, build, boot_id, caps:{max_frame, credits, max_bridges, max_tags, role}}"}
@@ -239,16 +284,33 @@ serial:
     REBOOT:          {value: 0x03, dir: h2d, doc: "{op_id} -> {status}; device reboots after responding"}
     EVENT_ACK:       {value: 0x04, dir: h2d, doc: "{seq} -> {status}; releases retained events with seq <= given"}
     INFO:            {value: 0x05, dir: h2d, doc: "{} -> {status, fw, build, boot_id, caps, counters}"}
+    # --- protocol v2 (docs/connect-setup.md 5): plaintext
+    IDENTIFY:        {value: 0x06, dir: h2d, doc: "v2 plaintext: {} -> {status, proto, role, device_id, ik, fw, build, board, owner_state, gen, authority_id?, challenge}"}
+    SECURE_OPEN:     {value: 0x07, dir: h2d, doc: "v2 plaintext: {data} -> {status, data}: Noise IK message 1, then message 2; replaces any session"}
+    SECURE_DATA:     {value: 0x08, dir: h2d, doc: "v2 carrier, both directions: {data} -> {status, data?}: one Noise transport message (type, flags, request_id, CBOR); a plaintext answer means the session failed"}
+    # --- protocol v2: secure messages (only inside a session)
+    CLAIM:           {value: 0x09, dir: h2d, doc: "v2 gateway, unowned: {grant, sig} -> {status, gen}"}
+    RECOVER:         {value: 0x0A, dir: h2d, doc: "v2 gateway, owned, new controller: {grant, sig} -> {status, gen}"}
+    RELEASE:         {value: 0x0B, dir: h2d, doc: "v2 any role: {grant, sig, release_stage} -> {status, gen, data?} (tag: stage 0 returns a fresh setup payload, stage 1 commits)"}
+    STATUS:          {value: 0x0C, dir: h2d, doc: "v2 any role: {} -> {status, owner_state, gen, authority_id?, owner?, controller_match, challenge, root_proof?}"}
+    PAIR:            {value: 0x0D, dir: h2d, doc: "v2 bridge/tag, unowned: {grant, sig, proof, op_key} -> {status, gen, proof}"}
+    REKEY:           {value: 0x0E, dir: h2d, doc: "v2 bridge/tag, owned: {grant, sig, op_key} -> {status, gen}"}
+    MAINT_AUTH:      {value: 0x0F, dir: h2d, doc: "v2 bridge maintenance port: {proof} -> {status}"}
     SCAN_UNPROV:     {value: 0x10, dir: h2d, doc: "{duration_s, uuid_filter?} -> {status}; emits EVT_UNPROV_BEACON"}
-    PROVISION:       {value: 0x11, dir: h2d, doc: "{op_id, uuid, name?} -> {status: ACCEPTED}; later EVT_PROVISIONED"}
+    PROVISION:       {value: 0x11, dir: h2d, doc: "{op_id, uuid, name?, static_oob?} -> {status: ACCEPTED}; later EVT_PROVISIONED; static_oob (v2) is required by v2 gateways"}
     CONFIGURE_NODE:  {value: 0x12, dir: h2d, doc: "{op_id, addr, relay, ttl} -> ACCEPTED; later EVT_NODE_CONFIGURED (app key add/bind + relay + TTL)"}
     REMOVE_NODE:     {value: 0x13, dir: h2d, doc: "{op_id, addr} -> ACCEPTED; later EVT_NODE_REMOVED (node reset + CDB delete)"}
     LIST_NODES:      {value: 0x14, dir: h2d, doc: "{} -> {status, nodes:[{addr, uuid, elements, configured, name, last_seen_s}]}"}
+    DISCOVER:        {value: 0x16, dir: h2d, doc: "v2: {op_id, bridge, duration_s, tag_id} -> ACCEPTED; bridge 0 = every bridge, tag_id 0 = any v2 tag in setup mode; EVT_DISCOVERED"}
+    RECOMMISSION:    {value: 0x17, dir: h2d, doc: "v2 bridge maintenance port only: {grant?, sig?} -> {status, gen, data}; owned (after MAINT_AUTH, a MAINT grant) or released; data = a fresh setup payload; leaves the mesh"}
     ASSIGN_TAG:      {value: 0x20, dir: h2d, doc: "{op_id, bridge, tag_id, epoch, key} -> ACCEPTED; later EVT_ASSIGN_RESULT"}
     UNASSIGN_TAG:    {value: 0x21, dir: h2d, doc: "{op_id, bridge, tag_id, epoch} -> ACCEPTED; later EVT_ASSIGN_RESULT"}
     DELIVER_LAYOUT:  {value: 0x30, dir: h2d, doc: "{op_id, bridge, tag_id, epoch, revision, update_id, fontpack_id, layout} -> {status: ACCEPTED|BUSY|INVALID|DUPLICATE}; later EVT_STAGE*, EVT_RESULT"}
     CANCEL_DELIVERY: {value: 0x31, dir: h2d, doc: "{op_id, update_id} -> {status}"}
     TAG_COMMAND:     {value: 0x32, dir: h2d, doc: "{op_id, bridge, tag_id, epoch, cmd} -> ACCEPTED; later EVT_RESULT (update_id = op_id)"}
+    TUNNEL_OPEN:     {value: 0x33, dir: h2d, doc: "v2: {op_id, bridge, tag_id, duration_s} -> {status, tunnel}; tag_id 0 = the bridge own endpoint; later EVT_TUNNEL"}
+    TUNNEL_SEND:     {value: 0x34, dir: h2d, doc: "v2: {tunnel, data <= TUNNEL_MSG_MAX} -> {status}"}
+    TUNNEL_CLOSE:    {value: 0x35, dir: h2d, doc: "v2: {tunnel} -> {status}"}
     GET_INVENTORY:   {value: 0x40, dir: h2d, doc: "{} -> {status, items:[bridge info]}; also refreshes via mesh CAPS/HEALTH (EVT_BRIDGE_INFO)"}
     GET_COUNTERS:    {value: 0x41, dir: h2d, doc: "{} -> {status, counters}"}
     IDENTIFY_NODE:   {value: 0x42, dir: h2d, doc: "{op_id, addr} -> {status}; bridge blinks/beeps"}
@@ -259,6 +321,7 @@ serial:
     FONT_STATUS:     {value: 0x63, dir: h2d, doc: "{} -> {status, fontpack_id, slot, size, flash_size}"}
     FONT_ABORT:      {value: 0x64, dir: h2d, doc: "{} -> {status}"}
     FLASH_TEST:      {value: 0x65, dir: h2d, doc: "{op_id} -> {status, flash_size, items:[{offset, status}]}; erase/write/read-back patterns at the first and last sectors of the inactive slot, the last sector of the device (the working space ends there) and, when neither lies in the active slot or the directory, the sectors either side of the 16 MiB boundary (else that item reports BUSY); never touches the active slot or the directory"}
+    FACTORY_SETUP:   {value: 0x66, dir: h2d, doc: "v2 factory, unowned bridge without a setup secret: {data} -> {status}; data = the 10-byte setup secret; refused (LOCKED) once one is stored"}
     # --- events (device -> host), request_id = 0, flags = EVENT, carry {seq} when retained
     EVT_LOG:             {value: 0x80, dir: d2h, doc: "{text} diagnostic, not retained"}
     EVT_UNPROV_BEACON:   {value: 0x81, dir: d2h, doc: "{uuid, rssi, oob}"}
@@ -270,6 +333,8 @@ serial:
     EVT_RESULT:          {value: 0x87, dir: d2h, doc: "{seq, update_id, bridge, tag_id, epoch, revision, status, digest(8), battery_mv, timing, flags, stored_epoch} (flags and stored_epoch as in mesh DELIVERY_RESULT)"}
     EVT_BRIDGE_INFO:     {value: 0x88, dir: d2h, doc: "{addr, fw, fontpack_id, caps:{board, flash_size, max_tags, assigned_count, flags, proto}, assigned, counters}"}
     EVT_TAG_SEEN:        {value: 0x89, dir: d2h, doc: "{bridge, tag_id, rssi, battery_mv, flags} rate-limited sighting"}
+    EVT_TUNNEL:          {value: 0x8A, dir: d2h, doc: "v2: {tunnel, bridge, tag_id, state, data?, status?} not retained"}
+    EVT_DISCOVERED:      {value: 0x8B, dir: d2h, doc: "v2: {bridge, tag_id, rssi, flags} not retained; a candidate, never inventory"}
 
 # Mesh / GATT tag command ids (TAG_COMMAND.cmd, mesh TAG_CMD.cmd, GATT CMD record).
 tag_commands:
@@ -439,6 +504,57 @@ mesh:
         - {name: rssi,       type: i8}
         - {name: battery_mv, type: u16}
         - {name: flags,      type: u8}
+    # ---- protocol v2 (docs/connect-setup.md 6) ----
+    TUNNEL_OPEN:
+      value: 0x1A
+      model: MGMT_SRV
+      fields:
+        - {name: tunnel,    type: u16}
+        - {name: tag_id,    type: u32, doc: "0 = the bridge's own secure endpoint"}
+        - {name: timeout_s, type: u8,  doc: "Idle timeout; the bridge closes the tunnel after this long without progress"}
+    TUNNEL_DATA:
+      value: 0x1B
+      model: MGMT_SRV
+      fields:
+        - {name: tunnel, type: u16}
+        - {name: seq,    type: u8,  doc: "Fragment number within the message, from 0"}
+        - {name: flags,  type: u8,  doc: "bit0 START, bit1 END"}
+        - {name: data,   type: bytes, max: TUNNEL_DATA_MAX}
+    TUNNEL_CLOSE:
+      value: 0x1C
+      model: MGMT_SRV
+      fields:
+        - {name: tunnel, type: u16}
+        - {name: status, type: u8}
+    DISCOVER:
+      value: 0x1D
+      model: MGMT_SRV
+      fields:
+        - {name: duration_s, type: u8}
+        - {name: tag_id,     type: u32, doc: "0 = any v2 tag in setup mode"}
+    DISCOVERED:
+      value: 0x1E
+      model: MGMT_CLI
+      fields:
+        - {name: tag_id, type: u32}
+        - {name: rssi,   type: i8}
+        - {name: flags,  type: u8, doc: "The tag's advertising flags"}
+    CAPS2_STATUS:
+      value: 0x1F
+      model: MGMT_CLI
+      fields:
+        - {name: device_id,   type: "bytes[16]"}
+        - {name: gen,         type: u32}
+        - {name: owner_state, type: u8}
+    TUNNEL_UP:
+      value: 0x20
+      model: MGMT_CLI
+      doc: "Bridge -> gateway tunnel traffic (TUNNEL_DATA / TUNNEL_CLOSE layouts on the client model)"
+      fields:
+        - {name: tunnel, type: u16}
+        - {name: seq,    type: u8}
+        - {name: flags,  type: u8, doc: "bit0 START, bit1 END, bit7 CLOSE (data = status u8)"}
+        - {name: data,   type: bytes, max: TUNNEL_DATA_MAX}
 
 # ---------------------------------------------------------------------------
 # Logical screen ("layout") — produced by the companion, carried by mesh,
@@ -573,6 +689,8 @@ gatt:
     CTRL:   {short: 0x0003, props: [write, indicate],       doc: "Fragmented control messages: handshake + plaintext errors"}
     DATA:   {short: 0x0004, props: [write_without_response], doc: "Fragmented authenticated records (bridge -> tag)"}
     STATUS: {short: 0x0005, props: [notify],                doc: "Credit grants (plaintext) and fragmented authenticated records (tag -> bridge)"}
+    IDENT:  {short: 0x0006, props: [read],                 doc: "v2: ident2 struct (long read); a fresh challenge per connection"}
+    PAIR:   {short: 0x0007, props: [write, indicate],       doc: "v2: fragmented secure-endpoint messages (kind u8 | body), <= PAIR_MSG_MAX"}
   # One header byte precedes every ATT value on CTRL, DATA and STATUS. Fragments
   # reassemble into messages; a message's FIRST byte is its type: ctrl_messages
   # (0x01-0x0F, plaintext), record_types (0x10-0x2F, authenticated) or
@@ -720,6 +838,81 @@ enrollment:
     - {name: tag_id,   type: u32}
     - {name: secret,   type: "bytes[32]"}
     - {name: crc32,    type: u32, doc: "CRC-32/IEEE over all previous bytes"}
+
+# ---------------------------------------------------------------------------
+# Protocol v2: identity, ownership, grants, secure endpoints
+# (docs/connect-setup.md). Binary layouts below are generated like the others.
+# ---------------------------------------------------------------------------
+v2:
+  grant_ops:
+    CLAIM:   {value: 1, doc: "First owner of an unowned gateway (direct USB)"}
+    RECOVER: {value: 2, doc: "Owned gateway: authorise a new controller (replacement computer)"}
+    PAIR:    {value: 3, doc: "First owner of an unowned/released bridge or tag (with the setup proof)"}
+    REKEY:   {value: 4, doc: "Owned bridge/tag: new controller + mk (bridge) or new root (tag)"}
+    RELEASE: {value: 5, doc: "Owned device: remove the owner (tag: two stages)"}
+    MAINT:   {value: 6, doc: "Owned bridge: recommission (leave the mesh, fresh setup secret)"}
+  owner_states:
+    UNOWNED:  {value: 0, doc: "Factory state (or after a physical factory reset)"}
+    OWNED:    {value: 1, doc: "Pinned authority, owner and generation"}
+    RELEASED: {value: 2, doc: "Released tag: pairs only with the fresh setup secret it showed"}
+  links:
+    SERIAL: {value: 1, doc: "Noise prologue link byte: USB serial (gateway, bridge maintenance port)"}
+    TUNNEL: {value: 2, doc: "Noise prologue link byte: mesh tunnel (bridge endpoint or tag PAIR)"}
+  tunnel_states:
+    OPEN:   {value: 1, doc: "EVT_TUNNEL: the endpoint answered; data = its ident2"}
+    DATA:   {value: 2, doc: "EVT_TUNNEL: one reassembled message from the endpoint"}
+    CLOSED: {value: 3, doc: "EVT_TUNNEL: closed (status says why)"}
+  pair_kinds:
+    HANDSHAKE: {value: 1, doc: "PAIR / tunnel message: a Noise handshake message"}
+    TRANSPORT: {value: 2, doc: "PAIR / tunnel message: a Noise transport message"}
+    CLOSE:     {value: 3, doc: "PAIR / tunnel message: close {status u8}"}
+  adv_flags:
+    RESULT_PENDING: {value: 0x01, doc: "v1: a result is waiting"}
+    LOW_BATTERY:    {value: 0x02, doc: "v1: battery low"}
+    STATE_UNKNOWN:  {value: 0x04, doc: "v1: display state unknown"}
+    SETUP:          {value: 0x08, doc: "v2: unowned or released, pairing possible"}
+    OWNED:          {value: 0x10, doc: "v2: owned"}
+  crypto:
+    noise_protocol: "Noise_IK_25519_ChaChaPoly_SHA256"
+    prologue: "cremind-tag/v2"                   # prologue = label | link u8 | device_id
+    device_id: "cremind-tag/v2/device-id"        # SHA-256(label | role u8 | ik_pub)[0:16]
+    grant: "cremind-tag/v2/grant"                # Ed25519 signs label | canonical CBOR grant
+    setup_salt: "cremind-tag/v2/setup"           # k_setup = HKDF(setup_secret, salt, info = device_id, 32)
+    mesh_oob_salt: "cremind-tag/v2/mesh-oob"     # static_oob = HKDF(setup_secret, salt, info = device_id, 32)
+    epoch_salt: "cremind-tag/v2/epoch"           # K_epoch = HKDF(root, salt, "K_epoch" | tag_id | epoch, 16)
+    root_proof: "cremind-tag/v2/root-proof"      # HMAC(root, label | h)[0:16]
+    maint_proof: "cremind-tag/v2/maint"          # HMAC(mk, label | h)[0:16]
+    setup_label_s: "S"                           # proof_s = HMAC(k_setup, "S" | h | SHA-256(grant))[0:16]
+    setup_label_d: "D"                           # proof_d = HMAC(k_setup, "D" | h | proof_s)[0:16]
+  # IDENT characteristic value / tunnel OPEN data (every v2 endpoint).
+  ident2:
+    - {name: proto,        type: u8, doc: "SECURE_PROTO_VERSION"}
+    - {name: role,         type: u8}
+    - {name: device_id,    type: "bytes[16]"}
+    - {name: ik,           type: "bytes[32]"}
+    - {name: owner_state,  type: u8}
+    - {name: gen,          type: u32}
+    - {name: authority_id, type: "bytes[16]", doc: "Zeros when unowned"}
+    - {name: challenge,    type: "bytes[16]"}
+    - {name: board,        type: u8}
+    - {name: fw_major,     type: u8}
+    - {name: fw_minor,     type: u8}
+    - {name: fw_patch,     type: u8}
+  # UICR.CUSTOMER[0..5] on a v2 tag, written at the factory (docs/connect-setup.md 2.3).
+  enrollment2:
+    - {name: magic,        type: u32, doc: "'C','T','A','G' (as v1)"}
+    - {name: version,      type: u8,  doc: "2"}
+    - {name: board,        type: u8}
+    - {name: panel,        type: u8}
+    - {name: flags,        type: u8}
+    - {name: setup_secret, type: "bytes[10]"}
+    - {name: reserved,     type: u16}
+    - {name: crc32,        type: u32, doc: "CRC-32/IEEE over all previous bytes"}
+  # UICR.CUSTOMER[8..16] on a v2 tag, written by the firmware at first boot.
+  uicr_identity:
+    - {name: ik,    type: "bytes[32]"}
+    - {name: crc32, type: u32, doc: "CRC-32/IEEE over ik"}
+  uicr_identity_offset: 32   # byte offset of uicr_identity within UICR.CUSTOMER
 
 # Board and panel identifiers (CAPS, enrollment, hardware/matrix.yaml).
 boards:

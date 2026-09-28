@@ -23,7 +23,7 @@ from typing import Any
 
 import cbor2
 
-from .ids import LAYOUT_HARD_MAX, SERIAL_MAX_PAYLOAD, CborKey, SerialMsg
+from .ids import GRANT_MAX, GRANT_SIG_LEN, LAYOUT_HARD_MAX, SERIAL_MAX_PAYLOAD, CborKey, SerialMsg
 
 MAX_DEPTH = 8
 
@@ -76,6 +76,14 @@ KEYS: dict[str, KeySpec] = {
     "queue_depth": _U, "max_bridges": _U, "max_tags": _U,
     "uuid_filter": KeySpec(Kind.BSTR, max_size=16), "net_idx": _U16, "app_idx": _U16,
     "stored_epoch": _U, "assigned_count": _U,
+    # protocol v2 (docs/connect-setup.md 5.3)
+    "device_id": KeySpec(Kind.BSTR, size=16), "ik": KeySpec(Kind.BSTR, size=32), "owner_state": _U,
+    "gen": _U, "authority_id": KeySpec(Kind.BSTR, size=16), "challenge": KeySpec(Kind.BSTR, size=16),
+    "grant": KeySpec(Kind.BSTR, max_size=GRANT_MAX), "sig": KeySpec(Kind.BSTR, size=GRANT_SIG_LEN),
+    "static_oob": KeySpec(Kind.BSTR, size=32), "tunnel": _U16, "state": _U,
+    "proof": KeySpec(Kind.BSTR, size=16), "owner": KeySpec(Kind.BSTR, size=16),
+    "controller_match": KeySpec(Kind.BOOL), "root_proof": KeySpec(Kind.BSTR, size=16),
+    "release_stage": _U, "op_key": KeySpec(Kind.BSTR, size=32),
 }
 
 # Message fields from the docs of spec serial.message_types; "?" marks an
@@ -87,7 +95,7 @@ REQUESTS: dict[SerialMsg, tuple[str, ...]] = {
     SerialMsg.EVENT_ACK: ("seq",),
     SerialMsg.INFO: (),
     SerialMsg.SCAN_UNPROV: ("duration_s", "uuid_filter?"),
-    SerialMsg.PROVISION: ("op_id", "uuid", "name?"),
+    SerialMsg.PROVISION: ("op_id", "uuid", "name?", "static_oob?"),
     SerialMsg.CONFIGURE_NODE: ("op_id", "addr", "relay", "ttl"),
     SerialMsg.REMOVE_NODE: ("op_id", "addr"),
     SerialMsg.LIST_NODES: (),
@@ -106,6 +114,23 @@ REQUESTS: dict[SerialMsg, tuple[str, ...]] = {
     SerialMsg.FONT_STATUS: (),
     SerialMsg.FONT_ABORT: (),
     SerialMsg.FLASH_TEST: ("op_id",),
+    # protocol v2 (docs/connect-setup.md 5)
+    SerialMsg.IDENTIFY: (),
+    SerialMsg.SECURE_OPEN: ("data",),
+    SerialMsg.SECURE_DATA: ("data",),
+    SerialMsg.CLAIM: ("grant", "sig"),
+    SerialMsg.RECOVER: ("grant", "sig"),
+    SerialMsg.RELEASE: ("grant", "sig", "release_stage?"),
+    SerialMsg.STATUS: (),
+    SerialMsg.PAIR: ("grant", "sig", "proof", "op_key"),
+    SerialMsg.REKEY: ("grant", "sig", "op_key"),
+    SerialMsg.MAINT_AUTH: ("proof",),
+    SerialMsg.DISCOVER: ("op_id", "bridge", "duration_s", "tag_id"),
+    SerialMsg.RECOMMISSION: ("grant?", "sig?"),
+    SerialMsg.TUNNEL_OPEN: ("op_id", "bridge", "tag_id", "duration_s"),
+    SerialMsg.TUNNEL_SEND: ("tunnel", "data"),
+    SerialMsg.TUNNEL_CLOSE: ("tunnel",),
+    SerialMsg.FACTORY_SETUP: ("data",),
 }
 RESPONSES: dict[SerialMsg, tuple[str, ...]] = {
     SerialMsg.HELLO: ("proto", "fw", "build", "boot_id", "caps"),
@@ -118,6 +143,19 @@ RESPONSES: dict[SerialMsg, tuple[str, ...]] = {
     SerialMsg.FONT_COMMIT: ("fontpack_id",),
     SerialMsg.FONT_STATUS: ("fontpack_id", "slot", "size", "flash_size"),
     SerialMsg.FLASH_TEST: ("flash_size", "items"),
+    SerialMsg.IDENTIFY: ("proto", "role", "device_id", "ik", "fw", "build", "board", "owner_state", "gen",
+                         "authority_id", "challenge"),
+    SerialMsg.SECURE_OPEN: ("data",),
+    SerialMsg.SECURE_DATA: ("data",),
+    SerialMsg.CLAIM: ("gen",),
+    SerialMsg.RECOVER: ("gen",),
+    SerialMsg.RELEASE: ("gen", "data"),
+    SerialMsg.STATUS: ("owner_state", "gen", "authority_id", "owner", "controller_match", "challenge",
+                       "root_proof"),
+    SerialMsg.PAIR: ("gen", "proof"),
+    SerialMsg.REKEY: ("gen",),
+    SerialMsg.RECOMMISSION: ("gen", "data"),
+    SerialMsg.TUNNEL_OPEN: ("tunnel",),
 }
 # Every response carries status and may carry detail (§1.4) and text.
 RESPONSE_COMMON = ("status", "detail?", "text?")
@@ -133,6 +171,8 @@ EVENTS: dict[SerialMsg, tuple[str, ...]] = {
                            "digest", "battery_mv", "timing", "flags", "stored_epoch"),
     SerialMsg.EVT_BRIDGE_INFO: ("addr", "fw", "fontpack_id", "caps", "assigned", "counters"),
     SerialMsg.EVT_TAG_SEEN: ("bridge", "tag_id", "rssi", "battery_mv", "flags"),
+    SerialMsg.EVT_TUNNEL: ("tunnel", "bridge", "tag_id", "state", "data?", "status?"),
+    SerialMsg.EVT_DISCOVERED: ("bridge", "tag_id", "rssi", "flags"),
 }
 
 

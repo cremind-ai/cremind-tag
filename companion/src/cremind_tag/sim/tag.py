@@ -22,6 +22,18 @@ authentication failures make the tag skip its next wake window.
 
 Battery: a simple linear drain per wake, session and refresh; low battery below
 2.4 V. Not modelled: RF, the panel controller's SPI traffic, real power figures.
+
+Protocol v2 (docs/connect-setup.md; ``TagSpec.protocol = 2`` with the tag's
+factory ``DeviceKeys``): ``tag_id`` is the ``short_id``; the advertisement's
+``ver`` is 2 with the ``SETUP`` flag while unowned or released and ``OWNED``
+once paired. A connection is either a frame session (CAPS, CTRL, DATA) or a
+pairing session (``IDENT`` read, a fresh challenge per connection; ``PAIR``
+writes and indications, fragmented like CTRL, messages at most
+``PAIR_MSG_MAX``) running the reference ``SecureDevice`` over ``Link.TUNNEL``.
+Frame sessions authenticate bridges with ``K_epoch`` v2 from the operational
+root, so a tag starts unable to show anything until a worker pairs it, and a
+rekey or release makes every older key fail. Three failed setup proofs in a row
+end the pairing session (``CLOSE{LOCKED}``) and skip the next wake window.
 """
 
 from __future__ import annotations
@@ -39,6 +51,7 @@ from ..protocol import session as crypto
 from ..protocol.enrollment import pack_blob
 from ..protocol.fragments import Fragmenter, FragmentError, Reassembler
 from ..protocol.ids import (
+    PAIR_MSG_MAX,
     PROTO_VERSION,
     TAG_ADV_INTERVAL_MS,
     TAG_ADV_WINDOW_MS,
@@ -53,6 +66,9 @@ from ..protocol.ids import (
     CtrlMsg,
     DeliveryStage,
     GattChr,
+    NodeRole,
+    OwnerState,
+    PairKind,
     Panel,
     PlainMsg,
     RecordDir,
@@ -76,16 +92,22 @@ from ..protocol.msgs import (
     TagCaps,
 )
 from ..protocol.tag_txn import DisplayRecord, StoredState, boot_recover, frame_begin_decision
+from ..secure.device import DeviceKeys, SecureDevice
+from ..secure.messages import pair_message
 from .core import SimClock, TaskSet, rng_stream
 from .radio import (
     ADV_FLAG_LOW_BATTERY,
+    ADV_FLAG_OWNED,
     ADV_FLAG_RESULT_PENDING,
+    ADV_FLAG_SETUP,
     ADV_FLAG_UNKNOWN_STATE,
+    ADV_VERSION_V2,
     Advert,
     Air,
     GattLink,
     LinkLost,
 )
+from .v2 import LinkSessions, PairEndpoint, device_state, generate_keys, load_device_state
 
 log = logging.getLogger(__name__)
 
@@ -99,7 +121,12 @@ _COST_REFRESH_MV = {1: 0.5, 2: 1.5}
 
 @dataclass
 class TagSpec:
-    """Enrollment data and hardware of one simulated tag."""
+    """Enrollment data and hardware of one simulated tag.
+
+    A v2 tag (``protocol=2``) carries its factory ``keys`` (identity key and label
+    secret) instead of an enrollment secret (``secret`` is empty) and its
+    ``tag_id`` is ``keys.short_id``.
+    """
 
     tag_id: int
     secret: bytes
@@ -114,9 +141,16 @@ class TagSpec:
     battery_mv: float = 3000.0
     refresh_ms: int = 0  # 0 = panel default
     sleep_supported: bool = False
+    protocol: int = 1
+    keys: DeviceKeys | None = None  # v2: identity key and label secret
 
     def __post_init__(self) -> None:
-        if len(self.secret) != TAG_SECRET_LEN:
+        if self.protocol >= 2:
+            if self.keys is None or self.keys.role != NodeRole.TAG:
+                raise ValueError("a v2 tag needs its factory DeviceKeys (role TAG)")
+            if self.tag_id != self.keys.short_id:
+                raise ValueError("a v2 tag's tag_id is its short_id")
+        elif len(self.secret) != TAG_SECRET_LEN:
             raise ValueError("tag secret must be 32 bytes")
         profile = PANEL_PROFILES.get(Panel(self.panel)) if self.panel in Panel else None
         if profile is None and (not self.width or not self.height or not self.planes or self.plane_flags < 0):
@@ -129,8 +163,12 @@ class TagSpec:
         self.refresh_ms = self.refresh_ms or REFRESH_MS.get(self.panel, 4000)
 
     @classmethod
-    def generate(cls, seed: int, index: int, **overrides: Any) -> TagSpec:
-        """A reproducible tag: id and secret drawn from ``(seed, index)``."""
+    def generate(cls, seed: int, index: int, protocol: int = 1, **overrides: Any) -> TagSpec:
+        """A reproducible tag: id and secret (v2: identity key and label secret) drawn from ``(seed, index)``."""
+        if protocol >= 2:
+            keys = generate_keys(seed, NodeRole.TAG, index, board=int(overrides.get("board", Board.NRF52DK_TAG)))
+            overrides.setdefault("fw", keys.fw)
+            return cls(tag_id=keys.short_id, secret=b"", protocol=protocol, keys=keys, **overrides)
         rng = rng_stream(seed, "tag-spec", index)
         return cls(tag_id=rng.randint(1, 0xFFFFFFFE), secret=rng.randbytes(TAG_SECRET_LEN), **overrides)
 
@@ -209,7 +247,8 @@ class SimTag:
     """One simulated tag (see the module docstring)."""
 
     def __init__(self, spec: TagSpec, clock: SimClock, air: Air, rng: random.Random, *,
-                 nvs: TagNvs | None = None, faults: TagFaults | None = None) -> None:
+                 nvs: TagNvs | None = None, faults: TagFaults | None = None,
+                 secure: SecureDevice | None = None) -> None:
         self.spec = spec
         self.tag_id = spec.tag_id
         self.clock = clock
@@ -229,6 +268,14 @@ class SimTag:
         self._auth_failures = 0
         self._skip_windows = 0
         self._tasks = TaskSet(f"tag {spec.tag_id:08X}")
+        # Protocol v2: the reference secure endpoint behind IDENT / PAIR (ownership record in NVS id 5).
+        if secure is None and spec.protocol >= 2:
+            assert spec.keys is not None
+            secure = SecureDevice(spec.keys)
+        self.secure = secure
+        self.pairing: PairEndpoint | None = PairEndpoint(LinkSessions(secure)) if secure is not None else None
+        self._ident: tuple[GattLink | None, bytes] | None = None  # this connection's IDENT value
+        self.on_state_change: list[Any] = []  # callables(): the simulator saves its state file
         self._boot()
 
     # -- state ---------------------------------------------------------------------
@@ -247,6 +294,30 @@ class SimTag:
         if recovery.persist:
             self.nvs.record = recovery.record
             self.stats["recovered_unknown"] += 1
+        if self.pairing is not None:  # RAM: the pairing session and the challenge
+            self.pairing.sessions.clear()
+            self._ident = None
+
+    @property
+    def owned(self) -> bool:
+        return self.secure is not None and self.secure.record.state == OwnerState.OWNED
+
+    def _changed(self) -> None:
+        for callback in self.on_state_change:
+            callback()
+
+    def state(self) -> dict[str, Any]:
+        """What the tag keeps across a restart (the state file): NVS, and for v2 its identity and owner record."""
+        out = self.nvs.to_json()
+        if self.secure is not None:
+            out["v2"] = device_state(self.secure)
+        return out
+
+    def load_state(self, data: dict[str, Any]) -> None:
+        self.nvs = TagNvs.from_json(data)
+        if self.secure is not None:
+            load_device_state(self.secure, data.get("v2"))
+        self._boot()
 
     def advert(self) -> Advert:
         flags = 0
@@ -257,6 +328,9 @@ class SimTag:
         if self.unknown_pending:
             flags |= ADV_FLAG_UNKNOWN_STATE
         revision = self.nvs.record.revision if self.nvs.record else 0
+        if self.secure is not None:  # v2 (connect-setup.md 7.1): ver 2, setup (pairing possible) or owned
+            flags |= ADV_FLAG_OWNED if self.owned else ADV_FLAG_SETUP
+            return Advert(self.tag_id, flags, revision & 0xFFFF, ADV_VERSION_V2)
         return Advert(self.tag_id, flags, revision & 0xFFFF)
 
     def _drain(self, mv: float) -> None:
@@ -276,6 +350,11 @@ class SimTag:
     def read_characteristic(self, chr: GattChr) -> bytes:
         if chr == GattChr.CAPS:
             return self.spec.caps().pack()
+        if chr == GattChr.IDENT and self.pairing is not None:
+            # connect-setup.md 7.2: the ident2 struct, with a challenge drawn once per connection.
+            if self._ident is None or self._ident[0] is not self._link:
+                self._ident = (self._link, self.pairing.ident())
+            return self._ident[1]
         raise ValueError(f"characteristic {chr!r} is not readable")
 
     # -- lifecycle -------------------------------------------------------------------
@@ -347,6 +426,8 @@ class SimTag:
         finally:
             if session.frame is not None:
                 self.stats["frames_aborted"] += 1  # abort_frame(): the panel never refreshes
+            if self.pairing is not None:
+                self.pairing.drop()  # a pairing session never outlives its connection
             link.disconnect("tag ended the session")
             self._link = None
 
@@ -368,6 +449,9 @@ class _TagSession:
         self.sender: crypto.RecordSender | None = None
         self.granted = 0  # DATA credits the bridge still holds
         self.frame: _Frame | None = None
+        self.pairing = False  # v2: this connection is a pairing session (PAIR), never a frame session too
+        self.pair_rx = Reassembler(PAIR_MSG_MAX)
+        self.pair_tx = Fragmenter(PAIR_MSG_MAX)
 
     @property
     def epoch(self) -> int:
@@ -383,19 +467,56 @@ class _TagSession:
                 self.tag.stats["session_timeouts"] += 1
                 raise _EndSession from None
             try:
-                if chr_ == GattChr.CTRL:
+                if chr_ == GattChr.CTRL and not self.pairing:
                     message = self.ctrl_rx.feed(value)
                     if message is not None:
                         await self.on_ctrl(message)
-                elif chr_ == GattChr.DATA:
+                elif chr_ == GattChr.DATA and not self.pairing:
                     record = self.data_rx.feed(value)
                     if record is not None:
                         await self.on_record(record)
+                elif chr_ == GattChr.PAIR and self.tag.pairing is not None and self.hello is None:
+                    self.pairing = True  # the record buffers now serve the pairing session
+                    message = self.pair_rx.feed(value)
+                    if message is not None:
+                        self.on_pair(message)
                 else:
                     raise FragmentError(f"write to {chr_!r}")
             except FragmentError:
                 self.tag.stats["fragment_errors"] += 1
                 raise _EndSession from None
+
+    # -- pairing (v2) -----------------------------------------------------------------
+
+    def on_pair(self, message: bytes) -> None:
+        """One ``kind | body`` message on PAIR: the reference secure endpoint answers (connect-setup.md 7.2)."""
+        tag = self.tag
+        endpoint, device = tag.pairing, tag.secure
+        assert endpoint is not None and device is not None
+        tag.stats["pair_messages"] += 1
+        result = endpoint.receive(message)
+        if result.record_changed:
+            tag._changed()  # NVS id 5 is written before the answer leaves
+        replies, end = list(result.replies), result.closed
+        outcome = result.outcome
+        if outcome is not None:
+            tag.stats[f"pair_{outcome.status.name.lower()}"] += 1
+            if outcome.rekeyed:
+                tag.stats["rekeyed"] += 1
+            if outcome.released:
+                tag.stats["released"] += 1
+            if outcome.status == Status.PROOF_FAILED and device.pairing_paused():
+                # Three wrong proofs in a row: end the session and skip the next wake window (connect-setup.md 3.3).
+                device.failures = 0
+                tag._skip_windows += 1
+                tag.stats["pairing_paused"] += 1
+                replies.append(pair_message(PairKind.CLOSE, bytes([Status.LOCKED])))
+                end = True
+        for reply in replies:
+            for value in self.pair_tx.split(reply):
+                self.link.notify(GattChr.PAIR, value)
+        if end:
+            raise _EndSession
 
     # -- sending -------------------------------------------------------------------
 
@@ -458,10 +579,17 @@ class _TagSession:
                     auth = CtrlAuth.unpack(body)
                 except MessageError:
                     self.error(Status.AUTH_FAILED)  # a malformed AUTH is AUTH_FAILED (§5.4)
-                k_epoch = crypto.derive_k_epoch(tag.spec.secret, tag.tag_id, self.epoch)
+                if tag.secure is not None:
+                    # v2 (connect-setup.md 3.5): K_epoch from the operational root; none before a worker paired
+                    # the tag (and none after a release), so every bridge fails to authenticate.
+                    root_key = tag.secure.k_epoch(tag.tag_id, self.epoch)
+                    k_epoch = root_key if root_key is not None else bytes(16)
+                    has_key = root_key is not None
+                else:
+                    k_epoch, has_key = crypto.derive_k_epoch(tag.spec.secret, tag.tag_id, self.epoch), True
                 th = crypto.transcript_hash(tag.spec.caps().pack(), self.hello_msg,
                                             self.challenge_msg)  # the CAPS bytes it serves (§5.4)
-                ok = crypto.constant_time_equal(crypto.mac_b(k_epoch, th), auth.mac_b)
+                ok = has_key and crypto.constant_time_equal(crypto.mac_b(k_epoch, th), auth.mac_b)
                 if tag.faults.auth_fail > 0:
                     tag.faults.auth_fail -= 1
                     ok = False

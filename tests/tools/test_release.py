@@ -211,7 +211,11 @@ def test_main_packages_a_trial_release(tmp_path: Path, monkeypatch, capsys):
     assert manifest["ncs"]["sdk_nrf_commit"] == build.NCS_SDK_NRF_COMMIT
     assert [f["target"] for f in manifest["firmware"]] == ["tag-laowu-bw"]
     assert manifest["fonts"] is None and manifest["companion"] is None
-    assert manifest["protocol"]["spec"] == "protocol/spec.yaml" and manifest["protocol"]["protocol_version"] == 1
+    import yaml
+
+    spec_version = yaml.safe_load((REPO_ROOT / "protocol" / "spec.yaml").read_text(encoding="utf-8"))["spec_version"]
+    assert manifest["protocol"]["spec"] == "protocol/spec.yaml"
+    assert manifest["protocol"]["protocol_version"] == spec_version == 2
     reasons = {e["target"]: e["reason"] for e in manifest["excluded_targets"]}
     assert reasons["tag-laowu-bwr"] == "not selected (--targets)" and "tag-sifei-52810" in reasons
     assert release.verify_sha256sums(dist) == []

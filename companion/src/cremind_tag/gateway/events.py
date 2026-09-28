@@ -179,6 +179,31 @@ class TagSeen(GatewayEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TunnelEvent(GatewayEvent):
+    """v2 ``EVT_TUNNEL`` (docs/connect-setup.md §5.2): the endpoint answered (``OPEN``, ``data`` = its
+    ``ident2``), one reassembled message from it (``DATA``), or the tunnel ``CLOSED`` (``status`` says why)."""
+
+    TYPE: ClassVar[SerialMsg] = SerialMsg.EVT_TUNNEL
+    tunnel: int
+    bridge: int
+    tag_id: int
+    state: int
+    data: bytes | None = None
+    status: Status | int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Discovered(GatewayEvent):
+    """v2 ``EVT_DISCOVERED``: a tag in setup mode heard by a bridge (a candidate, never inventory)."""
+
+    TYPE: ClassVar[SerialMsg] = SerialMsg.EVT_DISCOVERED
+    bridge: int
+    tag_id: int
+    rssi: int
+    flags: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class UnknownEvent(GatewayEvent):
     """An event type this build does not know (forward compatibility)."""
 
@@ -247,4 +272,11 @@ def parse_event(type_code: int, payload: bytes, boot_id: int | None) -> GatewayE
         case SerialMsg.EVT_TAG_SEEN:
             return TagSeen(**common, bridge=f["bridge"], tag_id=f["tag_id"], rssi=f["rssi"],
                            battery_mv=f["battery_mv"], flags=f["flags"])
+        case SerialMsg.EVT_TUNNEL:
+            data = f.get("data")
+            return TunnelEvent(**common, tunnel=f["tunnel"], bridge=f["bridge"], tag_id=f["tag_id"], state=f["state"],
+                               data=bytes(data) if data is not None else None,
+                               status=to_status(f["status"]) if f.get("status") is not None else None)
+        case SerialMsg.EVT_DISCOVERED:
+            return Discovered(**common, bridge=f["bridge"], tag_id=f["tag_id"], rssi=f["rssi"], flags=f["flags"])
     return UnknownEvent(boot_id=boot_id, raw=f, type_code=type_code)  # pragma: no cover - EVENTS covers all

@@ -11,6 +11,14 @@ Programmatic use (tests, the daemon's integration tests)::
 
 :class:`SimulatorThread` runs the same thing on its own event loop in a
 background thread, for callers whose loop must stay free of simulator work.
+
+Protocol v2 (docs/simulator.md "Protocol v2"): ``SimConfig.protocol = 2`` makes
+the gateway a v2 gateway and every bridge whose ``BridgeSpec.protocol`` is left
+``None`` a v2 bridge; a tag is v2 when its ``TagSpec`` is
+(``TagSpec.generate(seed, i, protocol=2)``). v2 devices start as they leave the
+factory: unowned, identity keys and label secrets drawn from the seed
+(:meth:`Simulator.setup_codes` gives their labels); the state file keeps their
+identity and ownership record.
 """
 
 from __future__ import annotations
@@ -26,15 +34,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..protocol.ids import Board
+from ..protocol.ids import Board, NodeRole
 from ..protocol.session import derive_k_epoch
+from ..secure import identity
+from ..secure.device import SecureDevice
 from .bridge import Assignment, BridgeFaults, SimBridge
 from .core import SimClock, acquire_timer_resolution, release_timer_resolution, rng_stream
 from .flash import MIB
 from .gateway import CdbNode, SimGateway
 from .mesh import MeshFaults, MeshNetwork, MeshTiming
 from .radio import Air, AirFaults
-from .tag import SimTag, TagFaults, TagNvs, TagSpec
+from .tag import SimTag, TagFaults, TagSpec
+from .v2 import generate_keys, new_secure_device, setup_payload
 
 log = logging.getLogger(__name__)
 
@@ -54,11 +65,14 @@ class BridgeSpec:
     max_tags: int | None = None  # assignment table size (CAPS max_tags); None: MAX_TAGS_PER_BRIDGE
     sessions: int | None = None  # tag sessions at once (§5.2); None: the board's (CONFIG_CTAG_BRIDGE_SESSIONS)
     quick_retry: bool | None = None  # one retry within the tag's window after CONNECT_FAILED; None: the default
+    protocol: int | None = None  # 1 or 2; None: SimConfig.protocol
+    labelled: bool = True  # v2: left the factory with a setup secret (False: FACTORY_SETUP stores one)
 
 
 @dataclass
 class Assign:
-    """A pre-seeded assignment: the simulator derives ``K_epoch`` from the tag's secret."""
+    """A pre-seeded assignment: the simulator derives ``K_epoch`` from the tag's secret (v1 tags only: a v2 tag
+    is paired by a worker before anything can be assigned to it)."""
 
     tag_id: int
     bridge: int  # index into ``SimConfig.bridges``
@@ -90,6 +104,7 @@ class SimConfig:
     processing_delay_s: float = 0.0
     mesh_timing: MeshTiming = field(default_factory=MeshTiming)
     state_file: Path | None = None
+    protocol: int = 1  # 2: a v2 gateway and (by default) v2 bridges (docs/connect-setup.md)
 
 
 class FaultSpecError(ValueError):
@@ -169,19 +184,34 @@ class Simulator:
         for index, spec in enumerate(config.bridges):
             rng = rng_stream(seed, "bridge", index)
             policy: dict[str, Any] = {} if spec.quick_retry is None else {"quick_retry": spec.quick_retry}
-            bridge = SimBridge(spec.name or f"bridge-{index + 1}", uuid=rng.randbytes(16), clock=self.clock,
+            uuid = rng.randbytes(16)
+            secure: SecureDevice | None = None
+            if (spec.protocol or config.protocol) >= 2:
+                keys = generate_keys(seed, NodeRole.BRIDGE, index, board=Board.NRF52840_BRIDGE,
+                                     labelled=spec.labelled)
+                secure = new_secure_device(keys, seed, ("bridge", index))
+            bridge = SimBridge(spec.name or f"bridge-{index + 1}", uuid=uuid, clock=self.clock,
                                mesh=self.mesh, air=self.air, rng=rng, flash_size=spec.flash_size,
                                board=Board.NRF52840_BRIDGE, faults=config.faults.bridge, bad_sectors=spec.bad_sectors,
-                               max_tags=spec.max_tags, sessions=spec.sessions, **policy)
+                               max_tags=spec.max_tags, sessions=spec.sessions, secure=secure, **policy)
             self.bridges.append(bridge)
+        gateway_secure: SecureDevice | None = None
+        if config.protocol >= 2:
+            keys = generate_keys(seed, NodeRole.GATEWAY, "gateway", board=Board.NRF52840DK_GATEWAY)
+            gateway_secure = new_secure_device(keys, seed, "gateway")
         self.gateway = SimGateway(clock=self.clock, mesh=self.mesh, rng=rng_stream(seed, "gateway"),
                                   bridges=self.bridges, delivery_queue=config.delivery_queue,
-                                  rx_buffers=config.rx_buffers, processing_delay_s=config.processing_delay_s)
+                                  rx_buffers=config.rx_buffers, processing_delay_s=config.processing_delay_s,
+                                  secure=gateway_secure)
         self.tags: dict[int, SimTag] = {}
         for tag_spec in config.tags:
             rng = rng_stream(seed, "tag", tag_spec.tag_id)
+            tag_secure = None
+            if tag_spec.protocol >= 2:
+                assert tag_spec.keys is not None
+                tag_secure = new_secure_device(tag_spec.keys, seed, ("tag", tag_spec.tag_id))
             self.tags[tag_spec.tag_id] = SimTag(tag_spec, self.clock, self.air, rng,
-                                                faults=config.faults.tags.get(tag_spec.tag_id))
+                                                faults=config.faults.tags.get(tag_spec.tag_id), secure=tag_secure)
         self._started = False
 
     # -- accessors ----------------------------------------------------------------------
@@ -223,6 +253,8 @@ class Simulator:
             bridge = self.bridges[assign.bridge]
             if bridge.addr is None:
                 raise ValueError(f"assignment to unprovisioned bridge {assign.bridge}")
+            if tag.secure is not None:
+                raise ValueError(f"tag {tag.tag_id:08X} is a v2 tag: a worker pairs it before it can be assigned")
             key = derive_k_epoch(tag.spec.secret, tag.tag_id, assign.epoch)
             bridge.assignments[tag.tag_id] = Assignment(tag.tag_id, assign.epoch, key, 1)
             self.gateway.assigned.setdefault(bridge.addr, {})[tag.tag_id] = assign.epoch
@@ -236,6 +268,10 @@ class Simulator:
             self.load_state(self.config.state_file)
         self._setup_network()
         self.gateway.on_state_change.append(self.save_state)
+        for device in (*self.bridges, *self.tags.values()):
+            device.on_state_change.append(self.save_state)  # v2 ownership records, FACTORY_SETUP secrets
+        if self.v2_devices():
+            self.save_state()  # the labels (setup codes) are in the state file from the start
         await self.gateway.start(self.config.host, self.config.gateway_port)
         for index, (spec, bridge) in enumerate(zip(self.config.bridges, self.bridges, strict=True)):
             bridge.start()
@@ -268,10 +304,48 @@ class Simulator:
 
     # -- state file ---------------------------------------------------------------------------
 
+    # -- protocol v2 --------------------------------------------------------------------------
+
+    def v2_devices(self) -> bool:
+        return self.gateway.v2 or any(b.v2 for b in self.bridges) or any(t.secure for t in self.tags.values())
+
+    def setup_codes(self) -> list[dict[str, Any]]:
+        """The labels of the v2 bridges and tags: what a person scans or types to pair them.
+
+        Each entry: ``role``, ``name``, ``device_id`` (hex), ``short_id``, and the
+        setup ``code`` and ``qr`` text of the secret the device pairs with *now*
+        (the label's, or the fresh one a release or recommission armed); both are
+        ``None`` for a bridge that still waits for ``FACTORY_SETUP``. Setup codes
+        are pairing credentials: the simulator prints them because they stand for
+        the printed labels.
+        """
+        out: list[dict[str, Any]] = []
+        devices: list[tuple[str, str, SecureDevice]] = [
+            ("bridge", b.name, b.secure) for b in self.bridges if b.secure is not None]
+        devices += [("tag", f"{t.tag_id:08X}", t.secure) for t in self.tags.values() if t.secure is not None]
+        for role, name, device in devices:
+            payload = setup_payload(device)
+            out.append({"role": role, "name": name, "device_id": identity.device_id_text(device.device_id),
+                        "short_id": f"{device.keys.short_id:08X}", "owner_state": int(device.record.state),
+                        "code": payload.code() if payload else None, "qr": payload.qr_text() if payload else None})
+        return out
+
+    def gateway_identity(self) -> dict[str, Any] | None:
+        secure = self.gateway.secure
+        if secure is None:
+            return None
+        return {"device_id": identity.device_id_text(secure.device_id), "owner_state": int(secure.record.state),
+                "gen": secure.record.gen}
+
+    # -- state file ---------------------------------------------------------------------------
+
     def state(self) -> dict[str, Any]:
-        return {"version": STATE_VERSION, "seed": self.config.seed, "gateway": self.gateway.state(),
-                "bridges": [b.state() for b in self.bridges],
-                "tags": {f"{t.tag_id:08X}": t.nvs.to_json() for t in self.tags.values()}}
+        out = {"version": STATE_VERSION, "seed": self.config.seed, "gateway": self.gateway.state(),
+               "bridges": [b.state() for b in self.bridges],
+               "tags": {f"{t.tag_id:08X}": t.state() for t in self.tags.values()}}
+        if self.v2_devices():
+            out["setup_codes"] = self.setup_codes()  # informational: the labels; never read back
+        return out
 
     def save_state(self, path: Path | None = None) -> None:
         path = path or self.config.state_file
@@ -295,8 +369,7 @@ class Simulator:
         for key, nvs in data.get("tags", {}).items():
             tag = self.tags.get(int(key, 16))
             if tag is not None:
-                tag.nvs = TagNvs.from_json(nvs)
-                tag._boot()
+                tag.load_state(nvs)
 
 
 class SimulatorThread:

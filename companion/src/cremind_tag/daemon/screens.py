@@ -88,6 +88,16 @@ def panel_for(inp: ComposeInput) -> TagPanel:
                     name=inp.view.name or inp.tag.name)
 
 
+SETUP_OVERRIDE = "setup:"
+"""``tag_views.override`` of a removed tag's last screen: ``setup:<CTAG: QR text>`` (docs/connect-setup.md §5.1)."""
+
+
+def _grouped_code(qr_text: str) -> str:
+    from ..secure.codes import parse_code
+
+    return parse_code(qr_text).code()
+
+
 def content_key(purpose: str, panel: TagPanel, settings: ScreenSettings, cards: list[ActiveCard],
                 pack_id: str) -> str:
     """Digest of everything a screen is composed from, except the clock (a screen is not re-sent only
@@ -193,19 +203,23 @@ class ScreenScheduler:
         panel = panel_for(inp)
         settings = screen_settings(inp.settings)
         cards = [ActiveCard(j.delivery_id, j.kind, j.priority, j.created_dt, j.card) for j in inp.cards]
+        setup_qr = view.override[len(SETUP_OVERRIDE):] if (view.override or "").startswith(SETUP_OVERRIDE) else None
         if view.override == "identify":
             purpose = "identify"
+        elif setup_qr is not None:
+            purpose = "setup_code"
         elif not cards and view.blank:
             purpose = "blank"
         else:
             purpose = "refresh" if view.force and inp.current is not None else "screen"
         pack_hex = svc.fonts.pack_id.hex()
-        key = content_key("identify" if purpose == "identify" else "screen", panel, settings,
+        key = content_key(view.override if purpose == "setup_code" else  # type: ignore[arg-type]
+                          "identify" if purpose == "identify" else "screen", panel, settings,
                           cards if purpose in ("screen", "refresh") else [], pack_hex)
         if purpose == "blank":
             key = content_key("blank", panel, settings, [], pack_hex)
         current = inp.current
-        if current is None and not cards and not inp.carry and not view.force and purpose != "identify":
+        if current is None and not cards and not inp.carry and not view.force                 and purpose not in ("identify", "setup_code"):
             # Nothing to show and nothing shown from this database yet (a fresh start, or white after
             # clear_tag): leave the tag as it is rather than pushing an empty screen over it.
             await svc.db.run(store.clear_dirty, tag_id, view.dirty_gen)
@@ -215,7 +229,7 @@ class ScreenScheduler:
             svc.wake_outbox()
             return None
 
-        screen, png = await self._compose(purpose, panel, cards, settings)
+        screen, png = await self._compose(purpose, panel, cards, settings, setup_qr)
         digest = layout_digest(screen.layout).hex()
         if not view.force and current is not None and current.layout_digest == digest:
             await svc.db.run(store.attach_to_current, tag_id, current, inp.carry, view.dirty_gen, key)
@@ -238,16 +252,20 @@ class ScreenScheduler:
         return None
 
     async def _compose(self, purpose: str, panel: TagPanel, cards: list[ActiveCard],
-                       settings: ScreenSettings) -> tuple[ComposedScreen, bytes | None]:
-        """Compose + render the preview in a worker thread (CPU work, one at a time)."""
+                       settings: ScreenSettings, setup_qr: str | None = None) -> tuple[ComposedScreen, bytes | None]:
+        """Compose + render the preview in a worker thread (CPU work, one at a time). A setup-code screen
+        gets no preview: its code is for whoever holds the tag, not for Cremind's page."""
         fonts = self.svc.fonts
         assert fonts is not None
         now = dt.datetime.fromtimestamp(self.svc.clock(), tz=dt.UTC)
 
         def work() -> tuple[ComposedScreen, bytes | None]:
             from ..compose.preview import PreviewTooLarge, preview_png
-            from ..compose.screen import compose_blank, compose_identify, compose_screen
+            from ..compose.screen import compose_blank, compose_identify, compose_screen, compose_setup_code
 
+            if purpose == "setup_code":
+                assert setup_qr is not None
+                return compose_setup_code(panel, fonts, _grouped_code(setup_qr), setup_qr), None
             if purpose == "identify":
                 screen = compose_identify(panel, fonts, panel.tag_id)
             elif purpose == "blank":
@@ -291,7 +309,7 @@ class ScreenScheduler:
             reason = "not assigned to a bridge yet"
         elif view is not None and view.epoch > tag.epoch:
             reason = f"waiting for assign_tag (Cremind epoch {view.epoch}, assigned {tag.epoch})"
-        elif view is not None and view.clear_required and rev.purpose != "identify":
+        elif view is not None and view.clear_required and rev.purpose not in ("identify", "setup_code"):
             reason = "waiting for clear_tag"
         if reason is not None:
             self.holds[rev.tag_id] = reason

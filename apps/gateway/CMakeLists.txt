@@ -16,4 +16,10 @@ target_sources(app PRIVATE
   src/core/gw_delivery.c
   src/core/gw_nodes.c
   src/core/gw_ring.c)
+# Protocol v2 (docs/connect-setup.md): secure sessions, ownership, tunnels,
+# and the physical factory reset.
+target_sources_ifdef(CONFIG_CTAG_GW_SECURE app PRIVATE
+  src/reset.c
+  src/core/gw_secure.c
+  src/core/gw_tunnel.c)
 target_include_directories(app PRIVATE src src/core)

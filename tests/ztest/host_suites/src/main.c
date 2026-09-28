@@ -212,11 +212,76 @@ ZTEST(ctag_host_suites, test_fuzz_streams)
 	test_fuzz_streams();
 }
 
+ZTEST(ctag_host_suites, test_v2_identities)
+{
+	test_v2_identities();
+}
+
+ZTEST(ctag_host_suites, test_v2_key_schedule)
+{
+	test_v2_key_schedule();
+}
+
+ZTEST(ctag_host_suites, test_v2_grant_cases)
+{
+	test_v2_grant_cases();
+}
+
+ZTEST(ctag_host_suites, test_v2_grant_strict)
+{
+	test_v2_grant_strict();
+}
+
+ZTEST(ctag_host_suites, test_v2_conversation)
+{
+	test_v2_conversation();
+}
+
+ZTEST(ctag_host_suites, test_v2_handshake_errors)
+{
+	test_v2_handshake_errors();
+}
+
+ZTEST(ctag_host_suites, test_v2_gateway_flows)
+{
+	test_v2_gateway_flows();
+}
+
+ZTEST(ctag_host_suites, test_v2_claim_rules)
+{
+	test_v2_claim_rules();
+}
+
+ZTEST(ctag_host_suites, test_v2_tag_flows)
+{
+	test_v2_tag_flows();
+}
+
+ZTEST(ctag_host_suites, test_v2_bridge_flows)
+{
+	test_v2_bridge_flows();
+}
+
+ZTEST(ctag_host_suites, test_v2_record)
+{
+	test_v2_record();
+}
+
+ZTEST(ctag_host_suites, test_v2_tunnel_fragments)
+{
+	test_v2_tunnel_fragments();
+}
+
+ZTEST(ctag_host_suites, test_v2_heap_failures)
+{
+	test_v2_heap_failures();
+}
+
 #define CTAG_COUNT_TEST(name) +1
 
 ZTEST(ctag_host_suites, test_suites_listed)
 {
-	zassert_equal(0 CTAG_HOST_TESTS(CTAG_COUNT_TEST), 41);
+	zassert_equal(0 CTAG_HOST_TESTS(CTAG_COUNT_TEST), 54);
 }
 
 ZTEST_SUITE(ctag_host_suites, NULL, NULL, NULL, NULL, NULL);

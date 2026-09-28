@@ -543,6 +543,44 @@ def compose_identify(panel: TagPanel, fonts: FontSet, tag_id: int | str | None =
     raise RuntimeError("the identify screen does not fit the layout limits")
 
 
+def compose_setup_code(panel: TagPanel, fonts: FontSet, code: str, qr_text: str) -> ComposedScreen:
+    """A removed tag's last screen (docs/connect-setup.md §5.1 ``RELEASE``): the fresh setup code as a QR
+    and in text, so the next owner can add the tag (the printed label no longer works).
+
+    ``qr_text`` is the ``CTAG:`` QR text, ``code`` the grouped code a person types.
+    """
+    for hint_lines in (2, 1, 0):
+        s = _Screen(panel, fonts, ScreenSettings())
+        title = s.chrome("Set this tag up again with:", s.content_width, 24, align="center")
+        text = s.chrome(code, s.content_width, 24 if s.width >= 300 else 16, align="center")
+        hint = s.block("Cremind: Settings > Tags > Add tag", s.content_width, SMALL, language="",
+                       align="center", max_lines=hint_lines) if hint_lines else None
+        fixed = title.height + GAP + GAP + text.height + ((GAP + hint.height) if hint else 0)
+        try:
+            modules = qr_code(qr_text.encode("ascii"), int(QrEcc.LOW)).get_size()
+        except LayoutError as exc:
+            raise ValueError(f"the setup code does not fit a QR code: {exc}") from None
+        module = next((m for m in (6, 5, 4, 3, 2) if (modules + 2 * QR_QUIET) * m <= min(
+            s.content_width, s.height - 2 * s.margin - fixed)), 0)
+        if not module:
+            continue
+        side = (modules + 2 * QR_QUIET) * module
+        y = max(s.margin, (s.height - fixed - side) // 2)
+        try:
+            s.draw_text(title, s.margin, y)
+            y += title.height + GAP
+            s.add([Qr((s.width - side) // 2 + QR_QUIET * module, y + QR_QUIET * module, module, int(QrEcc.LOW),
+                      Color.BLACK, qr_text.encode("ascii"))])
+            y += side + GAP
+            s.draw_text(text, s.margin, y)
+            if hint:
+                s.draw_text(hint, s.margin, y + text.height + GAP)
+            return ComposedScreen(_finish(s), (), 0, tuple(s.unsupported))
+        except _Budget:
+            continue
+    raise RuntimeError("the setup-code screen does not fit this panel")
+
+
 def compose_blank(panel: TagPanel) -> ComposedScreen:
     """An all-white screen (``clear`` jobs, ownership changes)."""
     w, h = logical_size(panel)

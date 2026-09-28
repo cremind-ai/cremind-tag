@@ -250,6 +250,97 @@
       },
       "params": "4d3c2b1ac3860b05",
       "access": "d9ffff4d3c2b1ac3860b05"
+    },
+    {
+      "name": "TUNNEL_OPEN",
+      "op": 26,
+      "opcode": 14352383,
+      "opcode_hex": "daffff",
+      "fields": {
+        "tunnel": 258,
+        "tag_id": 439041101,
+        "timeout_s": 30
+      },
+      "params": "02014d3c2b1a1e",
+      "access": "daffff02014d3c2b1a1e"
+    },
+    {
+      "name": "TUNNEL_DATA",
+      "op": 27,
+      "opcode": 14417919,
+      "opcode_hex": "dbffff",
+      "fields": {
+        "tunnel": 258,
+        "seq": 0,
+        "flags": 1,
+        "data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627"
+      },
+      "params": "02010001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627",
+      "access": "dbffff02010001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627"
+    },
+    {
+      "name": "TUNNEL_CLOSE",
+      "op": 28,
+      "opcode": 14483455,
+      "opcode_hex": "dcffff",
+      "fields": {
+        "tunnel": 258,
+        "status": 15
+      },
+      "params": "02010f",
+      "access": "dcffff02010f"
+    },
+    {
+      "name": "DISCOVER",
+      "op": 29,
+      "opcode": 14548991,
+      "opcode_hex": "ddffff",
+      "fields": {
+        "duration_s": 60,
+        "tag_id": 0
+      },
+      "params": "3c00000000",
+      "access": "ddffff3c00000000"
+    },
+    {
+      "name": "DISCOVERED",
+      "op": 30,
+      "opcode": 14614527,
+      "opcode_hex": "deffff",
+      "fields": {
+        "tag_id": 439041101,
+        "rssi": -70,
+        "flags": 8
+      },
+      "params": "4d3c2b1aba08",
+      "access": "deffff4d3c2b1aba08"
+    },
+    {
+      "name": "CAPS2_STATUS",
+      "op": 31,
+      "opcode": 14680063,
+      "opcode_hex": "dfffff",
+      "fields": {
+        "device_id": "000102030405060708090a0b0c0d0e0f",
+        "gen": 3,
+        "owner_state": 1
+      },
+      "params": "000102030405060708090a0b0c0d0e0f0300000001",
+      "access": "dfffff000102030405060708090a0b0c0d0e0f0300000001"
+    },
+    {
+      "name": "TUNNEL_UP",
+      "op": 32,
+      "opcode": 14745599,
+      "opcode_hex": "e0ffff",
+      "fields": {
+        "tunnel": 258,
+        "seq": 1,
+        "flags": 2,
+        "data": "000102030405060708090a0b0c0d0e0f10111213"
+      },
+      "params": "02010102000102030405060708090a0b0c0d0e0f10111213",
+      "access": "e0ffff02010102000102030405060708090a0b0c0d0e0f10111213"
     }
   ],
   "errors": [

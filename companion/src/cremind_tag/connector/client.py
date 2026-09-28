@@ -466,6 +466,60 @@ class ConnectorClient:
         body = await self._request("POST", "/previews", json=payload)
         return bool(body.get("stored")) if isinstance(body, Mapping) else False
 
+    # -- v2: private workers (docs/setup-api.md §3), hardware credential -------------
+
+    async def _object(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        body = await self._request(method, path, **kwargs)
+        return dict(body) if isinstance(body, Mapping) else {}
+
+    async def lease(self) -> dict[str, Any]:
+        """Renew the 60 s authorization lease: ``{expires_at, ttl_s, renew_s, state, paused, generation}``."""
+        return await self._object("POST", "/lease", json={})
+
+    async def worker_state(self) -> dict[str, Any]:
+        """``{generation, state, paused, bindings, revoked, operations}`` — reconcile before draining."""
+        return await self._object("GET", "/state")
+
+    async def operation(self, operation_id: str) -> dict[str, Any]:
+        """``{operation: {id, kind, state, stage, args, setup_secret, owner, expires_at}}``."""
+        out = await self._object("GET", f"/operations/{operation_id}")
+        return dict(out.get("operation") or {})
+
+    async def progress(self, operation_id: str, **fields: Any) -> dict[str, Any]:
+        """Report ``stage``/``detail``/``state``/``candidates``/``device``/``devices``/``result``/``error``."""
+        body = {k: v for k, v in fields.items() if v is not None}
+        out = await self._object("POST", f"/operations/{operation_id}/progress", json=body)
+        return dict(out.get("operation") or {})
+
+    async def grant(self, *, operation_id: str, op: str, device_id: bytes, role: str, gen_from: int,
+                    challenge: bytes, ik: bytes | None = None) -> tuple[bytes, bytes, bytes]:
+        """A server-signed grant: ``(grant, sig, authority_pub)``."""
+        body: dict[str, Any] = {"operation_id": operation_id, "op": op, "device_id": device_id.hex(), "role": role,
+                                "gen_from": gen_from, "challenge": challenge.hex()}
+        if ik is not None:
+            body["ik"] = ik.hex()
+        out = await self._object("POST", "/grants", json=body)
+        try:
+            return bytes.fromhex(out["grant"]), bytes.fromhex(out["sig"]), bytes.fromhex(out["authority_pub"])
+        except (KeyError, TypeError, ValueError):
+            raise ConnectorUnavailable("grants: malformed response") from None
+
+    async def vault_put(self, subject: str, state: Mapping[str, Any], *, stage: str, generation: int,
+                        expected_version: int | None) -> int:
+        """Save one version (compare-and-set); :class:`ConnectorConflict` ``version_conflict`` carries
+        the current ``version`` in its body."""
+        out = await self._object("PUT", f"/vault/{subject}", json={
+            "expected_version": expected_version, "stage": stage, "generation": generation, "state": dict(state)})
+        version = out.get("version")
+        if not isinstance(version, int):
+            raise ConnectorUnavailable("vault: malformed response")
+        return version
+
+    async def vault_get(self) -> list[dict[str, Any]]:
+        """The recovery entries (only while a recovery of this worker is open)."""
+        out = await self._object("GET", "/vault")
+        return [dict(e) for e in out.get("entries") or [] if isinstance(e, Mapping)]
+
 
 __all__ = [
     "API_PREFIX", "PERMANENT_ERRORS", "SCHEME", "Backoff", "ConnectorAuthError", "ConnectorClient",

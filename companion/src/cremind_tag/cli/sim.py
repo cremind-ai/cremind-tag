@@ -3,6 +3,11 @@
 The simulator speaks the real serial protocol on TCP: point any client at
 ``socket://127.0.0.1:<port>`` (for example ``CREMIND_TAG_GATEWAY_URL``). See
 docs/simulator.md for what it models and the ``--fault`` syntax.
+
+``--protocol 2`` runs factory-fresh v2 hardware (docs/connect-setup.md): an
+unowned gateway, unprovisioned unowned bridges and unowned tags whose setup
+codes (their labels) are printed and written to the state file, for a Connect
+worker to pair.
 """
 
 from __future__ import annotations
@@ -40,6 +45,9 @@ def run_sim(
     assign: bool = typer.Option(True, "--assign/--no-assign", help="Assign the tags round-robin at epoch 1."),
     register: bool = typer.Option(False, "--register", help="Add the simulated bridges and tags (with their "
                                                             "secrets) to the local inventory, for the CLI/daemon."),
+    protocol: int = typer.Option(1, "--protocol", min=1, max=2,
+                                 help="2: factory-fresh v2 hardware (unowned, unprovisioned, nothing assigned) for "
+                                      "Cremind Connect; the bridges' and tags' setup codes are printed."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Log simulator events."),
 ) -> None:
     """Start the simulator and keep it running until Ctrl-C."""
@@ -72,15 +80,22 @@ def run_sim(
         except FaultSpecError as exc:
             fail(str(exc))
     try:
-        tag_specs = [TagSpec.generate(seed, i, panel=panel_id) for i in range(tags)]
+        tag_specs = [TagSpec.generate(seed, i, panel=panel_id, protocol=protocol) for i in range(tags)]
     except ValueError as exc:
         fail(str(exc))
-    bridge_specs = [BridgeSpec(name=f"bridge-{i + 1}") for i in range(bridges)]
-    bridge_specs += [BridgeSpec(name=f"new-{i + 1}", provisioned=False) for i in range(unprovisioned)]
-    assignments = [Assign(t.tag_id, i % bridges, 1) for i, t in enumerate(tag_specs)] if assign and bridges else []
+    if protocol >= 2:
+        # Factory-fresh v2 hardware: every bridge waits to be provisioned with its static OOB, nothing is assigned
+        # (a worker pairs each device from its setup code).
+        bridge_specs = [BridgeSpec(name=f"bridge-{i + 1}", provisioned=False) for i in range(bridges + unprovisioned)]
+        assignments: list[Assign] = []
+    else:
+        bridge_specs = [BridgeSpec(name=f"bridge-{i + 1}") for i in range(bridges)]
+        bridge_specs += [BridgeSpec(name=f"new-{i + 1}", provisioned=False) for i in range(unprovisioned)]
+        assignments = [Assign(t.tag_id, i % bridges, 1) for i, t in enumerate(tag_specs)] if assign and bridges else []
     sim_config = SimConfig(seed=seed, time_scale=time_scale, host=host, gateway_port=port,
                            maintenance_port_base=maint_port_base or port + 1, bridges=bridge_specs, tags=tag_specs,
-                           assignments=assignments, fontpack=pack_bytes, faults=faults, state_file=state)
+                           assignments=assignments, fontpack=pack_bytes, faults=faults, state_file=state,
+                           protocol=protocol)
 
     async def main() -> None:
         sim = Simulator(sim_config)
@@ -108,6 +123,10 @@ def _describe(sim: object) -> None:
 
     assert isinstance(sim, Simulator)
     console.print(f"gateway: [bold]{sim.gateway_url}[/bold]  (e.g. CREMIND_TAG_GATEWAY_URL={sim.gateway_url})")
+    gateway = sim.gateway_identity()
+    if gateway is not None:
+        owner = ("unowned", "owned", "released")[gateway["owner_state"]]
+        console.print(f"gateway (protocol v2): device_id {gateway['device_id']}, {owner}, generation {gateway['gen']}")
     t = table("Bridges", "#", "Mesh addr", "UUID", "Maintenance port", "Font pack")
     for index, bridge in enumerate(sim.bridges):
         pack = bridge.fontpack_id
@@ -122,25 +141,44 @@ def _describe(sim: object) -> None:
         t.add_row(f"{tag.tag_id:08X}", panel_name(tag.spec.panel),
                   f"{tag.spec.width}x{tag.spec.height}x{tag.spec.planes}", where)
     console.print(t)
+    codes = sim.setup_codes()
+    if codes:
+        # The labels of the v2 devices: pairing credentials, printed because they stand for the printed labels.
+        # One unwrapped line each, so a code copies in one piece.
+        console.print("[bold]Setup codes[/bold] (the labels: type the code or scan the QR text to pair)")
+        for entry in codes:
+            code = entry["code"] or "(no setup secret yet: FACTORY_SETUP)"
+            console.print(f"  {entry['role']:<6} {entry['name']:<10} device_id {entry['device_id']}  {code}  "
+                          f"{entry['qr'] or ''}", soft_wrap=True, highlight=False)
+        if sim.config.state_file is not None:
+            console.print(f"setup codes also in {sim.config.state_file} (\"setup_codes\")", soft_wrap=True)
     console.print(f"time scale {sim.config.time_scale:g}; Ctrl-C to stop")
 
 
 def _register(sim: object) -> None:
-    """Record the simulated hardware as if it had been provisioned and enrolled from this PC."""
+    """Record the simulated v1 hardware as if it had been provisioned and enrolled from this PC.
+
+    v2 devices are skipped: they are paired by a Connect worker, never enrolled, so no v2 tag secret (there is
+    none: a v2 tag pairs with its setup code) and no v2 gateway or bridge goes into the v1 inventory."""
     from cremind_tag.cli._hardware import gateway_hw_id
     from cremind_tag.protocol.ids import Board
     from cremind_tag.sim import Simulator
     from cremind_tag.store import BridgeRecord, GatewayRecord, TagRecord
 
     assert isinstance(sim, Simulator)
+    if sim.gateway.v2:
+        err_console.print("[yellow]--register: a protocol v2 gateway is paired through Cremind Connect, not "
+                          "registered; nothing was added to the inventory[/yellow]")
+        return
     config = load()
     secrets = open_secrets(config)
     url = sim.gateway_url
+    registered = 0
     with open_db(config) as db:
         db.upsert_gateway(GatewayRecord(gateway_hw_id(url), port=url, boot_id=sim.gateway.boot_id, fw="0.1.0",
                                         build="sim", board=Board.NRF52840DK_GATEWAY))
         for bridge in sim.bridges:
-            if bridge.addr is None:
+            if bridge.addr is None or bridge.v2:
                 continue
             pack = bridge.fontpack_id
             db.upsert_bridge(BridgeRecord(bridge.uuid.hex(), addr=bridge.addr, name=bridge.name,
@@ -149,6 +187,8 @@ def _register(sim: object) -> None:
                                           gateway_hw_id=gateway_hw_id(url)))
         assigned = {a.tag_id: a for a in sim.config.assignments}
         for index, tag in enumerate(sim.tags.values()):
+            if tag.secure is not None:
+                continue  # a v2 tag: paired, never enrolled
             if db.tag_exists(tag.tag_id):
                 err_console.print(f"[yellow]tag {tag.tag_id:08X} already in the inventory: skipped[/yellow]")
                 continue
@@ -159,4 +199,5 @@ def _register(sim: object) -> None:
                                     spec.plane_flags, ref, name=f"sim-{index + 1}", fw="0.1.0",
                                     epoch=a.epoch if a else 0,
                                     bridge_addr=sim.bridges[a.bridge].addr if a else None))
-    console.print(f"registered {len(sim.tags)} simulated tag(s) in {config.db_path} ({secrets.describe()})")
+            registered += 1
+    console.print(f"registered {registered} simulated tag(s) in {config.db_path} ({secrets.describe()})")
