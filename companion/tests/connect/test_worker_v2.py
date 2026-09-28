@@ -105,7 +105,7 @@ async def run_op(fake: Any, kind: str, args: dict[str, Any], *, secret: bytes | 
 
 
 async def discover(fake: Any, role: str, label: SetupPayload, bridges: list[str] | None = None) -> dict[str, Any]:
-    op_id = fake.queue_operation("discovery", {"role": role, "short_id": label.short_id, "duration_s": 20,
+    op_id = fake.queue_operation("discovery", {"role": role, "short_id": label.short_id, "duration_s": 30,
                                                "bridges": bridges or []})
     await until(lambda: fake.op(op_id)["candidates"], 60, f"{role} discovery")
     fake.op(op_id)["state"] = "succeeded"  # a pairing starts from it (start_pairing closes the search)
@@ -131,6 +131,7 @@ async def worker(directory: Path, sim: Simulator, paths: Any, fake: Any, fonts: 
     from cremind_tag.connect.worker import build, serve
 
     svc, agent = build(directory, sim.gateway_url, paths, transport=fake.transport, fonts=fonts)
+    agent.discover_every_s = 0.2  # device time runs 200x faster here: a listening window is over in 0.1 s
     stop = asyncio.Event()
     task = asyncio.create_task(serve(svc, agent, stop=stop))
     try:

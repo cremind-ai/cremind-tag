@@ -73,6 +73,8 @@ TUNNEL_S = 90
 TAG_WAKE_S = 120.0
 BRIDGE_OPEN_S = 30.0
 DISCOVERY_POLL_S = 2.0
+DISCOVER_EVERY_S = 10.0
+"""How often a tag search asks each bridge again to listen (a DISCOVER may be lost in the mesh)."""
 PENDING_RETRY_S = 60.0
 STALE_EPOCH_RETRIES = 4
 SHOW_CODE_S = 15 * 60.0
@@ -193,6 +195,7 @@ class ConnectAgent:
         self.clock = clock
         self.lease_until = 0.0
         self.renew_s = 20.0
+        self.discover_every_s = DISCOVER_EVERY_S
         self.worker_state = "active"
         self.paused = False
         self.removed = False
@@ -438,6 +441,7 @@ class ConnectAgent:
         self.svc.request_inventory()
         info = gw.hello_info
         await ctx.finish(device={"gen": gen, "fw": info.fw if info else None})
+        self.svc.request_heartbeat()  # the first heartbeat after the claim completes the setup in Cremind
         return {"gen": gen}
 
     # ------------------------------------------------------------------ discovery
@@ -473,25 +477,28 @@ class ConnectAgent:
                         next_poll = self.clock() + DISCOVERY_POLL_S
         else:
             bridges = [b for b in (await self._bridges_by_hw(args.get("bridges") or [])) if b.addr]
-            # Bridges still to start listening: one that is busy (finishing a tunnel or a frame session)
-            # answers BUSY and is asked again while the search window lasts.
-            waiting: list[int] = [b.addr for b in bridges if b.addr] or [0]
-            next_ask = 0.0
+            # Every bridge is asked to listen, and asked again every ``discover_every_s`` while the search
+            # lasts: a DISCOVER lost in the mesh (or a window that ended early) must not lose the search. A
+            # busy bridge (finishing a tunnel or a frame session) answers BUSY and is asked again soon.
+            addrs: list[int] = [b.addr for b in bridges if b.addr] or [0]
+            next_ask = {addr: 0.0 for addr in addrs}
             with gw.subscribe(types=Discovered) as sub:
                 next_poll = self.clock() + DISCOVERY_POLL_S
                 while (remaining := deadline - self.clock()) > 0:
-                    if waiting and self.clock() >= next_ask:
-                        listen = max(1, min(int(remaining), duration))
-                        for addr in list(waiting):
-                            ack = await gw.discover(bridge=addr, duration_s=listen, tag_id=short)
-                            if ack.ok:
-                                waiting.remove(addr)
-                            elif ack.status not in (Status.BUSY, Status.NO_RESOURCES):
-                                waiting.remove(addr)
-                                log.info("agent: DISCOVER on bridge %#06x answered %s", addr, ack.status)
-                        next_ask = self.clock() + 0.5
+                    for addr in addrs:
+                        if self.clock() < next_ask[addr]:
+                            continue
+                        ack = await gw.discover(bridge=addr, duration_s=max(1, min(int(remaining), duration)),
+                                                tag_id=short)
+                        if ack.ok:
+                            next_ask[addr] = self.clock() + self.discover_every_s
+                        elif ack.status in (Status.BUSY, Status.NO_RESOURCES):
+                            next_ask[addr] = self.clock() + 0.5
+                        else:
+                            next_ask[addr] = float("inf")
+                            log.info("agent: DISCOVER on bridge %#06x answered %s", addr, ack.status)
                     try:
-                        event = await sub.get(timeout=min(remaining, 0.5 if waiting else DISCOVERY_POLL_S))
+                        event = await sub.get(timeout=max(0.01, min(remaining, 0.5)))
                     except TimeoutError:
                         event = None
                     if isinstance(event, Discovered) and event.tag_id == short:
@@ -933,6 +940,7 @@ class ConnectAgent:
         self.state.put(device.hex(), role="gateway", hw_id=self.ident.gateway_hw_id, gen=gen)
         await self.vault_write(device.hex(), {"role": "gateway", "gen": gen}, stage="committed", generation=gen)
         await ctx.progress(devices=[{"device_id": device.hex(), "state": "rekeyed", "gen": gen}])
+        self.svc.request_heartbeat()  # the recovered gateway's heartbeat completes the setup session
         pending: list[str] = []
         nodes = {n.uuid.hex(): n for n in await gw.list_nodes()}
         for dev_hex, entry in sorted(entries.items(), key=lambda kv: kv[1].get("role") != "bridge"):

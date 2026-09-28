@@ -388,6 +388,10 @@ class DaemonService:
         if self.hardware is not None:
             self.hardware.request_inventory()
 
+    def request_heartbeat(self) -> None:
+        if self.hardware is not None:
+            self.hardware.request_heartbeat()
+
     def apply_effects(self, effects: Effects) -> None:
         for credential_id in effects.sync:
             self.request_sync(credential_id)
