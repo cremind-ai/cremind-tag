@@ -18,6 +18,7 @@ HARDWARE = yaml.safe_load((REPO_ROOT / "hardware" / "matrix.yaml").read_text(enc
 EXPECTED_TARGETS = {
     "gateway-nrf52840dk",
     "gateway-nrf52dk",
+    "gateway-nrf52840dongle",
     "bridge-nrf52840dk",
     "bridge-nrf52dk",
     "tag-laowu-bw",

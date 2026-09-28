@@ -1,0 +1,45 @@
+/*
+ * nRF52840 Dongle (PCA10059) gateway, loaded by Nordic's factory USB
+ * bootloader (docs/building.md "nRF52840 Dongle"). The MBR owns 0x0-0x1000
+ * and the bootloader 0xe0000 to the end of flash, so the image links from
+ * 0x1000 into code_partition, which ends where the settings storage (mesh
+ * state, CDB, names, assignments: 32 KiB, as on the DK) begins, and the
+ * linker refuses an image that would grow into it.
+ *
+ * The board's own CDC ACM console (boards/common/usb/cdc_acm_serial.dtsi)
+ * goes: the USB port carries one CDC ACM function, the companion's link
+ * (socs/nrf52840.overlay), as on the DK's nRF USB port.
+ */
+/ {
+	chosen {
+		zephyr,code-partition = &code_partition;
+		/delete-property/ zephyr,console;
+		/delete-property/ zephyr,shell-uart;
+		/delete-property/ zephyr,uart-mcumgr;
+		/delete-property/ zephyr,bt-mon-uart;
+		/delete-property/ zephyr,bt-c2h-uart;
+	};
+};
+
+/delete-node/ &board_cdc_acm_uart;
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+/delete-node/ &storage_partition;
+
+&flash0 {
+	partitions {
+		code_partition: partition@1000 {
+			compatible = "zephyr,mapped-partition";
+			label = "code";
+			reg = <0x00001000 0x000d7000>;
+		};
+
+		/* Ends at the bootloader (0xe0000). */
+		storage_partition: partition@d8000 {
+			compatible = "zephyr,mapped-partition";
+			label = "storage";
+			reg = <0x000d8000 0x00008000>;
+		};
+	};
+};

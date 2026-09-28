@@ -29,6 +29,18 @@ gateways:
     host_link: uart_ch340
     status: buildable
     notes: Links with 4.6 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending.
+  - id: nrf52840dongle_gateway
+    board_id: 1
+    zephyr_board: nrf52840dongle/nrf52840
+    mcu: nRF52840
+    flash_kib: 1024
+    ram_kib: 256
+    host_link: usb_cdc_acm
+    status: buildable
+    notes: >-
+      nRF52840 Dongle (PCA10059) with Nordic's factory USB bootloader kept: the image links at 0x1000 after the MBR,
+      the settings take the 32 KiB below the bootloader (0xd8000), and it is flashed over USB DFU
+      (docs/building.md "nRF52840 Dongle"). Same firmware and protocol board id as the DK gateway; not flashed yet.
 
 bridges:
   - id: nrf52840_bridge

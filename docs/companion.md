@@ -97,6 +97,9 @@ cremind-tag connect remove tagc_…
   over the DK's J-Link (bridges likewise); `cremind-tag firmware
   list|verify|info` show a release's images, check one, and read a board's
   FICR/UICR ([releasing.md](releasing.md#first-release-j-link-and-flashing)).
+  An nRF52840 Dongle (`gateway-nrf52840dongle`) has no J-Link: it is flashed
+  over its own USB bootloader
+  ([building.md](building.md#flashing-the-nrf52840-dongle-usb-bootloader)).
 - **Bridges**: provisioned from Cremind (admin: *Scan* → *Provision*, which the
   daemon executes as `scan_unprovisioned` / `provision_bridge`) or locally with
   `cremind-tag mesh scan|provision`. Each bridge needs the same font pack as the

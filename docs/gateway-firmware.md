@@ -332,7 +332,8 @@ battery_mv, flags}`, at most one per `(bridge, tag)` every 10 s
 | Retained events, idempotency slots, delivery queue, transfers, results de-duplication, scan state | RAM | no — a new `boot_id` tells the companion (§1.2) |
 
 Settings live on NVS in the board's `storage_partition` (nRF52840 DK: 32 KiB at
-`0xf8000`; nRF52 DK: 24 KiB at `0x7a000`). The image links into
+`0xf8000`; nRF52840 Dongle: 32 KiB at `0xd8000`, below its USB bootloader;
+nRF52 DK: 24 KiB at `0x7a000`). The image links into
 `code_partition`, which ends where the storage begins (`USE_DT_CODE_PARTITION`),
 so it can never grow into it. The replay list is written at most every 10
 minutes (`BT_MESH_RPL_STORE_TIMEOUT=600`). A chip erase starts a new network:
@@ -438,6 +439,9 @@ or `nrfjprog -f NRF52 --program build/gateway-nrf52840dk/zephyr.hex --sectoreras
 - nRF52840 DK: the companion link is the **nRF USB** connector (the CDC ACM
   port "Cremind Tag gateway", VID:PID `1209:0002`), not the J-Link USB port.
   The DK's VCOM stays unused (no console).
+- nRF52840 Dongle (`gateway-nrf52840dongle`): no probe; it is flashed over its
+  factory USB bootloader ([building.md](building.md#flashing-the-nrf52840-dongle-usb-bootloader)),
+  and the companion link is the same USB port once the gateway runs.
 - nRF52 DK: the companion link is the J-Link OB virtual COM port (115200 8N1);
   on the target board, the CH340's port.
 - `cremind-tag gateway ports` lists candidate ports with their serial numbers;

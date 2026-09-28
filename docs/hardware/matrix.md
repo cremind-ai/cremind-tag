@@ -19,6 +19,7 @@ Every board moves through these states; qualification reports in
 |---|---|---|---|---|---|---|---|
 | [nrf52840_gateway](../qualification/nrf52840_gateway.md) | 1 | `nrf52840dk/nrf52840` | nRF52840 | 1024 / 256 KiB | usb_cdc_acm | buildable |  |
 | [nrf52832_gateway](../qualification/nrf52832_gateway.md) | 2 | `nrf52dk/nrf52832` | nRF52832 | 512 / 64 KiB | uart_ch340 | buildable | Links with 4.6 KiB RAM free (smaller delivery queue); stack high-water marks unmeasured, resource qualification on hardware pending. |
+| [nrf52840dongle_gateway](../qualification/nrf52840dongle_gateway.md) | 1 | `nrf52840dongle/nrf52840` | nRF52840 | 1024 / 256 KiB | usb_cdc_acm | buildable | nRF52840 Dongle (PCA10059) with Nordic's factory USB bootloader kept: the image links at 0x1000 after the MBR, the settings take the 32 KiB below the bootloader (0xd8000), and it is flashed over USB DFU (docs/building.md "nRF52840 Dongle"). Same firmware and protocol board id as the DK gateway; not flashed yet. |
 
 ## Bridges
 
@@ -57,6 +58,7 @@ From [`tools/targets.yaml`](../../tools/targets.yaml); build with `python tools/
 |---|---|---|---|---|---|---|
 | gateway-nrf52840dk | `apps/gateway` | `nrf52840dk/nrf52840` | nrf52840_qiaa | bt-ll-sw-split | none yet | nrf52840_gateway |
 | gateway-nrf52dk | `apps/gateway` | `nrf52dk/nrf52832` | nrf52832_qfaa | bt-ll-sw-split | none yet | nrf52832_gateway |
+| gateway-nrf52840dongle | `apps/gateway` | `nrf52840dongle/nrf52840` | nrf52840_qiaa | bt-ll-sw-split | none yet | nrf52840dongle_gateway |
 | bridge-nrf52840dk | `apps/bridge` | `nrf52840dk/nrf52840` | nrf52840_qiaa | bt-ll-sw-split | none yet | nrf52840_bridge |
 | bridge-nrf52dk | `apps/bridge` | `nrf52dk/nrf52832` | nrf52832_qfaa | bt-ll-sw-split | 8,192 | nrf52832_bridge |
 | tag-laowu-bw | `apps/tag` | `laowu_bw/nrf51822` | nrf51822_qfab | - | 2,048 | laowu_bw |
@@ -67,18 +69,19 @@ From [`tools/targets.yaml`](../../tools/targets.yaml); build with `python tools/
 
 ## Latest build facts
 
-From `build/memory-report.json` generated 2026-09-27T22:43:34+00:00 (NCS v3.4.1).
+From `build/memory-report.json` generated 2026-09-28T02:04:54+00:00 (NCS v3.4.1).
 
 | Target | Built from | Flash used / region (B) | Headroom (min) | RAM used / region (B) | RAM free (min) | Stack check | Result | Built |
 |---|---|---|---|---|---|---|---|---|
 | gateway-nrf52840dk | `apps/gateway` | 229,928 / 1,015,808 | 77.4 % (15 %) | 100,436 / 262,144 | 161,708 (none) | pass (edtlib) | ok | 2026-09-27 |
 | gateway-nrf52dk | `apps/gateway` | 198,800 / 499,712 | 60.2 % (15 %) | 60,912 / 65,536 | 4,624 (none) | pass (edtlib) | ok | 2026-09-27 |
+| gateway-nrf52840dongle | `apps/gateway` | 226,448 / 880,640 | 74.3 % (15 %) | 100,372 / 262,144 | 161,772 (none) | pass (edtlib) | ok | 2026-09-28 |
 | bridge-nrf52840dk | `apps/bridge` | 307,960 / 1,015,808 | 69.7 % (15 %) | 114,474 / 262,144 | 147,670 (none) | pass (edtlib) | ok | 2026-09-27 |
 | bridge-nrf52dk | `apps/bridge` | 277,460 / 499,712 | 44.5 % (15 %) | 57,127 / 65,536 | 8,409 (8,192) | pass (edtlib) | ok | 2026-09-27 |
 | tag-laowu-bw | `apps/tag` | 95,508 / 126,976 | 24.8 % (15 %) | 14,316 / 16,384 | 2,068 (2,048) | pass (edtlib) | ok | 2026-09-27 |
 | tag-laowu-bwr | `apps/tag` | 95,628 / 258,048 | 62.9 % (15 %) | 14,324 / 16,384 | 2,060 (2,048) | pass (edtlib) | ok | 2026-09-27 |
 | tag-sifei-52810 | `apps/tag` | 100,492 / 188,416 | 46.7 % (15 %) | 15,520 / 24,576 | 9,056 (3,072) | pass (edtlib) | ok | 2026-09-27 |
-| tag-hema-52811 | `apps/tag` | 100,396 / 188,416 | 46.7 % (15 %) | 15,520 / 24,576 | 9,056 (3,072) | pass (edtlib) | ok | 2026-09-27 |
+| tag-hema-52811 | `apps/tag` | 100,396 / 188,416 | 46.7 % (15 %) | 15,520 / 24,576 | 9,056 (3,072) | pass (edtlib) | ok | 2026-09-28 |
 | tag-nrf52dk | `apps/tag` | 100,904 / 499,712 | 79.8 % (15 %) | 15,640 / 65,536 | 49,896 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 ## Verification checklist

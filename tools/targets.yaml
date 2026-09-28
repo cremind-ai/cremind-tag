@@ -63,6 +63,21 @@ targets:
     resources: {flash_headroom_pct: 15, ram_free_min: null}
     release: true
 
+  gateway-nrf52840dongle:
+    app: apps/gateway
+    board: nrf52840dongle/nrf52840
+    soc: nrf52840_qiaa
+    role: gateway
+    hardware: nrf52840dongle_gateway
+    snippets: [bt-ll-sw-split]
+    extra_conf: []
+    extra_overlay: []
+    resources: {flash_headroom_pct: 15, ram_free_min: null}
+    # Loaded by the dongle's USB bootloader from a DFU package, not with
+    # `cremind-tag firmware flash`, which the release manifest names for every
+    # published image; unpublished until the release packages it that way.
+    release: false
+
   bridge-nrf52840dk:
     app: apps/bridge
     board: nrf52840dk/nrf52840

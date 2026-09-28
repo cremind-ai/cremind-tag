@@ -182,7 +182,8 @@ the core; the resulting reset warning is expected.
   therefore counts as protected there after the next reset, so such a tag may
   need `recover` (i.e. full re-enrollment) before it can be reprogrammed even
   without `--protect`. Record the silicon revision during hardware
-  verification.
+  verification (on the nRF52811 the hardened revision has a build code
+  starting with `B`: the second line of the package marking, e.g. `QFAAB0`).
 
 ## First-sample checklist
 

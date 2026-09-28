@@ -118,6 +118,7 @@ targets:
 | Target | App | Board | Snippet |
 |---|---|---|---|
 | gateway-nrf52840dk / gateway-nrf52dk | `apps/gateway` | `nrf52840dk/nrf52840` / `nrf52dk/nrf52832` | `bt-ll-sw-split` |
+| gateway-nrf52840dongle | `apps/gateway` | `nrf52840dongle/nrf52840` (keeps the factory USB bootloader) | `bt-ll-sw-split` |
 | bridge-nrf52840dk / bridge-nrf52dk | `apps/bridge` | same two DKs | `bt-ll-sw-split` |
 | tag-laowu-bw / tag-laowu-bwr | `apps/tag` | `laowu_bw/nrf51822` / `laowu_bwr/nrf51822` | **none** |
 | tag-sifei-52810 / tag-hema-52811 | `apps/tag` | `sifei_52810/nrf52810` / `hema_52811/nrf52811` | `bt-ll-sw-split` |
@@ -291,10 +292,49 @@ including the enrollment blob in `UICR.CUSTOMER[0..11]`. `--sectorerase` and
 First contact with a stock tag: if the vendor firmware set readback protection
 (nRF51 `RBPCONF`) or APPROTECT (nRF52), `nrfjprog --recover` (or J-Link's
 unlock prompt) erases the whole chip — the stock firmware cannot be recovered
-afterwards. Zephyr's default `CONFIG_NRF_APPROTECT_USE_UICR` keeps the nRF52
-debug port open while `UICR.APPROTECT` is erased. After flashing, power-cycle
-the tag before measuring current: the debug interface stays powered until a
-power-on reset.
+afterwards. Zephyr's default `CONFIG_NRF_APPROTECT_USE_UICR` copies
+`UICR.APPROTECT` into the firmware branch of APPROTECT at boot. On older nRF52
+silicon an erased `UICR.APPROTECT` leaves the debug port open; on revisions
+with the hardened APPROTECT (on the nRF52811 a build code starting with `B`:
+second line of the package marking, e.g. `QFAAB0`) only `0x5A` (HwDisabled)
+does, so after a full chip erase such a tag locks at its next reset
+([enrollment.md → Recovery](enrollment.md#recovery-and-re-enrollment)). After
+flashing, power-cycle the tag before measuring current: the debug interface
+stays powered until a power-on reset.
+
+## Flashing the nRF52840 Dongle (USB bootloader)
+
+The nRF52840 Dongle (PCA10059) has no debug probe. It ships with Nordic's nRF5
+SDK USB bootloader, and `gateway-nrf52840dongle` keeps it: the image links at
+`0x1000` behind the MBR and its settings end below the bootloader at `0xe0000`.
+No probe and no soldering:
+
+1. Install [nRF Util](https://www.nordicsemi.com/Products/Development-tools/nRF-Util)
+   and its bootloader commands: `nrfutil install nrf5sdk-tools`.
+2. Package the image for the bootloader (once per build):
+
+   ```bash
+   nrfutil nrf5sdk-tools pkg generate --hw-version 52 --sd-req 0x00 \
+     --application build/gateway-nrf52840dongle/zephyr.hex --application-version 1 \
+     build/gateway-nrf52840dongle/dfu.zip
+   ```
+
+3. Plug the dongle in and press its RESET button (on the side, at the far end
+   from the USB plug; push it towards the plug). The red LED fades in and out
+   and the bootloader's own serial port appears (`COMx` on Windows,
+   `/dev/ttyACM*` on Linux).
+4. `nrfutil nrf5sdk-tools dfu usb-serial -pkg build/gateway-nrf52840dongle/dfu.zip -p COMx`
+   (the bootloader's port).
+
+The dongle then restarts into the gateway: the bootloader's port goes away and
+the gateway's appears ("Cremind Tag gateway", `1209:0002`; `cremind-tag gateway
+ports` lists it). No LED is lit while the gateway runs. nRF Connect for
+Desktop's Programmer app does the same from the `.hex`, without the packaging
+step. To update, press RESET and repeat step 4: the bootloader stages the new
+image right behind the running one, so the mesh network in the settings
+survives while both images together fit in the code partition (860 KiB; the
+gateway is about 230 KB). Programming the image over SWD instead is not
+enough: the bootloader starts only an application it installed itself.
 
 ## native_sim tests (twister)
 
