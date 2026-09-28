@@ -582,7 +582,6 @@ factory reset (§4.3) is separate.
 | POST | `/api/tags/devices/{id}/test` | send a test card |
 | POST | `/api/tags/recoveries` | `{companion_id, server_url, idempotency_key}` |
 | GET | `/api/tags/recoveries/{id}` | recovery/rekey progress per device |
-| GET | `/api/tags/connect` | installer links per OS, the latest Connect version |
 
 Every mutation takes an `Idempotency-Key` header (or `idempotency_key` field):
 a retry with the same key and body returns the original answer. Errors keep
