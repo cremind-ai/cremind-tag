@@ -74,7 +74,7 @@ targets:
     extra_overlay: []
     resources: {flash_headroom_pct: 15, ram_free_min: null}
     # Loaded by the dongle's USB bootloader from a DFU package, not with
-    # `cremind-tag firmware flash`, which the release manifest names for every
+    # `cremind tags tools firmware flash`, which the release manifest names for every
     # published image; unpublished until the release packages it that way.
     release: false
 

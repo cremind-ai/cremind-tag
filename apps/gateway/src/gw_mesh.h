@@ -1,4 +1,5 @@
-/* Firmware backend of the gateway core: mesh (mesh.c) and settings (store.c). */
+/* Firmware backend of the gateway core: mesh (mesh.c), settings (store.c) and
+ * the own radio's tag links (central.c). */
 #ifndef GW_MESH_H_
 #define GW_MESH_H_
 
@@ -40,6 +41,20 @@ int gw_store_save_identity(const uint8_t ik[32]);
 void gw_store_owner(const uint8_t **rec, size_t *len, uint32_t *floor);
 /* Backend store_owner: raise the floor to gen, then write the record. */
 int gw_store_save_owner(void *ctx, const uint8_t rec[CTAG_OWNER_RECORD_LEN], uint32_t gen);
+#endif
+
+#ifdef CONFIG_CTAG_GW_RADIO
+/* central.c: the own radio's backend functions (docs/protocol.md 11). */
+/* After gw_mesh_start() succeeded: the tag advertisement listener. */
+void gw_central_init(void);
+void gw_central_listen(void *ctx, bool on);
+int gw_central_suspend(void *ctx);
+int gw_central_resume(void *ctx);
+int gw_central_connect(void *ctx, uint8_t link, const struct sched_peer *peer, uint32_t timeout_ms);
+int gw_central_disconnect(void *ctx, uint8_t link);
+int gw_central_setup(void *ctx, uint8_t link, uint8_t mode);
+int gw_central_write(void *ctx, uint8_t link, uint8_t chr, const uint8_t *value, size_t len);
+size_t gw_central_counters(struct ctag_cbor_counter *items, size_t max);
 #endif
 
 #endif /* GW_MESH_H_ */

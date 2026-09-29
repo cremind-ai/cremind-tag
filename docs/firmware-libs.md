@@ -33,7 +33,8 @@ Conventions:
 | `ctag_cbor` | `CONFIG_CTAG_CBOR` | `ctag_cbor.h` | gateway, bridge maintenance port |
 | `ctag_layout` | `CONFIG_CTAG_LAYOUT` | `ctag_layout.h` | bridge |
 | `ctag_render` | `CONFIG_CTAG_RENDER` | `ctag_render.h`, `ctag_fontpack.h` | bridge |
-| `ctag_frag` | `CONFIG_CTAG_FRAG` | `ctag_frag.h` | bridge, tag |
+| `ctag_frag` | `CONFIG_CTAG_FRAG` | `ctag_frag.h` | bridge, tag, the gateway's own radio |
+| `ctag_sched` | `CONFIG_CTAG_SCHED` | `ctag_sched.h` | bridge, the gateway's own radio |
 | `ctag_session` | `CONFIG_CTAG_SESSION` | `ctag_session.h`, `ctag_crypto.h` | bridge (client), tag (server) |
 | `ctag_txn` | `CONFIG_CTAG_TXN` | `ctag_txn.h` | tag |
 | `ctag_enroll` | `CONFIG_CTAG_ENROLL` | `ctag_enroll.h` | tag |
@@ -42,7 +43,8 @@ Conventions:
 | `ctag_utf8` | selected (`CONFIG_CTAG_UTF8`) | `ctag_utf8.h` | cbor, render |
 
 `CTAG_RENDER` selects `CTAG_LAYOUT`; `CTAG_CBOR` selects `ZCBOR` and
-`ZCBOR_CANONICAL`; `CTAG_SESSION` depends on `PSA_CRYPTO`. The CRC-32
+`ZCBOR_CANONICAL`; `CTAG_SESSION` depends on `PSA_CRYPTO`; the gateway's
+`CTAG_GW_RADIO` selects `CTAG_SCHED` and `CTAG_FRAG`. The CRC-32
 implementation is a choice: `CONFIG_CTAG_CRC32_BITWISE` (no table, default
 unless `CTAG_FRAME` or `CTAG_RENDER` is enabled), `CONFIG_CTAG_CRC32_NIBBLE`
 (16-entry table, about four times faster; default on gateway and bridge) or
@@ -305,6 +307,60 @@ message, a continuation without `START` or an overlong message, and then
 refuses everything until re-initialised. `rx->buf` may be switched to the
 other record buffer after a message completes.
 
+## ctag_sched — tag connection scheduler (§5.2)
+
+```c
+void sched_init(struct sched *s, const struct sched_ops *ops, void *ctx);
+void sched_advert(struct sched *s, uint32_t tag_id, const struct sched_peer *peer);
+void sched_connected(struct sched *s, uint8_t link, uint8_t err);   /* HCI status, 0 = up */
+void sched_disconnected(struct sched *s, uint8_t link);
+void sched_timeout(struct sched *s);                                /* its one-shot timer fired */
+void sched_session_done(struct sched *s, uint8_t link, uint8_t status);
+uint8_t sched_link_of(const struct sched *s, uint32_t tag_id);     /* or SCHED_NO_LINK */
+bool sched_busy(const struct sched *s);
+bool sched_rate_ok(const struct sched *s, uint32_t now);
+bool sched_deaf(const struct sched *s, uint32_t now, uint32_t heard_ms, uint32_t limit_ms);
+```
+
+The mesh suspend window of protocol.md §5.2 as pure logic, moved out of the
+bridge so that the gateway's own radio (protocol.md §11) connects to tags
+under exactly the same rules; [bridge-firmware.md §4](bridge-firmware.md#4-tag-connection-scheduler-protocolmd-52)
+has the state machine and the timing rationale. One **initiator** (one
+attempt at a time, each in its own suspend window: own sends first, ≤ 500 ms;
+`mesh_suspend`, `conn_create` with `BRIDGE_CONN_ATTEMPT_MS`, `mesh_resume`;
+RECOVERY with a reboot after 5 s), `SCHED_LINKS` **links**
+(`CONFIG_CTAG_SCHED_LINKS`, 1–4; a further link only while every open one is
+idle), the rolling-minute limit (`BRIDGE_MAX_SUSPENDS_PER_MIN`) and
+`SCHED_TAGS` per-tag **back-off** entries (`CONFIG_CTAG_SCHED_TAGS`,
+`BRIDGE_TAG_BACKOFF_MS`, the one quick retry after `CONNECT_FAILED`). Outside
+Zephyr (tests/host) the sizes default to 1 link and 20 entries unless the
+includer defines `SCHED_LINKS` / `SCHED_TAGS`.
+
+Every Bluetooth or mesh action, and every question about the application,
+goes through `struct sched_ops`; one thread calls every function, times are
+wrapping 32-bit milliseconds from `ops->now`:
+
+| op | Bridge (`apps/bridge/src/central.c`) | Gateway (`apps/gateway/src/core/gw_radio.c`) |
+|---|---|---|
+| `node_ready` | provisioned, configured, past the configuration quiet time | not provisioning, configuring or removing a node; no reboot pending |
+| `has_work(tag)` | a pending job for the tag | a waiting own-radio tunnel for the tag |
+| `mesh_busy` | its outbound mesh queue | the segmented lane or the unsegmented queue |
+| `link_idle(link)` | the session awaits its tag's `RESULT` | the tunnel is open with nothing queued or in flight |
+| `mesh_suspend` / `mesh_resume` | `bt_mesh_suspend()` / `bt_mesh_resume()` | the same, through the backend (`radio_suspend` / `radio_resume`) |
+| `conn_create`, `conn_cancel`, `disconnect` | `bt_conn_le_create()`, `bt_conn_disconnect()` | the backend's `link_connect`, `link_disconnect` |
+| `session_start` / `session_abort` | GATT setup and the tag session / its end | the tunnel's GATT setup (`link_setup`) / `EVT_TUNNEL CLOSED` |
+| `timer`, `now`, `reboot` | a work item, `k_uptime_get_32()`, `sys_reboot()` | a core deadline, the core's clock, the backend's reboot |
+
+`struct sched` is 72 B + 12 B per back-off entry + 12 B per link + 68 B of
+counters (32-bit ARM): 404 B with the nRF52840 bridge's 20 entries and two
+links, 272 B on the nRF52832 bridge (10, one), 260 B on the gateway (8,
+two). Code: 2,218 B of flash as linked in the nRF52840 gateway (Cortex-M4,
+`-Os`; not yet in `tests/size`). The library is
+portable C99 (no Zephyr header) and builds with the host warning set; its
+behaviour is tested through its two users on native_sim: the bridge's
+`bridge_sched` suite (mocked `bt_mesh_suspend`/`resume` and
+`bt_conn_le_create`) and the gateway's `gw_radio` suite.
+
 ## ctag_session — handshake and records (§5.4–§5.5)
 
 Bridge (client):
@@ -440,7 +496,7 @@ e.g. `(const uint8_t *)&NRF_UICR->CUSTOMER[0]`; an erased UICR fails the magic.
 The device side of protocol v2 for every role: identity, the key schedule,
 canonical grants and the device's grant rules, the ownership record,
 secure-message framing, tunnel fragments, the Noise IK responder and the v2
-secure messages. It mirrors the companion's `cremind_tag.secure`
+secure messages. It mirrors the companion's `app.tags.runtime.secure`
 (`identity.py`, `grants.py`, `noise.py`, `messages.py`, `device.py`) and is
 tested against `protocol/fixtures/v2_secure.json`. Primitives are the
 formally verified HACL* and the handshake the verified Noise* IK
@@ -578,7 +634,8 @@ acceptance of Python's `bytes.decode("utf-8")`.
 | Enrollment | host, ztest | `enrollment.json` |
 | Mutation robustness (layouts → renderer, font packs → reader, COBS, fragments) | host, ztest | — |
 | Session: K_epoch, handshake from both roles over the fixture CAPS, a relayed CAPS (the bridge's AUTH is the fixture's, the tag refuses it), no CAPS refused, ERROR pack/unpack and the fixture ERROR{STALE_EPOCH, 4}, records both ways, tampered/replayed/skipped records, handshake failures, backend sanity | ztest (PSA via Mbed TLS) | `session.json` |
-| CBOR: every fixture payload encoded byte for byte and decoded field for field (nested maps, counters), arrays of maps, strictness rules, encoder rejections; work bounds (the review's nested-map payloads, work counted by `ctag_cbor_steps` under `CTAG_CBOR_STEPS`), scan limits, duplicate keys per map, INFO and GET_INVENTORY at their largest; the v2 keys' kinds | ztest | `serial_frames.json` |
+| CBOR: every fixture payload encoded byte for byte and decoded field for field (nested maps, counters), arrays of maps, strictness rules, encoder rejections; work bounds (the review's nested-map payloads, work counted by `ctag_cbor_steps` under `CTAG_CBOR_STEPS`), scan limits, duplicate keys per map, INFO and GET_INVENTORY at their largest; the v2 keys' kinds (`mode` and `tag_links` included) | ztest | `serial_frames.json` |
+| Scheduler (`ctag_sched`): through the bridge's `bridge_sched` and the gateway's `gw_radio` suites | ztest (app tests) | — |
 | v2 (`test_secure.c`, 13 tests): identities, the key schedule (HKDF, `k_setup`, `static_oob`, `K_epoch` v2, the proofs, setup payloads), every `grant_cases` rule in order, strict grant decoding (non-canonical forms, lengths, big generations), the byte-exact conversation (ident2, Noise IK messages 1 and 2, `h`, the sealed PAIR request and answer both ways, a replay ending the session), handshake errors, the gateway, tag and bridge rules of `device.py` (single-use challenges, persist failures, STATUS privacy, two-stage release and its cancellation by REKEY, locked bridges, MAINT_AUTH / RECOMMISSION only over serial, recommission of an unowned bridge refused), the ownership record (round trip, the boot rule, every corruption), tunnel fragments and reassembly, heap exhaustion and RNG failure at every allocation of a handshake and a transport message | host, ztest | `v2_secure.json` |
 
 C test vectors are generated from the JSON fixtures at build time by

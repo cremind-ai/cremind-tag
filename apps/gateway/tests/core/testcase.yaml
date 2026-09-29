@@ -9,8 +9,15 @@ common:
     - native_sim
 tests:
   ctag.gateway.core: {}
+  # The nRF52840 gateway: protocol v2 with tags on its own radio.
   ctag.gateway.core.v2:
     extra_configs:
       - CONFIG_CTAG_GW_SECURE=y
       # The test's worker (initiator) shares the secure heap with the gateway.
+      - CONFIG_CTAG_SECURE_HEAP_SIZE=24576
+      - CONFIG_CTAG_GW_RADIO=y
+  # Protocol v2 without tag links (the interop build): GATEWAY_ADDR is no radio.
+  ctag.gateway.core.v2.noradio:
+    extra_configs:
+      - CONFIG_CTAG_GW_SECURE=y
       - CONFIG_CTAG_SECURE_HEAP_SIZE=24576

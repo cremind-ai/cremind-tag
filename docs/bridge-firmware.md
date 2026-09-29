@@ -6,7 +6,7 @@ pack in its external flash, and pushes the image to the tag over a BLE GATT
 connection. This document describes the firmware; the protocols it implements
 are normative in [protocol.md](protocol.md) (§1.6, §2, §3, §4, §5, §10) and
 [fontpack.md](fontpack.md). The companion's simulator
-(`companion/src/cremind_tag/sim/bridge.py`) implements the same rules;
+(Cremind's `app/tags/runtime/sim/bridge.py`) implements the same rules;
 §12 lists every place the firmware differs and why.
 
 | Target | Board | Status | Memory |
@@ -14,8 +14,8 @@ are normative in [protocol.md](protocol.md) (§1.6, §2, §3, §4, §5, §10) an
 | `bridge-nrf52840dk` | `nrf52840dk/nrf52840` (+ the DK's 8 MiB MX25R64) | builds, verified, meets targets (two tag sessions at once); not yet run on hardware | [§9](#9-memory) |
 | `bridge-nrf52dk` | `nrf52dk/nrf52832` (+ a placeholder SPI NOR) | builds, verified, meets targets (8,409 B RAM free, 10 tags per bridge, 1 QR slot, one tag session); not yet run on hardware | [§9](#9-memory) |
 
-Build: `python tools/build.py bridge-nrf52840dk bridge-nrf52dk` (the companion
-venv's interpreter on Windows: `unset VIRTUAL_ENV; companion/.venv/Scripts/python.exe tools/build.py …`);
+Build: `python tools/build.py bridge-nrf52840dk bridge-nrf52dk` (or
+`uv run python tools/build.py …` when `python` lacks PyYAML);
 see [building.md](building.md).
 
 ---
@@ -48,11 +48,15 @@ see [building.md](building.md).
   work queue, so the core needs no locks. Advertisements are dropped once
   `bev_q` is half full, so they never crowd out connection or GATT events.
 - **The core is Bluetooth-free** (`src/core/`): `bflash` (external flash),
-  `fontstore` (packs), `delivery` (§3, §10), `sched` (§5.2), `tagsess`
-  (§5.3–§5.6) and `maint` (§1.6). Time is passed in or read through an ops
-  table, Bluetooth operations go through `sched_ops` / `tsess_io`, and
-  persistence through a `save` callback — which is how the native_sim tests
-  run the same code with mocks, the flash simulator and a fake tag (§10).
+  `fontstore` (packs), `delivery` (§3, §10), `tagsess` (§5.3–§5.6) and
+  `maint` (§1.6), plus the connection scheduler `sched` (§5.2), which lives
+  in `lib/sched` (`CONFIG_CTAG_SCHED`,
+  [firmware-libs.md](firmware-libs.md#ctag_sched--tag-connection-scheduler-52))
+  because the gateway's own radio connects to tags under the same rules
+  (protocol.md §11). Time is passed in or read through an ops table,
+  Bluetooth operations go through `sched_ops` / `tsess_io`, and persistence
+  through a `save` callback — which is how the native_sim tests run the same
+  code with mocks, the flash simulator and a fake tag (§10).
 - **The maintenance port** has its own low-priority thread: font installs
   (seconds of flash and SHA-256 work) never delay mesh processing. It shares
   only the font store with the work queue, behind the store's mutex (and
@@ -76,12 +80,13 @@ see [building.md](building.md).
 | `src/persist.c` | settings handler (`ctag/…` records) |
 | `src/identify.c` | IDENTIFY / Health attention LED |
 | `src/core/*.c` | the portable core (tested on native_sim) |
+| `lib/sched/sched.c` (`include/ctag/ctag_sched.h`) | the connection scheduler of §4, shared with the gateway's own radio; `Kconfig.bridge` sizes it (`CTAG_SCHED_LINKS` = `CTAG_BRIDGE_SESSIONS`, `CTAG_SCHED_TAGS` = `CTAG_BRIDGE_MAX_TAGS`, asserted in `central.c`) |
 
 ## 2. Mesh node
 
 - **Provisionee**, PB-ADV only, no OOB (protocol.md §2's documented risk).
   Device UUID: `"CTBR"`, the board id, three zero bytes, then the 8-byte FICR
-  device id (`hwinfo_get_device_id`), so `cremind-tag mesh scan --filter 43544252`
+  device id (`hwinfo_get_device_id`), so `cremind tags tools mesh scan --filter 43544252`
   lists only bridges.
 - **Composition**: one element with the Config Server, the Health Server
   (attention blinks the LED), and the vendor models `LAYOUT_SRV` (0x0001) and
@@ -235,7 +240,9 @@ history to revision 0 (§10).
 
 ## 4. Tag connection scheduler (protocol.md §5.2)
 
-`src/core/sched.c`: one **initiator** (one connection attempt at a time, each
+`lib/sched/sched.c` (moved there unchanged from `src/core/`, so the
+gateway's own radio shares it, gateway-firmware.md §16.4): one
+**initiator** (one connection attempt at a time, each
 in its own mesh suspend window) and `CONFIG_CTAG_BRIDGE_SESSIONS` **links**
 (tag connections: **2 on the nRF52840, 1 on the nRF52832**, protocol.md §5.2
 "Concurrent sessions"):
@@ -481,7 +488,7 @@ slot_size = align_down_64K((flash_size − W) / 2)
 
 - **Slot directory**: two 4 KiB sectors at the start of the working space,
   each one 64-byte record `'CTSL'`, version 1, seq, slot, pack id, size,
-  content hash, CRC-32 (the layout of `cremind-tag fonts image`). The active
+  content hash, CRC-32 (the layout of `cremind tags tools fonts image`). The active
   pack is the valid record with the highest seq; activation erases and writes
   the *other* sector with seq + 1, so a power loss at any byte leaves the
   previous record valid (tested at every byte, §10). At boot the active
@@ -675,7 +682,7 @@ with both:
 | `bridge_flash` | geometry (DK 8 MiB/1 MiB, production 16 MiB, caps, errors); > 16 MiB address map; directory record layout; A/B activation; **a power cut at every byte of an activation** and before its erase; pending records (odd and maximum length, CRC, consume, torn writes at every stage); **assembly in place** (chunks in any order at their stride, a chunk written twice refused as NOR would be, sealing, a header over other bytes failing the CRC, consumed records still intact); read cache |
 | `bridge_fonts` | install over the FONT_* path in odd chunk sizes, boot validation, a corrupt index at boot, every install error in order, the slot flip, a session view blocking an overwrite (`BUSY`), FLASH_TEST positions and `BUSY` rules |
 | `bridge_delivery` | §3.3 order (NOT_FOUND, INCOMPLETE + bitmap + resend, TOO_LARGE, INVALID, DIGEST_MISMATCH, NOT_ASSIGNED, STALE_EPOCH, FONTPACK_MISMATCH, UNSUPPORTED, missing strike, STALE_REVISION before the pack check); DUPLICATE for a pending, a displayed and an undisplayed revision (and after a reset); **a repeated commit of an accepted transfer answers DUPLICATE** whatever became of its job (pending, cancelled, cleared), after a reset, and not after the next BEGIN; **one result_seq per update_id** (a restarted transfer of an update_id already reported, before and after a reset; repeated TAG_CMD with a pending job, after its result, after RESULT_ACK, after the retries gave up; results-table eviction keeps unacknowledged results); **the transfer assembled in flash** (reverse order, a repeated chunk, no record before the commit, a reset before the commit, a chunk write failure → STORAGE_ERROR); **a power cut at every 4 bytes of the seal** (no job and no accepted transfer after the reset unless the header is complete); **the shared layout buffer** (held, borrowed by another tag's commit and reloaded, moved to a re-delivery's record, a damaged record refused, released by a finished job); **finish order** (history saved and result sent while the record is live; a superseded record consumed before its result); a stored result's `stored_epoch` and `flags` replayed under a new `update_id` after a reset; **accept order** (a seal failure or a full job table changes neither history nor older jobs; a replaceable older layout makes room); SUPERSEDED, in-session jobs untouched, LAYOUT_CANCEL; assignments (idempotent delete, inclusive delete up to epoch 0xFFFFFFFF, epochs, the `max_tags` table, persistence); tag commands and CLEAR resetting the history; pending layouts surviving resets, finished ones not redelivered; ring wear levelling across resets; result retry schedule and RESULT_ACK; result_seq never reused across four resets; node reset |
-| `bridge_sched` | mocked `bt_mesh_suspend/resume` and `bt_conn_le_create`: connection with resume before the session and suspend_ms; **suspend rejected → no connection attempt** (`-EBUSY`, `-EINVAL` touch nothing); **a suspend failing part-way** (scanner stopped, mesh not flagged suspended: RECOVERY suspends fully and resumes; still failing → reboot after 5 s); **liveness** (idle and silent for the limit, a report since, not idle, idle only recently, disabled); `-EALREADY` never leaves the mesh suspended; **every failed attempt resumes** (refused create, host timeout, failed establishment); **cancellation** confirmed, unconfirmed (resume refused while initiating → recovery), and completing mid-cancel; **resume failure → disconnect, recovery with back-off, reboot after 5 s**; **disconnect mid-transfer**; waiting for / deferring on own sends; not while configuring; **the quick retry** (one retry inside the window after `CONNECT_FAILED`, none after a failed retry, after the window, after a suspend failure or a failed session; a retry counts toward the rate limit); **20 tags waking in 2 s windows, all failing to connect, for 5 minutes never exceed 6 suspends in any rolling minute, mesh suspended ≤ 12 % of the time**; two sessions (`ctag.bridge.core`): **initiations serialised** (nothing starts while one initiates, each its own suspend window and `suspend_ms`), **a second tag only while the first link idles**, never a second link to one tag, a third tag waits for a free link (a disconnecting link is not free), **a failing second link** (connect failure, resume failure and recovery, a dropped session) **never touches the first**, **a tag whose sessions keep failing never starves the other** (served in every wake over 10 rounds), **the rate limit with a session open**, a link's lost disconnected event freed after 10 s while the other session and the initiator's watchdog go on |
+| `bridge_sched` | the shared scheduler (`lib/sched`) with the bridge's sizes, mocked `bt_mesh_suspend/resume` and `bt_conn_le_create`: connection with resume before the session and suspend_ms; **suspend rejected → no connection attempt** (`-EBUSY`, `-EINVAL` touch nothing); **a suspend failing part-way** (scanner stopped, mesh not flagged suspended: RECOVERY suspends fully and resumes; still failing → reboot after 5 s); **liveness** (idle and silent for the limit, a report since, not idle, idle only recently, disabled); `-EALREADY` never leaves the mesh suspended; **every failed attempt resumes** (refused create, host timeout, failed establishment); **cancellation** confirmed, unconfirmed (resume refused while initiating → recovery), and completing mid-cancel; **resume failure → disconnect, recovery with back-off, reboot after 5 s**; **disconnect mid-transfer**; waiting for / deferring on own sends; not while configuring; **the quick retry** (one retry inside the window after `CONNECT_FAILED`, none after a failed retry, after the window, after a suspend failure or a failed session; a retry counts toward the rate limit); **20 tags waking in 2 s windows, all failing to connect, for 5 minutes never exceed 6 suspends in any rolling minute, mesh suspended ≤ 12 % of the time**; two sessions (`ctag.bridge.core`): **initiations serialised** (nothing starts while one initiates, each its own suspend window and `suspend_ms`), **a second tag only while the first link idles**, never a second link to one tag, a third tag waits for a free link (a disconnecting link is not free), **a failing second link** (connect failure, resume failure and recovery, a dropped session) **never touches the first**, **a tag whose sessions keep failing never starves the other** (served in every wake over 10 rounds), **the rate limit with a session open**, a link's lost disconnected event freed after 10 s while the other session and the initiator's watchdog go on |
 | `bridge_session` | a fake tag built from `ctag_session` (tag role), `ctag_txn` and `ctag_frag` over a timed event queue: end-to-end deliveries (1 plane; 2 planes rotated; QR on a BWR panel) whose RESULT digest equals the fixture frame digest, ≤ 4 records per connection event, a credit for every record, indications before or after the write response, one result_seq per update_id; the tag's duplicate answer (reported with `flags` bit0 and the tag's stored epoch); **disconnect mid-transfer** (no result, job pending, next session restarts at offset 0); RESULT lost at a reset → `DISPLAY_STATE_UNKNOWN` then redrawn; **STALE_EPOCH and AUTH_FAILED as link failures twice, final in the third consecutive session** (the result flagged `RESULT_FLAG_ESCALATED` and carrying the stored epoch of the tag's ERROR), **a relay rewriting `plane_flags` in the CAPS the bridge reads: the tag refuses AUTH, no record or frame ever exists, and the same tag delivers once the relay is gone**, the count restarting after an authenticated session, with another status and with a new epoch; the panel rule; CAPS of another tag; a silent tag timing out after 5 s; CMD CLEAR/SLEEP in arrival order; **another tag's commit mid-frame** (the session reloads its layout, same frame digest) and **a re-delivery of the frame being drawn** (one result, under the adopted update_id); **review probes: CREDIT{0} every 4 s for an hour instead of CHALLENGE (ends INVALID at once); CREDIT{0} forever after AUTH_OK (TIMEOUT in 5 s); a never-ending CTRL fragment stream (TIMEOUT 5 s after the connection); every handshake message 3 s late (TIMEOUT at the 5 s handshake bound); a credit every 4 s (TIMEOUT at the frame bound, 135 s); a CMD then a layout refused at FRAME_BEGIN (2 records sent, no PLANE_DATA on the CMD's credit)**; ASSIGN_DEL during a session that then drops (the job ends CANCELLED); two sessions (`ctag.bridge.core`, two fake tags over one event queue): **side by side** (B connected while A refreshes, both frames the reference frames, each result with its own `suspend_ms`, A never reloads), **deadlines per session** (A's refresh never ends: A times out exactly at its own `RESULT` bound while B delivers; B silent: B times out 5 s after its own connection while A delivers; B drops mid-frame: A untouched), **both streaming at once** (A's CLEAR, then A's frame beside B's two-plane frame: both exact, the shared layout buffer reloaded) |
 | `bridge_maint` | HELLO (caps, credits, exemption, reset), answers held without credit, version mismatch, UNSUPPORTED (unknown, mesh and delivery types), malformed CBOR, CRC errors, the client's install sequence with its chunk size derived from `caps.max_frame`, a frame above `max_frame` dropped and counted, INFO counters (and INFO still answered with every slot filled with long names and 5-byte values), FLASH_TEST idempotency, REBOOT answered first, the streaming COBS writer byte-identical to the library |
 | `bridge_golden` | **every `render.json` scenario rendered from `fontpack_test.ctfp` installed in the store (slot 1, through the cache) reproduces the fixture frame digest and each plane digest strip by strip** |
@@ -706,7 +713,9 @@ cases pass (88 per platform in `ctag.bridge.core`, 80 in
 slot); the interop script passes against both builds; `tests/ztest` 456 of
 456; the gateway's 122. A mutation check: dropping the "every open link
 idles" rule fails 2 tests, disabling the quick retry 3 (5 over both
-configurations).
+configurations). After the scheduler moved to `lib/sched` (same day): the
+same 336 pass unchanged, and the images keep their RAM (114,474 and
+57,127 B) with 36 B more flash each.
 
 ## 11. Hardware test plan
 
@@ -715,7 +724,7 @@ plus the items the builds could not verify. Equipment: an nRF52840 DK as
 bridge (RTT logs: build with `-DEXTRA_CONF_FILE=debug.conf`), a gateway, two
 or more tags (nRF52 DK development tags or enrolled boards), a second bridge
 for relay checks, an nRF52840 dongle with the nRF Sniffer, a Power Profiler
-Kit (radio activity), the companion (`cremind-tag`) with the daemon's event
+Kit (radio activity), the host (Cremind's hardware runtime, `cremind tags tools`) with the daemon's event
 log.
 
 | # | Test | Procedure | Pass |
@@ -733,7 +742,7 @@ log.
 | H11 | Rate limit | 20 tags with work, all failing to connect (shielded) for 5 min | ≤ 6 suspensions in any minute (`suspend_count`), relay reachable throughout |
 | H12 | Stack depth | `debug.conf` thread analyzer during H1, H10, a FONT_COMMIT and INFO | every stack keeps ≥ 25 % unused; resize the Kconfig stacks accordingly (nRF52832 values are provisional) |
 | H13 | Render pre-pass time | `render_ms_max` counter for a text-heavy 400×300 BWR card | recorded; mesh latency impact acceptable (the work queue renders ~2 × 19 strips in one item) |
-| H14 | Font install | `cremind-tag bridge fonts-install` of the full pack over USB (nRF52840) and UART (nRF52832) | completes; slot flip; reset during FONT_DATA leaves the old pack active; FLASH_TEST all OK/BUSY as designed |
+| H14 | Font install | `cremind tags tools bridge fonts-install` of the full pack over USB (nRF52840) and UART (nRF52832) | completes; slot flip; reset during FONT_DATA leaves the old pack active; FLASH_TEST all OK/BUSY as designed |
 | H15 | QSPI > 16 MiB | a 32 MiB part with `address-size-32` / `enter-4byte-addr` | FLASH_TEST items either side of 16 MiB OK |
 | H16 | Resets | reset during commit, during a session, during a result retry | pending layouts restored; no duplicate delivery; result_seq continues upward; a repeated commit after the reset answers DUPLICATE |
 | H17 | Spoofed tag | A second DK advertising an assigned tag's id (companion `sim` peer or a test build) answering HELLO with CREDIT{0}, then with ERROR{STALE_EPOCH} | the session ends at once (INVALID), then link failures with back-off; the real tag's jobs end only after 3 consecutive sessions with the same status; other tags keep being served |
@@ -775,10 +784,10 @@ nrfjprog -f NRF52 --reset
   settings storage (`0xF8000` on the nRF52840, `0x7A000` on the nRF52832).
   `--sectorerase` keeps the settings (mesh keys, assignments); `--chiperase`
   (or `nrfjprog --eraseall`) forgets the node — re-provision it afterwards.
-- Factory font pack on the nRF52840 DK: `cremind-tag fonts image <pack> --flash-size 8MiB --working-space 1MiB`
+- Factory font pack on the nRF52840 DK: `cremind tags tools fonts image <pack> --flash-size 8MiB --working-space 1MiB`
   writes `flash.hex` at the QSPI XIP base; program it with
   `nrfjprog -f NRF52 --program flash.hex --qspisectorerase --verify`.
-  Otherwise install over the maintenance port (`cremind-tag bridge fonts-install --url <port>`).
+  Otherwise install over the maintenance port (`cremind tags tools bridge fonts-install --url <port>`).
 - Maintenance port: the nRF52840 DK's **nRF USB** connector enumerates as a
   CDC ACM port (1209:0001, "Cremind Tag bridge"); the nRF52 DK uses the
   J-Link VCOM at 115200 baud.
@@ -788,7 +797,7 @@ nrfjprog -f NRF52 --reset
   to the maintenance port). `tools/build.py` builds release images; for a
   debug image run `west build` by hand in `python tools/build.py --shell`
   with the same arguments plus the fragment.
-- Counters: `cremind-tag bridge info --url <port>` (INFO) and the gateway's
+- Counters: `cremind tags tools bridge info --url <port>` (INFO) and the gateway's
   `GET_INVENTORY` (CAPS/HEALTH) show the scheduler, session, mesh and flash
   counters.
 
@@ -816,7 +825,7 @@ nrfjprog -f NRF52 --reset
   as `max_tags` and `assigned_count`) in its inventory, Cremind
   refuses to claim or assign onto a full bridge, and an `ASSIGN_SET` that still
   meets a full table (`NO_RESOURCES`, e.g. an 11th tag on an nRF52832 bridge)
-  fails the `assign_tag` at once with `bridge_full` (companion.md §6) — the
+  fails the `assign_tag` at once with `bridge_full` ([the runtime's docs](https://github.com/cremind-ai/cremind/blob/main/docs/tags/runtime.md) §6) — the
   admin picks another bridge; nothing chooses one automatically.
 - USB VID/PID 1209:0001 is the pid.codes test pair; `MESH_COMPANY_ID` is
   0xFFFF (spec).

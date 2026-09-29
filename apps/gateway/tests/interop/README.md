@@ -1,29 +1,32 @@
-# Gateway interop test (native_sim + the companion's GatewayClient)
+# Gateway interop test (native_sim + the host's GatewayClient)
 
 This builds the gateway firmware's serial side for `native_sim` — the real
 `src/core/` (serial server, idempotency, retained events, delivery engine,
 node bookkeeping), the real gateway loop (`src/gw_thread.c`) and the real
 UART glue (`src/uart_io.c`) on a native PTY UART (`zephyr,native-pty-uart`) —
 with the Bluetooth Mesh replaced by a small simulated network
-(`src/main.c`). `interop.py` then drives it with the companion's unmodified
-`cremind_tag.gateway.GatewayClient` over the PTY, exactly as the companion
-drives a USB or UART gateway.
+(`src/main.c`). `interop.py` then drives it with the host's unmodified
+`GatewayClient` (Cremind's hardware runtime, `app.tags.runtime.gateway`) over
+the PTY, exactly as Cremind drives a USB or UART gateway.
 
 A second build with `v2.conf` (`CONFIG_CTAG_GW_SECURE`, protocol v2,
 docs/connect-setup.md) adds `src/core/gw_secure.c`, `gw_tunnel.c` and
-`lib/secure`; `interop_v2.py` drives it as a Connect worker would, with the
-companion's reference `cremind_tag.secure` modules (`SecureChannel`, grants,
-identity) and a small serial client of its own (the companion's
-`GatewayClient` speaks v1 and is not modified). See "Protocol v2" below.
+`lib/secure`; `interop_v2.py` drives it as a gateway worker would, with the
+host's reference `app.tags.runtime.secure` modules (`SecureChannel`, grants,
+identity) and a small serial client of its own (the host's `GatewayClient`
+speaks v1 and is not modified). See "Protocol v2" below.
 
 ## Running
 
-From the repository root on the host (Git Bash on Windows needs
-`MSYS_NO_PATHCONV=1`; use the `C:/...` form of the path):
+The host side is Cremind's hardware runtime, so this test needs Cremind: a
+checkout mounted at `/cremind` (below: one next to this repository), or else
+`run.sh` installs `cremind[tags]` from PyPI. Building and releasing the
+firmware never needs it. From the repository root on the host (Git Bash on
+Windows needs `MSYS_NO_PATHCONV=1`; use the `C:/...` form of the path):
 
 ```bash
 MSYS_NO_PATHCONV=1 docker run --rm -v ncs-v3.4.1:/ncs -v ctag-build:/build \
-  -v "$(pwd):/work" ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1 \
+  -v "$(pwd):/work" -v "$(pwd)/../cremind:/cremind" ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1 \
   -c 'sh /work/apps/gateway/tests/interop/run.sh'
 ```
 
@@ -32,8 +35,8 @@ MSYS_NO_PATHCONV=1 docker run --rm -v ncs-v3.4.1:/ncs -v ctag-build:/build \
 --no-sysbuild -b native_sim`) and `/build/gw-interop-v2`
 (`-DEXTRA_CONF_FILE=v2.conf`), starts each `zephyr.exe` (real-time pacing,
 `CONFIG_NATIVE_SIM_SLOWDOWN_TO_REAL_TIME`), reads the PTY path from its `uart
-connected to pseudotty: /dev/pts/N` line and runs the scenarios with
-`PYTHONPATH=/work/companion/src`. `CTAG_INTEROP=v1` or `v2` (`docker run -e`)
+connected to pseudotty: /dev/pts/N` line and runs the scenarios against
+Cremind's runtime (`CREMIND_SRC`, default `/cremind`). `CTAG_INTEROP=v1` or `v2` (`docker run -e`)
 runs one variant only. Exit status 0 means every scenario passed; each script
 prints a Markdown results table.
 
@@ -48,7 +51,7 @@ prints a Markdown results table.
 | Results | `DELIVERY_STAGE` `TRANSFERRING`, `REFRESHING`, then `DELIVERY_RESULT OK` with `digest = SHA-256(layout)[0:8]`, re-sent every 500 ms until `RESULT_ACK` |
 | `tag_id 0xDEAD0001` | chunk 1 of its first transfer is lost once → `LAYOUT_STATUS INCOMPLETE` → the gateway resends exactly that chunk |
 | `tag_id 0xDEAD0002` | the first `LAYOUT_STATUS OK` is lost and the result held 11 s → the gateway re-commits after 10 s → `DUPLICATE` |
-| `DELIVERY_RESULT.stored_epoch`, `flags` | every result reports the tag's stored epoch = the delivery's epoch; `tag_id 0xDEAD0003`'s result is the tag's stored ACK (`flags` bit0), which `EVT_RESULT` must carry to the companion |
+| `DELIVERY_RESULT.stored_epoch`, `flags` | every result reports the tag's stored epoch = the delivery's epoch; `tag_id 0xDEAD0003`'s result is the tag's stored ACK (`flags` bit0), which `EVT_RESULT` must carry to the host |
 | Configuration client | every step answered (relay state, TTL echoed); a node reset makes the device unprovisioned again |
 | `REBOOT` | the core restarts with a new `boot_id` (the PTY stays open, as a UART does); the CDB survives |
 
@@ -93,4 +96,8 @@ What this does **not** cover: the Zephyr mesh stack itself (provisioning
 PDUs, the static OOB exchange, the configuration client's messages,
 segmentation, `send_cb` timing), USB CDC ACM enumeration, the nRF UART driver,
 the factory-reset button and settings storage — those are hardware tests
-(docs/gateway-firmware.md §13).
+(docs/gateway-firmware.md §13). Nor the tags on the gateway's own radio
+(docs/protocol.md §11): the simulated network has no Bluetooth, so both
+builds leave `CONFIG_CTAG_GW_RADIO` off (a gateway without tag links); the
+core's side of them is the `gw_radio` suite of `tests/core`
+(docs/gateway-firmware.md §16.9).

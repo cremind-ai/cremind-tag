@@ -1,7 +1,7 @@
 /*
  * Serial protocol server (docs/protocol.md 1.1-1.5, 10): framing, credits,
  * HELLO, responses, retained and best-effort events, idempotency, and the
- * request dispatcher. Mirrors the companion's sim/device.py (DeviceEndpoint)
+ * request dispatcher. Mirrors Cremind's app/tags/runtime/sim/device.py (DeviceEndpoint)
  * and sim/gateway.py (_handle).
  *
  * Protocol v2 (CONFIG_CTAG_GW_SECURE, docs/connect-setup.md 4.2, 5): in
@@ -36,7 +36,7 @@ static const char T_MALFORMED[] = "malformed CBOR payload";
 static const char T_MISSING[] = "missing field";
 static const char T_TOO_LARGE_ANSWER[] = "answer too large";
 
-/* ---- Request field specifications (companion protocol/cbor_msgs.py REQUESTS) ---- */
+/* ---- Request field specifications (Cremind's app/tags/runtime/protocol/cbor_msgs.py REQUESTS) ---- */
 
 struct req_spec {
 	uint8_t type;
@@ -77,7 +77,11 @@ static const struct req_spec specs[] = {
 	{CTAG_SERIAL_MSG_IDENTIFY_NODE, 2, 0x03, {K(OP_ID), K(ADDR)}},
 #ifdef CONFIG_CTAG_GW_SECURE
 	{CTAG_SERIAL_MSG_DISCOVER, 4, 0x0F, {K(OP_ID), K(BRIDGE), K(DURATION_S), K(TAG_ID)}},
-	{CTAG_SERIAL_MSG_TUNNEL_OPEN, 4, 0x0F, {K(OP_ID), K(BRIDGE), K(TAG_ID), K(DURATION_S)}},
+	/* mode (optional, absent = PAIR): protocol.md 11.3 */
+	{CTAG_SERIAL_MSG_TUNNEL_OPEN,
+	 5,
+	 0x0F,
+	 {K(OP_ID), K(BRIDGE), K(TAG_ID), K(DURATION_S), K(MODE)}},
 	{CTAG_SERIAL_MSG_TUNNEL_SEND, 2, 0x03, {K(TUNNEL), K(DATA)}},
 	{CTAG_SERIAL_MSG_TUNNEL_CLOSE, 1, 0x01, {K(TUNNEL)}},
 #endif
@@ -314,7 +318,14 @@ static struct gw_resp *respond(struct gw_core *g, const struct ctag_serial_heade
 	return r;
 }
 
-static int encode_caps(const struct gw_core *g, struct ctag_cbor_field caps[6])
+/* HELLO / INFO caps; with tag links (protocol.md 11) also tag_links. */
+#ifdef CONFIG_CTAG_GW_RADIO
+#define CAPS_FIELDS 7
+#else
+#define CAPS_FIELDS 6
+#endif
+
+static int encode_caps(const struct gw_core *g, struct ctag_cbor_field caps[CAPS_FIELDS])
 {
 	caps[0] = GW_F_UINT(CTAG_CBOR_KEY_MAX_FRAME, CTAG_SERIAL_MAX_FRAME);
 	caps[1] = GW_F_UINT(CTAG_CBOR_KEY_CREDITS, N_RESP);
@@ -322,12 +333,15 @@ static int encode_caps(const struct gw_core *g, struct ctag_cbor_field caps[6])
 	caps[3] = GW_F_UINT(CTAG_CBOR_KEY_BOARD, g->info.board);
 	caps[4] = GW_F_UINT(CTAG_CBOR_KEY_MAX_BRIDGES, CTAG_MAX_BRIDGES);
 	caps[5] = GW_F_UINT(CTAG_CBOR_KEY_MAX_TAGS, CTAG_MAX_TAGS);
-	return 6;
+#ifdef CONFIG_CTAG_GW_RADIO
+	caps[6] = GW_F_UINT(CTAG_CBOR_KEY_TAG_LINKS, CONFIG_CTAG_GW_TAG_LINKS);
+#endif
+	return CAPS_FIELDS;
 }
 
 static int encode_hello(struct gw_core *g, uint8_t *buf, size_t size)
 {
-	struct ctag_cbor_field caps[6];
+	struct ctag_cbor_field caps[CAPS_FIELDS];
 	struct ctag_cbor_field f[6];
 	size_t n = 0u;
 
@@ -342,9 +356,11 @@ static int encode_hello(struct gw_core *g, uint8_t *buf, size_t size)
 	return ctag_cbor_encode(f, n, buf, size);
 }
 
-/* Core, v2 and backend counters; INFO's 8 top-level keys plus these stay
- * within ctag_cbor's 96 keys held at once (docs/firmware-libs.md). */
-#ifdef CONFIG_CTAG_GW_SECURE
+/* Core, v2, own-radio and backend counters; INFO's 8 top-level keys plus
+ * these stay within ctag_cbor's 96 keys held at once (docs/firmware-libs.md). */
+#if defined(CONFIG_CTAG_GW_RADIO)
+#define MAX_COUNTERS 88u
+#elif defined(CONFIG_CTAG_GW_SECURE)
 #define MAX_COUNTERS 72u
 #else
 #define MAX_COUNTERS 64u
@@ -353,7 +369,7 @@ static int encode_hello(struct gw_core *g, uint8_t *buf, size_t size)
 static int encode_query(struct gw_core *g, uint8_t type, uint8_t *buf, size_t size)
 {
 	struct ctag_cbor_counter items[MAX_COUNTERS];
-	struct ctag_cbor_field caps[6];
+	struct ctag_cbor_field caps[CAPS_FIELDS];
 	struct ctag_cbor_field f[6];
 	size_t n = 0u;
 
@@ -821,7 +837,7 @@ static struct gw_req_result side_effect(struct gw_core *g, uint8_t type,
 		break;
 	case CTAG_SERIAL_MSG_TUNNEL_OPEN:
 		r = gw_tunnel_open(g, (uint16_t)f[1].v.u, (uint32_t)f[2].v.u, (uint32_t)f[3].v.u,
-				   tunnel);
+				   f[4].present ? (uint32_t)f[4].v.u : CTAG_TUNNEL_MODE_PAIR, tunnel);
 		break;
 #endif
 	default:

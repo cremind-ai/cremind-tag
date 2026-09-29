@@ -1,4 +1,4 @@
-/* Bridge delivery core (docs/protocol.md 3, 10); mirrors companion sim/bridge.py. */
+/* Bridge delivery core (docs/protocol.md 3, 10); mirrors Cremind's app/tags/runtime/sim/bridge.py. */
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>

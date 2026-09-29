@@ -42,7 +42,7 @@ a status as a link failure until it repeats in 3 consecutive sessions
 (`RESULT_FLAG_ESCALATED`). The stored epoch an `ERROR` carries is not secret;
 the companion uses it only to raise the epoch of the next assignment, by a
 bounded step (at most 256 above the highest epoch it knows per report,
-companion.md §5 "Epoch floor"), never to lower one or to grant anything: a
+[the runtime's docs](https://github.com/cremind-ai/cremind/blob/main/docs/tags/runtime.md) §5 "Epoch floor"), never to lower one or to grant anything: a
 forger can make Cremind skip epoch numbers, while the new assignment still
 needs `K_epoch`, which only the companion can derive.
 
@@ -74,7 +74,7 @@ https links.
 
 ## Physical attacks (out of scope for v1, documented)
 
-UICR is readable over SWD unless APPROTECT is enabled. `cremind-tag tag enroll
+UICR is readable over SWD unless APPROTECT is enabled. `cremind tags tools tag enroll
 --protect` enables APPROTECT after programming (irreversible without a full
 erase, which also erases the secret). Without it, anyone with physical SWD
 access to a tag can read its secret and impersonate that single tag.

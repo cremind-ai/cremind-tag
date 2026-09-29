@@ -165,6 +165,60 @@ config CTAG_GW_DISCOVERED_SLOTS
 	default 16
 	range 4 64
 
+config CTAG_GW_RADIO
+	bool "Tags on the gateway's own radio (docs/protocol.md 11)"
+	select CTAG_SCHED
+	select CTAG_FRAG
+	help
+	  The gateway also connects to tags itself, as a thin BLE relay:
+	  TUNNEL_OPEN / DISCOVER with bridge GATEWAY_ADDR use its own radio,
+	  the companion runs the tag session and renders, and the gateway
+	  carries whole messages (fragmented per 5.3) between the serial
+	  tunnel and the tag's characteristics. Connections follow the mesh
+	  suspend window of 5.2 (lib/sched). Protocol v2 only (it depends on
+	  CTAG_GW_SECURE: tunnels and DISCOVER are v2 messages). Needs
+	  BT_CENTRAL and BT_GATT_CLIENT; HELLO caps report tag_links.
+
+if CTAG_GW_RADIO
+
+config CTAG_GW_TAG_LINKS
+	int "Tag connections held at once (caps.tag_links)"
+	default 2
+	range 1 2
+	help
+	  One Bluetooth connection each (CONFIG_BT_MAX_CONN >= this) and, per
+	  link, the transmit queue of its tunnel (two messages) and the
+	  reassembly buffers of what the tag sends.
+
+config CTAG_GW_RADIO_TUNNELS
+	int "Own-radio tunnels open at once (waiting or connected)"
+	default 8
+	range 1 16
+	help
+	  TUNNEL_OPEN to GATEWAY_ADDR answers BUSY beyond this. A waiting
+	  tunnel costs a few bytes; its buffers are the link's once it is
+	  connected.
+
+config CTAG_GW_LINK_INFLIGHT
+	int "DATA fragments handed to the Bluetooth host at once, per link"
+	default 4
+	range 1 16
+	help
+	  Writes without response in flight on one link. Kept below
+	  CONFIG_BT_ATT_TX_COUNT (times the links) so that a write never
+	  waits for an ATT buffer on the gateway loop.
+
+# The shared scheduler (lib/sched): one link per tag link (gw_radio.c asserts
+# it) and a back-off entry per tag it may be trying (one per own-radio tunnel
+# at the default).
+config CTAG_SCHED_LINKS
+	default CTAG_GW_TAG_LINKS
+
+config CTAG_SCHED_TAGS
+	default 8
+
+endif # CTAG_GW_RADIO
+
 endif
 
 endmenu

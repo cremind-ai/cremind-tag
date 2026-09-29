@@ -2,8 +2,9 @@
  * Tag protocol core (apps/tag/src/tag_core.c) on native_sim, with fake panel,
  * storage, clock and nonce hooks (fakes.c):
  *
- * - tag_core_conv: bridge conversations scripted with the companion's Python
- *   reference (gen_conversation.py -> conversation.h), replayed byte for byte;
+ * - tag_core_conv: bridge conversations scripted with the host's Python
+ *   reference (Cremind's scripts/tags/gen_conversation.py -> conversation.h),
+ *   replayed byte for byte;
  * - tag_core_fixtures: protocol/fixtures session.json (handshake over the
  *   fixture CAPS, records, tampering, a relayed CAPS), tag_txn.json
  *   (FRAME_BEGIN table, boot rule) and render.json

@@ -1,6 +1,6 @@
 /*
  * Tag session handshake and records (docs/protocol.md 5.4-5.5); mirrors
- * companion protocol/session.py. HKDF is built from HMAC (firmware-notes 5:
+ * Cremind's app/tags/runtime/protocol/session.py. HKDF is built from HMAC (firmware-notes 5:
  * never the PSA key-derivation API); every output here is at most 32 bytes,
  * so HKDF-Expand needs a single block.
  */

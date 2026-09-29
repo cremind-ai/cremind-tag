@@ -383,9 +383,8 @@ needing on-target measurement; it is the first thing to check with
 ## 10. Build, flash, debug
 
 ```bash
-unset VIRTUAL_ENV
-companion/.venv/Scripts/python.exe tools/build.py tag-laowu-bw tag-laowu-bwr \
-    tag-sifei-52810 tag-hema-52811 tag-nrf52dk          # Windows; bin/python on Linux
+uv run python tools/build.py tag-laowu-bw tag-laowu-bwr \
+    tag-sifei-52810 tag-hema-52811 tag-nrf52dk
 ```
 
 Artifacts land in `build/<target>/` (`zephyr.hex`, `zephyr.elf`, map,
@@ -400,7 +399,7 @@ J-Link> r
 J-Link> g
 ```
 
-Enroll with the companion (`cremind-tag tag enroll`), which writes the blob to
+Enroll with the companion (`cremind tags tools tag enroll`), which writes the blob to
 UICR; the board and panel in the blob must match the firmware (section 5).
 
 **Debug build** (UART log on the debug TX pad: BW P0.06, BWR P0.08; DK VCOM):
@@ -441,17 +440,19 @@ west twister -T /work/tests/ztest/tag_core -p native_sim -p native_sim/native/64
 
 | Suite | What |
 |---|---|
-| `tag_core_conv` (15) | Conversations scripted by [`gen_conversation.py`](../tests/ztest/tag_core/gen_conversation.py) with the companion's reference (`protocol/session.py`, `fragments.py`, `msgs.py`) and replayed byte for byte, every ATT value the tag sends compared (the tag serves the CAPS of the frame's panel; every ERROR carries the stored epoch): happy path (two records in flight), two planes, duplicate (stored ACK), stale revision, revision conflict, digest mismatch (no refresh), AUTH failure, a relayed CAPS (plane_flags rewritten on the bridge's read: AUTH fails, the panel is never touched), disconnect mid-transfer then restart from offset 0, power loss between REFRESH_INTENT and DISPLAYED → boot rule → CHALLENGE flag and DISPLAY_STATE_UNKNOWN → re-delivery → OK, epoch stored only after AUTH, IDENTIFY/REFRESH/SLEEP → UNSUPPORTED, CLEAR (white planes, revision 0), unverified panel refuses frames, refresh timeout keeps REFRESH_INTENT. Frames are `render.json` scenarios with plane bytes. |
+| `tag_core_conv` (15) | Conversations scripted by [`gen_conversation.py`](https://github.com/cremind-ai/cremind/blob/main/scripts/tags/gen_conversation.py) with the companion's reference (`protocol/session.py`, `fragments.py`, `msgs.py`) and replayed byte for byte, every ATT value the tag sends compared (the tag serves the CAPS of the frame's panel; every ERROR carries the stored epoch): happy path (two records in flight), two planes, duplicate (stored ACK), stale revision, revision conflict, digest mismatch (no refresh), AUTH failure, a relayed CAPS (plane_flags rewritten on the bridge's read: AUTH fails, the panel is never touched), disconnect mid-transfer then restart from offset 0, power loss between REFRESH_INTENT and DISPLAYED → boot rule → CHALLENGE flag and DISPLAY_STATE_UNKNOWN → re-delivery → OK, epoch stored only after AUTH, IDENTIFY/REFRESH/SLEEP → UNSUPPORTED, CLEAR (white planes, revision 0), unverified panel refuses frames, refresh timeout keeps REFRESH_INTENT. Frames are `render.json` scenarios with plane bytes. |
 | `tag_core_fixtures` (8) | `session.json`: exact CHALLENGE and AUTH_OK from the fixture CAPS/HELLO/AUTH and state, the fixture records decrypted and staged, every B2T tampered record → ERROR{AUTH_FAILED}, bad mac_b, the fixture's relayed-CAPS AUTH → ERROR{AUTH_FAILED, 2}, the fixture's ERROR{STALE_EPOCH, 4} byte for byte; `tag_txn.json`: every FRAME_BEGIN row through a live C bridge (the "older epoch" row is refused earlier, at HELLO, with STALE_EPOCH), every boot-rule row incl. the CHALLENGE flag; `render.json`: every scenario with plane bytes transferred and verified against its frame digest. |
 | `tag_core_rules` (16) | 3 AUTH failures skip one window; session timeout (never during a refresh); fragment violation closes silently; record without credit; CTRL after AUTH_OK; DATA before AUTH; malformed plaintext (each ERROR with the stored epoch); corrupt record → STORAGE_ERROR and no-record behaviour; REFRESH_INTENT write failure (no refresh); epoch write failure (ERROR{STORAGE_ERROR} with the epoch kept); panel begin/commit failures; FRAME_ABORT, out-of-order PLANE_DATA, early FRAME_END; disconnect during a refresh completes and persists; the stored ACK of the re-delivery clears `result_pending`, as does any RESULT; advertising flags. |
 
 Result (2026-09-28): 39/39 cases on `native_sim` and on `native_sim/native/64`.
 
-Regenerate the conversations after a protocol change with the companion
-environment, and check them in CI:
+After a protocol change, regenerate the conversations with the host's
+reference implementation — in a Cremind checkout next to this one — and
+commit the header here; the contract carries it (`tests/conversation.h`), and
+Cremind's tests check its generator against the pinned copy:
 
 ```bash
-uv run --project companion python tests/ztest/tag_core/gen_conversation.py [--check]
+python scripts/tags/gen_conversation.py --out ../cremind-tag/tests/ztest/tag_core/src/conversation.h
 ```
 
 ## 12. First-sample bring-up checklist

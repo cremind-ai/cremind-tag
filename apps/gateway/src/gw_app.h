@@ -25,10 +25,19 @@ enum gw_evt_type {
 	GW_EVT_PROV_CLOSED,
 	GW_EVT_PROV_SECURITY, /* v2: the device offered no static OOB (HMAC-SHA256) */
 	GW_EVT_PROV_AUTH,     /* v2: the static OOB exchange began */
+	/* The own radio (CONFIG_CTAG_GW_RADIO, central.c) */
+	GW_EVT_TAG_ADV,      /* tag = tag_id, op = ver, u16 = flags, rssi, data = addr type + 6 bytes */
+	GW_EVT_CONN,         /* bt_conn_cb.connected: data = the struct bt_conn *, err = HCI status */
+	GW_EVT_DISCONN,      /* bt_conn_cb.disconnected: data = the struct bt_conn *, err = reason */
+	GW_EVT_GATT,         /* a GATT setup step of link addr ended: u16 = the step, err, data[len] */
+	GW_EVT_LINK_VALUE,   /* link addr: a notification / indication of op = enum gw_chr, data[len]
+			      * (err -EMSGSIZE: longer than data) */
+	GW_EVT_LINK_WRITTEN, /* link addr: a fragment written to op = enum gw_chr completed, err */
 };
 
 /* >= the largest inbound vendor message: DELIVERY_RESULT (41); v2 TUNNEL_UP
- * (4 + TUNNEL_DATA_MAX). */
+ * (4 + TUNNEL_DATA_MAX), which also holds the own radio's largest value (the
+ * IDENT read, 91 bytes). */
 #ifdef CONFIG_CTAG_GW_SECURE
 #define GW_EVT_DATA CTAG_MESH_TUNNEL_UP_MAX_LEN
 #else
@@ -51,6 +60,9 @@ struct gw_evt {
 
 /* Queue an event for the gateway thread (any context; never blocks). */
 void gw_post(const struct gw_evt *e);
+/* The same for an advertisement: dropped (false) once the queue is half full,
+ * so advertisements never crowd out mesh and link events. */
+bool gw_post_advert(const struct gw_evt *e);
 /* Wake the gateway thread (serial bytes arrived or transmit room freed). */
 void gw_wake(void);
 /* Run the core on the calling thread forever; gw_core_start() comes first. */
@@ -73,5 +85,13 @@ size_t uart_io_counters(struct ctag_cbor_counter *items, size_t max);
  * solid): true = reset. false at once when the button is up or the board has
  * none. */
 bool gw_factory_reset_held(void);
+
+#ifdef CONFIG_CTAG_GW_RADIO
+/* ---- central.c: the own radio's Bluetooth side (docs/protocol.md 11) ---- */
+
+/* On the gateway thread: connection and GATT-setup events (GW_EVT_CONN,
+ * GW_EVT_DISCONN, GW_EVT_GATT), which end in gw_core_link_*(). */
+void gw_central_event(struct gw_core *g, const struct gw_evt *e, int64_t now);
+#endif
 
 #endif /* GW_APP_H_ */

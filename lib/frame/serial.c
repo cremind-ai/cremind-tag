@@ -1,4 +1,4 @@
-/* Serial frames (docs/protocol.md 1.1); mirrors companion protocol/serial_frame.py. */
+/* Serial frames (docs/protocol.md 1.1); mirrors Cremind's app/tags/runtime/protocol/serial_frame.py. */
 #include <errno.h>
 #include <string.h>
 

@@ -9,22 +9,16 @@ __pycache__/
 .mypy_cache/
 *.egg-info/
 .venv/
-companion/dist/
-# Release packages (tools/release.py)
+# Release packages (tools/release.py) and contract artifacts (tools/contract.py)
 /dist/
+.claude/
 
 # Host C tests
 /tests/host/build/
 
-# Font sources and generated packs are downloaded/generated, never committed
-/fonts/cache/
-/fonts/out/
+# Font packs are built by the host software (Cremind); only the fixture pack is committed
 *.ctfp
 !/protocol/fixtures/*.ctfp
-
-# Local companion state
-*.sqlite3
-*.db
 
 # Editors
 .vscode/*

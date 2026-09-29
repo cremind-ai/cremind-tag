@@ -85,7 +85,7 @@ config CTAG_BRIDGE_MAINT_MAX_FRAME
 	range 256 4096
 	help
 	  The host learns it from HELLO's caps.max_frame and sizes FONT_DATA
-	  chunks to fit (companion bridge_maint/client.py: max_frame - 36).
+	  chunks to fit (Cremind's app/tags/runtime/bridge_maint/client.py: max_frame - 36).
 
 config CTAG_BRIDGE_MAINT_TX_FRAME
 	int "Maintenance port: response frame buffer"
@@ -101,5 +101,14 @@ config CTAG_BRIDGE_MAINT_CREDITS
 	range 1 8
 	help
 	  The receive ring must hold this many maximum-size encoded frames.
+
+# The tag connection scheduler (lib/sched, CONFIG_CTAG_SCHED in prj.conf):
+# one link per tag session and one back-off entry per assignable tag
+# (central.c asserts both).
+config CTAG_SCHED_LINKS
+	default CTAG_BRIDGE_SESSIONS if CTAG_SCHED
+
+config CTAG_SCHED_TAGS
+	default CTAG_BRIDGE_MAX_TAGS if CTAG_SCHED
 
 endmenu

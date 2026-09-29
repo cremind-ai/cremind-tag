@@ -1,0 +1,26 @@
+# The Python environment of the firmware's own tools (tools/: build, verify_stack,
+# codegen, contract, version, release, repro_check, gen_hardware_docs) and their
+# tests (tests/tools). Not a package: nothing here is installed or published.
+#
+#     uv sync                                  # once
+#     uv run pytest                            # tests/tools
+#     uv run python tools/codegen.py --check   # any tool
+#
+# Firmware builds themselves run in the pinned nRF Connect SDK toolchain container
+# (docs/building.md). Host software (Cremind) is never needed here.
+
+[project]
+name = "cremind-tag-tools"
+version = "0"
+description = "Build, check and release tooling of the Cremind Tag firmware"
+requires-python = ">=3.11"
+dependencies = ["pyyaml>=6.0"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests/tools"]

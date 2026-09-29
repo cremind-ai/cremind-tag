@@ -23,28 +23,29 @@ env:
   CTAG_TOOLCHAIN_IMAGE: ghcr.io/nrfconnect/sdk-nrf-toolchain@sha256:45b97cad97a9967c52d77d1d1a0f7dd8fe027edd17c05c3eda2eeadc23729418
 
 jobs:
-  companion:
-    name: Companion + tools (Python)
+  tools:
+    name: Tools (Python)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
-      - name: Sync companion environment
-        run: uv sync --project companion
-      - name: Companion tests
-        working-directory: companion
+      - name: Sync the tools environment (pyproject.toml, uv.lock)
+        run: uv sync --locked
+      - name: Tool tests (build matrix, verify_stack, board files, contract, release tooling)
         run: uv run pytest -q
-      - name: Tool tests (build matrix, verify_stack, board files, release tooling)
-        run: uv run --project companion pytest tests/tools -q
-      - name: One version everywhere (VERSION, apps' Zephyr VERSION, companion)
-        run: uv run --project companion python tools/version.py --check
-      - name: Generated protocol bindings, fixtures and test vectors are current
+      - name: One version everywhere (VERSION, apps' Zephyr VERSION)
+        run: uv run python tools/version.py --check
+      - name: Generated C protocol bindings are current
+        run: uv run python tools/codegen.py --check
+      # The golden fixtures and the tag core conversations are produced by the host's
+      # reference implementation (Cremind) and committed here; the host C tests and
+      # twister check the firmware against them.
+      - name: The protocol contract builds and verifies
         run: |
-          uv run --project companion python tools/codegen.py --check
-          uv run --project companion python tools/gen_fixtures.py --check
-          uv run --project companion python tests/ztest/tag_core/gen_conversation.py --check
+          uv run python tools/contract.py --out "$RUNNER_TEMP/contract"
+          uv run python tools/contract.py --check "$RUNNER_TEMP/contract/cremind-tag-contract-$(cat VERSION)"
 
   host-c:
     name: Host C tests

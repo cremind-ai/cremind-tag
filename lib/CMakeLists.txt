@@ -34,6 +34,7 @@ ctag_library(ctag_frame CONFIG_CTAG_FRAME
 ctag_library(ctag_layout CONFIG_CTAG_LAYOUT
   SOURCES layout/layout.c layout/assembler.c)
 ctag_library(ctag_frag CONFIG_CTAG_FRAG SOURCES frag/frag.c)
+ctag_library(ctag_sched CONFIG_CTAG_SCHED SOURCES sched/sched.c)
 ctag_library(ctag_txn CONFIG_CTAG_TXN SOURCES txn/txn.c DEPENDS ctag_crc32)
 ctag_library(ctag_enroll CONFIG_CTAG_ENROLL SOURCES enroll/enroll.c DEPENDS ctag_crc32)
 

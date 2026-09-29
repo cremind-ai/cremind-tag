@@ -14,6 +14,10 @@
  * first boot and kept in settings; the ownership record and the generation
  * floor are loaded; an unowned gateway never keeps a network (a released or
  * reset one, or a v1 network found at the first v2 boot, is wiped).
+ *
+ * Tags on the own radio (CONFIG_CTAG_GW_RADIO, docs/protocol.md 11): once the
+ * mesh runs, central.c listens to its scan for tag advertisements and serves
+ * the core's link operations.
  */
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
@@ -61,7 +65,11 @@ static size_t be_counters(void *ctx, struct ctag_cbor_counter *items, size_t max
 	size_t n = uart_io_counters(items, max);
 
 	ARG_UNUSED(ctx);
-	return n + gw_mesh_counters(&items[n], max - n);
+	n += gw_mesh_counters(&items[n], max - n);
+#ifdef CONFIG_CTAG_GW_RADIO
+	n += gw_central_counters(&items[n], max - n);
+#endif
+	return n;
 }
 
 #ifdef CONFIG_CTAG_GW_SECURE
@@ -88,6 +96,15 @@ static const struct gw_backend backend = {
 	.store_owner = gw_store_save_owner,
 	.random = be_random,
 	.release = gw_mesh_wipe,
+#endif
+#ifdef CONFIG_CTAG_GW_RADIO
+	.radio_listen = gw_central_listen,
+	.radio_suspend = gw_central_suspend,
+	.radio_resume = gw_central_resume,
+	.link_connect = gw_central_connect,
+	.link_disconnect = gw_central_disconnect,
+	.link_setup = gw_central_setup,
+	.link_write = gw_central_write,
 #endif
 };
 
@@ -171,6 +188,12 @@ int main(void)
 		/* Keep serving the host: INFO shows mesh_init, requests to bridges fail. */
 		LOG_ERR("mesh unavailable: %d", err);
 	}
+#ifdef CONFIG_CTAG_GW_RADIO
+	if (err == 0) {
+		/* Tags on the own radio are heard through the mesh's scan: once it runs. */
+		gw_central_init();
+	}
+#endif
 	if (sys_csrand_get(&info.boot_id, sizeof(info.boot_id)) != 0) {
 		info.boot_id = sys_rand32_get();
 	}

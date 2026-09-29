@@ -1,6 +1,6 @@
 /*
  * Enrollment blob (docs/protocol.md 9): 48 bytes in UICR.CUSTOMER[0..11].
- * Mirrors companion protocol/enrollment.py unpack_blob().
+ * Mirrors Cremind's app/tags/runtime/protocol/enrollment.py unpack_blob().
  */
 #ifndef CTAG_ENROLL_H_
 #define CTAG_ENROLL_H_

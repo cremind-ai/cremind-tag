@@ -21,26 +21,33 @@
  * bridge closing the tunnel. A tunnel without traffic for its timeout plus
  * a grace time is closed with TIMEOUT. One tunnel per bridge (a bridge holds
  * one at a time).
+ *
+ * With CONFIG_CTAG_GW_RADIO, bridge GATEWAY_ADDR (docs/protocol.md 11) names
+ * the gateway's own radio: DISCOVER opens a window there too (gw_radio.c,
+ * sharing the (bridge, tag) rate limit), TUNNEL_OPEN creates an own-radio
+ * tunnel in the same id space, and TUNNEL_SEND / TUNNEL_CLOSE go to whichever
+ * table holds the id.
  */
 #include <errno.h>
 #include <string.h>
 
 #include "gw_core.h"
 
-#define TUNNEL_GRACE_MS   5000 /* beyond the bridge's own idle timeout */
-#define DISCOVER_GRACE_MS 2000 /* DISCOVERED already on its way when the window ends */
-
 static const char T_DURATION[] = "duration_s out of range";
 static const char T_TUNNEL_BUSY[] = "a tunnel to this bridge is open";
 static const char T_NO_TUNNEL[] = "no such tunnel";
+static const char T_MODE[] = "mode SESSION only on the gateway's own radio";
+#ifndef CONFIG_CTAG_GW_RADIO
+static const char T_NO_RADIO[] = "this gateway has no tag links";
+#endif
 
 /* ---- DISCOVER ---- */
 
 static void discover_to(struct gw_core *g, struct gw_node *n, const uint8_t *p, uint32_t duration_s)
 {
 	(void)gw_unseg_send(g, n->addr, CTAG_MESH_OP_DISCOVER, p, CTAG_MESH_DISCOVER_LEN);
-	n->discover_until = duration_s > 0u ? g->now + (int64_t)duration_s * 1000 + DISCOVER_GRACE_MS
-					    : 0;
+	n->discover_until =
+		duration_s > 0u ? g->now + (int64_t)duration_s * 1000 + GW_DISCOVER_GRACE_MS : 0;
 }
 
 struct gw_req_result gw_discover(struct gw_core *g, uint16_t bridge, uint32_t duration_s,
@@ -53,11 +60,17 @@ struct gw_req_result gw_discover(struct gw_core *g, uint16_t bridge, uint32_t du
 		return (struct gw_req_result){CTAG_STATUS_INVALID, T_DURATION};
 	}
 	(void)ctag_mesh_discover_pack(&m, p, sizeof(p));
+#ifdef CONFIG_CTAG_GW_RADIO
+	if (bridge == GW_ADDR) {
+		gw_radio_discover(g, duration_s, tag_id); /* 11.2: the own radio only */
+		return (struct gw_req_result){CTAG_STATUS_ACCEPTED, NULL};
+	}
+#endif
 	if (bridge != 0u) {
 		struct gw_req_result r = gw_node_usable(g, bridge);
 
 		if (r.status != CTAG_STATUS_OK) {
-			return r;
+			return r; /* without tag links GATEWAY_ADDR is no node: NOT_FOUND */
 		}
 		discover_to(g, gw_node_get(g, bridge), p, duration_s);
 	} else {
@@ -66,23 +79,21 @@ struct gw_req_result gw_discover(struct gw_core *g, uint16_t bridge, uint32_t du
 				discover_to(g, &g->nodes[i], p, duration_s);
 			}
 		}
+#ifdef CONFIG_CTAG_GW_RADIO
+		gw_radio_discover(g, duration_s, tag_id); /* 11.2: and the own radio */
+#endif
 	}
 	return (struct gw_req_result){CTAG_STATUS_ACCEPTED, NULL};
 }
 
-static void discovered(struct gw_core *g, uint16_t src, const struct ctag_mesh_discovered *d)
+void gw_discovered(struct gw_core *g, uint16_t src, uint32_t tag_id, int8_t rssi, uint8_t flags)
 {
-	struct gw_node *n = gw_node_get(g, src);
 	struct gw_discovered *e = NULL;
 
-	if (n == NULL || n->discover_until == 0 || g->now > n->discover_until) {
-		g->c.unexpected_mesh++; /* no window open: candidates are asked for, never kept */
-		return;
-	}
 	for (int i = 0; i < CONFIG_CTAG_GW_DISCOVERED_SLOTS; i++) {
 		struct gw_discovered *c = &g->v2.discovered[i];
 
-		if (c->last != 0 && c->bridge == src && c->tag_id == d->tag_id) {
+		if (c->last != 0 && c->bridge == src && c->tag_id == tag_id) {
 			e = c;
 			break;
 		}
@@ -99,20 +110,31 @@ static void discovered(struct gw_core *g, uint16_t src, const struct ctag_mesh_d
 			}
 		}
 		e->bridge = src;
-		e->tag_id = d->tag_id;
+		e->tag_id = tag_id;
 	}
 	e->last = g->now;
 	g->v2.c.discovered++;
 	{
 		struct ctag_cbor_field f[4] = {
 			GW_F_UINT(CTAG_CBOR_KEY_BRIDGE, src),
-			GW_F_UINT(CTAG_CBOR_KEY_TAG_ID, d->tag_id),
-			GW_F_INT(CTAG_CBOR_KEY_RSSI, d->rssi),
-			GW_F_UINT(CTAG_CBOR_KEY_FLAGS, d->flags),
+			GW_F_UINT(CTAG_CBOR_KEY_TAG_ID, tag_id),
+			GW_F_INT(CTAG_CBOR_KEY_RSSI, rssi),
+			GW_F_UINT(CTAG_CBOR_KEY_FLAGS, flags),
 		};
 
 		(void)gw_emit(g, CTAG_SERIAL_MSG_EVT_DISCOVERED, f, 4u, false);
 	}
+}
+
+static void discovered(struct gw_core *g, uint16_t src, const struct ctag_mesh_discovered *d)
+{
+	struct gw_node *n = gw_node_get(g, src);
+
+	if (n == NULL || n->discover_until == 0 || g->now > n->discover_until) {
+		g->c.unexpected_mesh++; /* no window open: candidates are asked for, never kept */
+		return;
+	}
+	gw_discovered(g, src, d->tag_id, d->rssi, d->flags);
 }
 
 /* ---- Tunnels ---- */
@@ -132,13 +154,27 @@ static uint8_t slot_of(const struct gw_core *g, const struct gw_tunnel *t)
 	return (uint8_t)(t - g->v2.tunnels);
 }
 
-static void tunnel_event(struct gw_core *g, const struct gw_tunnel *t, uint8_t state,
-			 const uint8_t *data, size_t len, int status)
+uint16_t gw_tunnel_new_id(struct gw_core *g)
 {
-	struct ctag_cbor_field f[6] = {
-		GW_F_UINT(CTAG_CBOR_KEY_TUNNEL, t->id),
-		GW_F_UINT(CTAG_CBOR_KEY_BRIDGE, t->bridge),
-		GW_F_UINT(CTAG_CBOR_KEY_TAG_ID, t->tag_id),
+	/* A fresh non-zero id, never one in use by either kind of tunnel. */
+	do {
+		g->v2.tunnel_next = (uint16_t)(g->v2.tunnel_next == UINT16_MAX ? 1u
+									: g->v2.tunnel_next + 1u);
+	} while (by_id(g, g->v2.tunnel_next) != NULL
+#ifdef CONFIG_CTAG_GW_RADIO
+		 || gw_radio_has_tunnel(g, g->v2.tunnel_next)
+#endif
+	);
+	return g->v2.tunnel_next;
+}
+
+void gw_tunnel_event(struct gw_core *g, uint16_t id, uint16_t bridge, uint32_t tag_id,
+		     uint8_t state, const uint8_t *data, size_t len, int status, const int8_t *rssi)
+{
+	struct ctag_cbor_field f[7] = {
+		GW_F_UINT(CTAG_CBOR_KEY_TUNNEL, id),
+		GW_F_UINT(CTAG_CBOR_KEY_BRIDGE, bridge),
+		GW_F_UINT(CTAG_CBOR_KEY_TAG_ID, tag_id),
 		GW_F_UINT(CTAG_CBOR_KEY_STATE, state),
 	};
 	size_t n = 4u;
@@ -149,7 +185,16 @@ static void tunnel_event(struct gw_core *g, const struct gw_tunnel *t, uint8_t s
 	if (status >= 0) {
 		f[n++] = GW_F_UINT(CTAG_CBOR_KEY_STATUS, (uint32_t)status);
 	}
+	if (rssi != NULL) {
+		f[n++] = GW_F_INT(CTAG_CBOR_KEY_RSSI, *rssi);
+	}
 	(void)gw_emit(g, CTAG_SERIAL_MSG_EVT_TUNNEL, f, n, false);
+}
+
+static void tunnel_event(struct gw_core *g, const struct gw_tunnel *t, uint8_t state,
+			 const uint8_t *data, size_t len, int status)
+{
+	gw_tunnel_event(g, t->id, t->bridge, t->tag_id, state, data, len, status, NULL);
 }
 
 static void mesh_close(struct gw_core *g, const struct gw_tunnel *t, uint8_t status)
@@ -175,17 +220,28 @@ static void tunnel_free(struct gw_core *g, struct gw_tunnel *t)
 
 static void touch(struct gw_core *g, struct gw_tunnel *t)
 {
-	t->idle_at = g->now + (int64_t)t->timeout_s * 1000 + TUNNEL_GRACE_MS;
+	t->idle_at = g->now + (int64_t)t->timeout_s * 1000 + GW_TUNNEL_GRACE_MS;
 }
 
 struct gw_req_result gw_tunnel_open(struct gw_core *g, uint16_t bridge, uint32_t tag_id,
-				    uint32_t duration_s, uint16_t *tunnel)
+				    uint32_t duration_s, uint32_t mode, uint16_t *tunnel)
 {
-	struct gw_req_result r = gw_node_usable(g, bridge);
+	struct gw_req_result r;
 	struct gw_tunnel *t = NULL;
 	struct ctag_mesh_tunnel_open m;
 	uint8_t p[CTAG_MESH_TUNNEL_OPEN_LEN];
 
+	if (bridge == GW_ADDR) {
+#ifdef CONFIG_CTAG_GW_RADIO
+		return gw_radio_open(g, tag_id, duration_s, mode, tunnel); /* 11.3 */
+#else
+		return (struct gw_req_result){CTAG_STATUS_UNSUPPORTED, T_NO_RADIO};
+#endif
+	}
+	if (mode != CTAG_TUNNEL_MODE_PAIR) {
+		return (struct gw_req_result){CTAG_STATUS_INVALID, T_MODE}; /* 11.3 */
+	}
+	r = gw_node_usable(g, bridge);
 	if (r.status != CTAG_STATUS_OK) {
 		return r;
 	}
@@ -207,14 +263,9 @@ struct gw_req_result gw_tunnel_open(struct gw_core *g, uint16_t bridge, uint32_t
 		g->c.busy++;
 		return (struct gw_req_result){CTAG_STATUS_BUSY, NULL};
 	}
-	/* A fresh non-zero id, never one in use. */
-	do {
-		g->v2.tunnel_next = (uint16_t)(g->v2.tunnel_next == UINT16_MAX ? 1u
-									: g->v2.tunnel_next + 1u);
-	} while (by_id(g, g->v2.tunnel_next) != NULL);
 	memset(t, 0, sizeof(*t));
+	t->id = gw_tunnel_new_id(g);
 	t->used = true;
-	t->id = g->v2.tunnel_next;
 	t->bridge = bridge;
 	t->tag_id = tag_id;
 	t->timeout_s = (uint8_t)duration_s;
@@ -234,6 +285,13 @@ struct gw_req_result gw_tunnel_send(struct gw_core *g, uint32_t tunnel, const ui
 	struct gw_tunnel *t = by_id(g, tunnel);
 
 	if (t == NULL) {
+#ifdef CONFIG_CTAG_GW_RADIO
+		struct gw_req_result r;
+
+		if (gw_radio_send(g, tunnel, data, len, &r)) {
+			return r;
+		}
+#endif
 		return (struct gw_req_result){CTAG_STATUS_NOT_FOUND, T_NO_TUNNEL};
 	}
 	if (len == 0u) {
@@ -260,6 +318,13 @@ struct gw_req_result gw_tunnel_close(struct gw_core *g, uint32_t tunnel)
 	struct gw_tunnel *t = by_id(g, tunnel);
 
 	if (t == NULL) {
+#ifdef CONFIG_CTAG_GW_RADIO
+		struct gw_req_result r;
+
+		if (gw_radio_close(g, tunnel, &r)) {
+			return r;
+		}
+#endif
 		return (struct gw_req_result){CTAG_STATUS_NOT_FOUND, T_NO_TUNNEL};
 	}
 	mesh_close(g, t, CTAG_STATUS_OK);
@@ -401,4 +466,7 @@ void gw_tunnel_reset(struct gw_core *g)
 		}
 	}
 	memset(g->v2.discovered, 0, sizeof(g->v2.discovered));
+#ifdef CONFIG_CTAG_GW_RADIO
+	gw_radio_reset(g);
+#endif
 }

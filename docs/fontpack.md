@@ -7,8 +7,9 @@ pack** stored in its soldered external flash.
 ## 1. Contents
 
 - One regular face per script covered by the pinned Noto collection, plus the
-  CJK regional faces (SC, TC, HK, JP, KR) — see [`fonts.md`](fonts.md) and
-  `fonts/manifest.yaml`.
+  CJK regional faces (SC, TC, HK, JP, KR) — see the host software's
+  [`fonts.md`](https://github.com/cremind-ai/cremind/blob/main/docs/tags/fonts.md) and
+  its `fonts/manifest.yaml` (packs are built by the host, not in this repository).
 - Face 0 is the icon face (ids from `spec.yaml` `icons`).
 - Strikes at `FONT_SIZES` (16, 24, 32 px) for text faces and `ICON_SIZES`
   (16, 24, 32, 48 px) for the icon face.
@@ -50,7 +51,7 @@ indexes in strike-table order); readers rely only on the offsets.
 | 72 | u32 | string table size |
 | 76 | u32 | bitmap area offset |
 | 80 | u32 | bitmap area size |
-| 84 | bytes[8] | manifest id = SHA-256(`fonts/manifest.lock.json`)[0:8] |
+| 84 | bytes[8] | manifest id = SHA-256(the host's `fonts/manifest.lock.json`)[0:8] |
 | 92 | bytes[32] | reserved, zero |
 | 124 | u32 | CRC-32/IEEE of bytes `[0, 124)` |
 
@@ -92,7 +93,7 @@ Header magic/version/size/CRC; every table inside `total`; face records sorted
 by face id, their name and scripts strings NUL-terminated valid UTF-8 inside the
 string table; strike records sorted, each naming an existing face and pointing
 inside the pack; index CRCs; every non-empty `bitmap_off + bytes(w,h)` inside
-the bitmap area (`companion/src/cremind_tag/fontpack/format.py` is the
+the bitmap area (Cremind's `app/tags/runtime/fontpack/format.py` is the
 reference validator). At install the bridge additionally checks
 `content_hash` (SHA-256 of bytes `[128, total)`, which reads the whole pack).
 
@@ -108,7 +109,7 @@ reference validator). At install the bridge additionally checks
 - **Capacity rule:** a flash part is acceptable only when
   `flash_size ≥ 2 × erase_aligned(P) + 16 MiB` where `P` is the complete pack
   size including indexes (`erase_aligned` rounds up to the 64 KiB erase block).
-  `cremind-tag fonts size` prints `P`, the rule's result and the smallest
+  `cremind tags tools fonts size` prints `P`, the rule's result and the smallest
   standard NOR density that satisfies it.
 - Slot directory: two 4 KiB sectors at the start of the working space. Each
   holds one 64-byte record: `magic 'CTSL' u32`, `version u16`, `reserved u16`,
@@ -135,4 +136,4 @@ FONT_COMMIT{} → {fontpack_id}                                (SHA-256 over the
 `FONT_ABORT` or a reset before `FONT_COMMIT` leaves the active pack untouched.
 A dedicated external-flash programming loader (J-Link + QSPI on the nRF52840
 DK, `nrfjprog --qspi*`) is the alternative for factory programming; it writes
-the same image and a directory record produced by `cremind-tag fonts image`.
+the same image and a directory record produced by `cremind tags tools fonts image`.

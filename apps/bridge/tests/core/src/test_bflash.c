@@ -75,7 +75,7 @@ ZTEST(bridge_flash, test_directory_records)
 	memcpy(r.pack_id, fixture_pack_id, 8);
 	memset(r.content_hash, 0xA5, sizeof(r.content_hash));
 	bflash_dir_encode(&r, buf);
-	/* Layout of fontpack.md 3 (companion fonts/image.py slot_dir_record). */
+	/* Layout of fontpack.md 3 (Cremind's app/tags/runtime/fonts/image.py slot_dir_record). */
 	zassert_equal(buf[0], 'C');
 	zassert_equal(buf[1], 'T');
 	zassert_equal(buf[2], 'S');

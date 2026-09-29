@@ -2,7 +2,7 @@
  * Noise_IK_25519_ChaChaPoly_SHA256 through the vendored Noise* API
  * (lib/third_party/noise_ik): one device object per static key and prologue,
  * one session at a time, transport messages sealed and opened through
- * Noise_IK_session_write/read. Mirrors companion secure/noise.py.
+ * Noise_IK_session_write/read. Mirrors Cremind's app/tags/runtime/secure/noise.py.
  *
  * Noise*'s IK instantiation accepts only initiators registered as peers of
  * the device ("we don't accept unknown remote static keys"), while a v2

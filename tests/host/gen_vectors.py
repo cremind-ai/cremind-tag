@@ -18,8 +18,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# Value kinds of serial CBOR keys that JSON cannot express (companion
-# protocol/cbor_msgs.py KEYS): byte strings are hex in the fixtures.
+# Value kinds of serial CBOR keys that JSON cannot express (the host's reference,
+# Cremind's app/tags/runtime/protocol/cbor_msgs.py KEYS): byte strings are hex in the fixtures.
 CBOR_BSTR = {"uuid", "fontpack_id", "layout", "key", "digest", "data", "uuid_filter"}
 CBOR_INT = {"rssi"}
 

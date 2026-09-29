@@ -1,5 +1,5 @@
 /*
- * Bridge delivery core (docs/protocol.md 3, 10; companion sim/bridge.py):
+ * Bridge delivery core (docs/protocol.md 3, 10; Cremind's app/tags/runtime/sim/bridge.py):
  * assignment table, the one layout being assembled, LAYOUT_COMMIT validation
  * in the order of 3.3, per-tag history (DUPLICATE / STALE_REVISION), jobs
  * (pending layouts persisted in external flash, tag commands), SUPERSEDED /

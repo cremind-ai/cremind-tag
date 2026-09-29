@@ -1,9 +1,10 @@
 # Cremind Tag protocol specification — single source of truth.
 #
-# tools/codegen.py turns this file into:
-#   include/ctag/proto_ids.h, proto_msgs.h              (firmware, C)
-#   companion/src/cremind_tag/protocol/ids.py, msgs.py  (companion, Python)
-# CI fails when either generated file is stale (`python tools/codegen.py --check`).
+# tools/codegen.py turns this file into the firmware's bindings:
+#   include/ctag/proto_ids.h, proto_msgs.h              (C)
+# CI fails when either generated file is stale (`uv run python tools/codegen.py --check`).
+# Host software generates its own from the published contract artifact
+# (tools/contract.py; Cremind: app/tags/runtime/protocol/ids.py, msgs.py).
 #
 # All multi-byte integers on every binary wire format are LITTLE-ENDIAN unless a
 # field says otherwise. Field types: u8 u16 u32 u64 i8 i16 i32, bytes[N] (fixed),
@@ -37,6 +38,7 @@ constants:
   MESH_MAX_VENDOR_PARAMS:   {value: 160,   doc: "Maximum vendor-model message parameter bytes"}
   MESH_MIN_SEG:             {value: 16,    doc: "Minimum CONFIG_BT_MESH_TX_SEG_MAX / RX_SEG_MAX"}
   MESH_DEFAULT_TTL:         {value: 5,     doc: "Default TTL for gateway<->bridge messages"}
+  GATEWAY_ADDR:             {value: 0x0001, doc: "The gateway's mesh address (protocol.md 2). As a serial `bridge` value it names the gateway's own radio: tags the gateway serves itself (protocol.md 11)"}
   MESH_RESULT_RETRIES:      {value: 5,     doc: "Bridge re-sends of DELIVERY_RESULT until RESULT_ACK"}
   MESH_RESULT_RETRY_MS:     {value: 2000,  doc: "Interval between DELIVERY_RESULT re-sends"}
   RESULT_FLAG_DUPLICATE:    {value: 0x01,  doc: "DELIVERY_RESULT / EVT_RESULT flags bit0: the tag re-sent its stored ACK (RESULT.flags.bit0)"}
@@ -277,9 +279,11 @@ serial:
     root_proof: 78    # bstr[16] v2 HMAC(root, label | h) from an owned tag
     release_stage: 79 # uint v2 RELEASE stage (0 prepare, 1 commit)
     op_key: 80        # bstr[32] v2 operational root (tag) / maintenance key (bridge) in PAIR and REKEY
+    mode: 81          # uint v2 tunnel_modes (TUNNEL_OPEN; absent = PAIR)
+    tag_links: 82     # uint in the gateway's caps: tag connections its own radio holds at once (absent or 0 = it serves no tag itself, protocol.md 11)
   message_types:
     # --- requests (host -> device); the device answers with RESPONSE + {status, ...}
-    HELLO:           {value: 0x01, dir: h2d, doc: "{proto, name} -> {status, proto, fw, build, boot_id, caps:{max_frame, credits, max_bridges, max_tags, role}}"}
+    HELLO:           {value: 0x01, dir: h2d, doc: "{proto, name} -> {status, proto, fw, build, boot_id, caps:{max_frame, credits, max_bridges, max_tags, role, tag_links?}}; tag_links > 0: the gateway serves tags on its own radio (protocol.md 11)"}
     PING:            {value: 0x02, dir: h2d, doc: "{} -> {status, uptime_s}"}
     REBOOT:          {value: 0x03, dir: h2d, doc: "{op_id} -> {status}; device reboots after responding"}
     EVENT_ACK:       {value: 0x04, dir: h2d, doc: "{seq} -> {status}; releases retained events with seq <= given"}
@@ -301,15 +305,15 @@ serial:
     CONFIGURE_NODE:  {value: 0x12, dir: h2d, doc: "{op_id, addr, relay, ttl} -> ACCEPTED; later EVT_NODE_CONFIGURED (app key add/bind + relay + TTL)"}
     REMOVE_NODE:     {value: 0x13, dir: h2d, doc: "{op_id, addr} -> ACCEPTED; later EVT_NODE_REMOVED (node reset + CDB delete)"}
     LIST_NODES:      {value: 0x14, dir: h2d, doc: "{} -> {status, nodes:[{addr, uuid, elements, configured, name, last_seen_s}]}"}
-    DISCOVER:        {value: 0x16, dir: h2d, doc: "v2: {op_id, bridge, duration_s, tag_id} -> ACCEPTED; bridge 0 = every bridge, tag_id 0 = any v2 tag in setup mode; EVT_DISCOVERED"}
+    DISCOVER:        {value: 0x16, dir: h2d, doc: "v2: {op_id, bridge, duration_s, tag_id} -> ACCEPTED; bridge 0 = every bridge and the gateway's own radio, GATEWAY_ADDR = its own radio only; tag_id 0 = any v2 tag in setup mode; EVT_DISCOVERED"}
     RECOMMISSION:    {value: 0x17, dir: h2d, doc: "v2 bridge maintenance port only: {grant?, sig?} -> {status, gen, data}; owned (after MAINT_AUTH, a MAINT grant) or released; data = a fresh setup payload; leaves the mesh"}
     ASSIGN_TAG:      {value: 0x20, dir: h2d, doc: "{op_id, bridge, tag_id, epoch, key} -> ACCEPTED; later EVT_ASSIGN_RESULT"}
     UNASSIGN_TAG:    {value: 0x21, dir: h2d, doc: "{op_id, bridge, tag_id, epoch} -> ACCEPTED; later EVT_ASSIGN_RESULT"}
     DELIVER_LAYOUT:  {value: 0x30, dir: h2d, doc: "{op_id, bridge, tag_id, epoch, revision, update_id, fontpack_id, layout} -> {status: ACCEPTED|BUSY|INVALID|DUPLICATE}; later EVT_STAGE*, EVT_RESULT"}
     CANCEL_DELIVERY: {value: 0x31, dir: h2d, doc: "{op_id, update_id} -> {status}"}
     TAG_COMMAND:     {value: 0x32, dir: h2d, doc: "{op_id, bridge, tag_id, epoch, cmd} -> ACCEPTED; later EVT_RESULT (update_id = op_id)"}
-    TUNNEL_OPEN:     {value: 0x33, dir: h2d, doc: "v2: {op_id, bridge, tag_id, duration_s} -> {status, tunnel}; tag_id 0 = the bridge own endpoint; later EVT_TUNNEL"}
-    TUNNEL_SEND:     {value: 0x34, dir: h2d, doc: "v2: {tunnel, data <= TUNNEL_MSG_MAX} -> {status}"}
+    TUNNEL_OPEN:     {value: 0x33, dir: h2d, doc: "v2: {op_id, bridge, tag_id, duration_s, mode?} -> {status, tunnel}; tag_id 0 = the bridge own endpoint; bridge GATEWAY_ADDR = a tag on the gateway's own radio, which connects when the tag advertises within duration_s; mode SESSION on the gateway's own radio only (protocol.md 11); later EVT_TUNNEL"}
+    TUNNEL_SEND:     {value: 0x34, dir: h2d, doc: "v2: {tunnel, data <= TUNNEL_MSG_MAX} -> {status}; SESSION: one CTRL message or DATA record, the type byte picks the characteristic"}
     TUNNEL_CLOSE:    {value: 0x35, dir: h2d, doc: "v2: {tunnel} -> {status}"}
     GET_INVENTORY:   {value: 0x40, dir: h2d, doc: "{} -> {status, items:[bridge info]}; also refreshes via mesh CAPS/HEALTH (EVT_BRIDGE_INFO)"}
     GET_COUNTERS:    {value: 0x41, dir: h2d, doc: "{} -> {status, counters}"}
@@ -333,8 +337,8 @@ serial:
     EVT_RESULT:          {value: 0x87, dir: d2h, doc: "{seq, update_id, bridge, tag_id, epoch, revision, status, digest(8), battery_mv, timing, flags, stored_epoch} (flags and stored_epoch as in mesh DELIVERY_RESULT)"}
     EVT_BRIDGE_INFO:     {value: 0x88, dir: d2h, doc: "{addr, fw, fontpack_id, caps:{board, flash_size, max_tags, assigned_count, flags, proto}, assigned, counters}"}
     EVT_TAG_SEEN:        {value: 0x89, dir: d2h, doc: "{bridge, tag_id, rssi, battery_mv, flags} rate-limited sighting"}
-    EVT_TUNNEL:          {value: 0x8A, dir: d2h, doc: "v2: {tunnel, bridge, tag_id, state, data?, status?} not retained"}
-    EVT_DISCOVERED:      {value: 0x8B, dir: d2h, doc: "v2: {bridge, tag_id, rssi, flags} not retained; a candidate, never inventory"}
+    EVT_TUNNEL:          {value: 0x8A, dir: d2h, doc: "v2: {tunnel, bridge, tag_id, state, data?, status?, rssi?} not retained; SESSION: OPEN carries the tag's CAPS value, DATA its CTRL and STATUS messages; the gateway's own radio: OPEN carries the rssi of the advertisement it connected on"}
+    EVT_DISCOVERED:      {value: 0x8B, dir: d2h, doc: "v2: {bridge, tag_id, rssi, flags} not retained; a candidate, never inventory; bridge GATEWAY_ADDR = heard by the gateway's own radio"}
 
 # Mesh / GATT tag command ids (TAG_COMMAND.cmd, mesh TAG_CMD.cmd, GATT CMD record).
 tag_commands:
@@ -344,7 +348,7 @@ tag_commands:
   SLEEP:    {value: 4, doc: "Enter shipping mode (System OFF) — only if external wake is verified"}
 
 node_roles:
-  GATEWAY: {value: 1, doc: "Mesh provisioner + serial bridge to the companion"}
+  GATEWAY: {value: 1, doc: "Mesh provisioner + serial bridge to the companion; on the nRF52840 also a BLE central to tags on its own radio"}
   BRIDGE:  {value: 2, doc: "Mesh relay + BLE central + renderer"}
   TAG:     {value: 3, doc: "Battery e-paper BLE peripheral"}
 
@@ -859,9 +863,12 @@ v2:
     SERIAL: {value: 1, doc: "Noise prologue link byte: USB serial (gateway, bridge maintenance port)"}
     TUNNEL: {value: 2, doc: "Noise prologue link byte: mesh tunnel (bridge endpoint or tag PAIR)"}
   tunnel_states:
-    OPEN:   {value: 1, doc: "EVT_TUNNEL: the endpoint answered; data = its ident2"}
+    OPEN:   {value: 1, doc: "EVT_TUNNEL: the endpoint answered; data = its ident2 (a SESSION tunnel: the tag's CAPS value)"}
     DATA:   {value: 2, doc: "EVT_TUNNEL: one reassembled message from the endpoint"}
     CLOSED: {value: 3, doc: "EVT_TUNNEL: closed (status says why)"}
+  tunnel_modes:
+    PAIR:    {value: 0, doc: "TUNNEL_OPEN: the endpoint's secure messages (a bridge's own endpoint, or a tag's IDENT and PAIR characteristics)"}
+    SESSION: {value: 1, doc: "TUNNEL_OPEN on the gateway's own radio: the tag's frame session (CAPS, then CTRL / DATA / STATUS, protocol.md 11)"}
   pair_kinds:
     HANDSHAKE: {value: 1, doc: "PAIR / tunnel message: a Noise handshake message"}
     TRANSPORT: {value: 2, doc: "PAIR / tunnel message: a Noise transport message"}

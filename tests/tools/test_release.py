@@ -114,13 +114,13 @@ def test_package_firmware(tmp_path: Path):
     assert (dist / entry["files"]["memory"]).is_file() and entry["files"]["config"].endswith(".config")
     assert entry["sha256"]["hex"] == hashlib.sha256(b":00000001FF\n").hexdigest()
     assert (entry["jlink_device"], entry["family"]) == ("nRF51822_xxAB", "NRF51")
-    assert entry["flash"] == ("cremind-tag tag enroll --board laowu_bw --firmware "
+    assert entry["flash"] == ("cremind tags tools tag enroll --board laowu_bw --firmware "
                               "firmware/tag-laowu-bw/tag-laowu-bw-0.1.0.hex")
     assert entry["release_status"] == "buildable" and entry["qualified"] is False
     gw = _fake_build(src, "gateway-nrf52840dk")
     gw_entry = release.package_firmware("gateway-nrf52840dk", elig["gateway-nrf52840dk"], src, dist, "0.1.0",
                                         {"commit": COMMIT}, False)
-    assert gw_entry["flash"].startswith("cremind-tag firmware flash --target gateway-nrf52840dk --hex ")
+    assert gw_entry["flash"].startswith("cremind tags tools firmware flash --target gateway-nrf52840dk --hex ")
 
     (gw / "zephyr.hex").write_text(":00000001FF\n:00000001FF\n", encoding="utf-8")
     with pytest.raises(release.ReleaseError, match="zephyr.hex changed after the build"):
@@ -160,21 +160,14 @@ def test_checksums_and_archive(tmp_path: Path):
 
 
 def test_notices(tmp_path: Path):
-    deps = [{"name": "cbor2", "version": "5.6.5", "licence": "MIT", "marker": None},
-            {"name": "pywin32-ctypes", "version": "0.2.3", "licence": "BSD-3-Clause",
-             "marker": "sys_platform == 'win32'"}]
-    fonts = {"manifest_id": "f2c67d9125acaf06", "packs": {"full": {}, "dev": {}}}
     comps = [("Zephyr RTOS (sdk-zephyr)", "Apache-2.0", ["tag-laowu-bw"])]
-    text = release.write_notices(tmp_path, [{"target": "tag-laowu-bw"}], comps, fonts, deps).read_text(
-        encoding="utf-8")
+    text = release.write_notices(tmp_path, [{"target": "tag-laowu-bw"}], comps).read_text(encoding="utf-8")
     assert "Nayuki QR Code generator v1.8.0 — MIT" in text and "Copyright © 2022 Project Nayuki" in text
-    assert "SIL Open Font License 1.1" in text and "fonts/full/, fonts/dev/" in text
-    assert "SIL OPEN FONT LICENSE Version 1.1" in text
-    assert "Material Icons — Apache License 2.0" in text and "Apache License" in text
+    assert "2. Firmware SDK components" in text
     assert "Zephyr RTOS (sdk-zephyr): Apache-2.0 (all targets)" in text
-    assert "pywin32-ctypes" in text and "[sys_platform == 'win32']" in text
-    bare = release.write_notices(tmp_path, [], [], None, None).read_text(encoding="utf-8")
-    assert "Open Font License" not in bare and "Companion runtime" not in bare
+    assert "Font License" not in text and "companion" not in text.lower(), "firmware and its SDK only"
+    bare = release.write_notices(tmp_path, [], []).read_text(encoding="utf-8")
+    assert "Firmware SDK components" not in bare
 
 
 def test_release_notes():
@@ -185,13 +178,14 @@ def test_release_notes():
         "firmware": [{"target": "tag-laowu-bw", "board": "laowu_bw/nrf51822", "release_status": "buildable",
                       "sha256": {"hex": "ab" * 32}}],
         "excluded_targets": [{"target": "bridge-nrf52dk", "reason": "hardware status blocked"}],
-        "fonts": {"manifest_id": "f2c67d9125acaf06", "packs": {"dev": {"pack_id": "c1d7af1ec9fc564e", "size": 470296}}},
-        "companion": {"wheel": {"file": "companion/cremind_tag-0.1.0-py3-none-any.whl"}},
+        "contract": {"archive": "contract/cremind-tag-contract-0.1.0.tar.gz", "digest": "cd" * 32,
+                     "protocol": {"spec_version": 2, "proto_version": 1}},
     }
     notes = release.release_notes(manifest)
     assert "| `tag-laowu-bw` | `laowu_bw/nrf51822` | buildable |" in notes
-    assert "`bridge-nrf52dk` (hardware status blocked)" in notes and "dev `c1d7af1ec9fc564e`" in notes
-    assert "sha256sum -c SHA256SUMS" in notes
+    assert "`bridge-nrf52dk` (hardware status blocked)" in notes
+    assert "Protocol contract `cremind-tag-contract-0.1.0.tar.gz` (spec_version 2, proto_version 1)" in notes
+    assert "sha256sum -c SHA256SUMS" in notes and "cremind tags tools firmware verify" in notes
 
 
 def test_main_packages_a_trial_release(tmp_path: Path, monkeypatch, capsys):
@@ -200,8 +194,10 @@ def test_main_packages_a_trial_release(tmp_path: Path, monkeypatch, capsys):
     monkeypatch.setattr(build, "git_info", lambda repo=None: {"commit": COMMIT, "describe": "v0.1.0", "dirty": False,
                                                               "changed_files": [], "commit_time": 1790536279})
     monkeypatch.setattr(release.ctag_version, "check", lambda version, root=None: [])
-    rc = release.main(["--targets", "tag-laowu-bw", "--skip-fonts", "--skip-wheel", "--no-network",
-                       "--firmware-dir", str(src), "--out", str(tmp_path / "dist")])
+    # The contract's revision, as for a committed tree (this checkout may have work in progress).
+    monkeypatch.setattr(release.ctag_contract, "source_revision", lambda root=None, *, allow_dirty=False: {
+        "repository": release.ctag_contract.REPOSITORY, "revision": COMMIT, "dirty": False})
+    rc = release.main(["--targets", "tag-laowu-bw", "--firmware-dir", str(src), "--out", str(tmp_path / "dist")])
     assert rc == 0, capsys.readouterr().err
     version = str(release.ctag_version.read_version())
     dist = tmp_path / "dist" / version
@@ -210,21 +206,30 @@ def test_main_packages_a_trial_release(tmp_path: Path, monkeypatch, capsys):
     assert manifest["toolchain"]["digest"] == build.IMAGE_DIGEST
     assert manifest["ncs"]["sdk_nrf_commit"] == build.NCS_SDK_NRF_COMMIT
     assert [f["target"] for f in manifest["firmware"]] == ["tag-laowu-bw"]
-    assert manifest["fonts"] is None and manifest["companion"] is None
+    assert {"fonts", "companion", "protocol"}.isdisjoint(manifest), "firmware and the contract only"
     import yaml
 
     spec_version = yaml.safe_load((REPO_ROOT / "protocol" / "spec.yaml").read_text(encoding="utf-8"))["spec_version"]
-    assert manifest["protocol"]["spec"] == "protocol/spec.yaml"
-    assert manifest["protocol"]["protocol_version"] == spec_version == 2
+    contract = manifest["contract"]
+    assert contract["archive"] == f"contract/cremind-tag-contract-{version}.tar.gz"
+    assert contract["protocol"]["spec_version"] == spec_version == 2
+    assert contract["sha256"] == hashlib.sha256((dist / contract["archive"]).read_bytes()).hexdigest()
+    with tarfile.open(dist / contract["archive"]) as tar:
+        names = tar.getnames()
+    assert f"cremind-tag-contract-{version}/hardware/targets.yaml" in names
+    assert f"cremind-tag-contract-{version}/tests/conversation.h" in names
     reasons = {e["target"]: e["reason"] for e in manifest["excluded_targets"]}
     assert reasons["tag-laowu-bwr"] == "not selected (--targets)" and "tag-sifei-52810" in reasons
     assert release.verify_sha256sums(dist) == []
-    assert (dist / "LICENSE").is_file() and (dist / "protocol" / "fixtures" / "crc32.json").is_file()
+    crlf = [p.relative_to(dist).as_posix() for p in dist.rglob("*")
+            if p.suffix in (".json", ".md", ".sha256", ".txt") and b"\r" in p.read_bytes()]
+    assert crlf == [], "LF everywhere: a release packaged on Windows hashes as on Linux"
+    assert (dist / "LICENSE").is_file() and not (dist / "contract" / f"cremind-tag-contract-{version}").exists()
     assert (tmp_path / "dist" / f"cremind-tag-{version}.tar.gz").is_file()
     assert (tmp_path / "dist" / f"RELEASE_NOTES-{version}.md").is_file()
 
     with pytest.raises(SystemExit):
-        release.main(["--targets", "tag-sifei-52810", "--skip-fonts", "--skip-wheel"])
+        release.main(["--targets", "tag-sifei-52810"])
     assert "not publishable: tag-sifei-52810" in capsys.readouterr().err
 
 
@@ -234,6 +239,6 @@ def test_list_targets(capsys):
 
 
 def test_repository_licence_texts_exist():
-    for path in ("LICENSE", "lib/third_party/qrcodegen/LICENSE", "fonts/LICENSES/OFL-1.1.txt",
-                 "fonts/LICENSES/Apache-2.0.txt", "docs/protocol.md", "docs/fontpack.md", "protocol/spec.yaml"):
+    for path in ("LICENSE", "lib/third_party/qrcodegen/LICENSE", "docs/protocol.md", "docs/fontpack.md",
+                 "protocol/spec.yaml"):
         assert (REPO_ROOT / path).is_file(), path

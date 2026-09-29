@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Drive the native_sim gateway (apps/gateway/tests/interop) with the companion's
-real GatewayClient over the gateway's native PTY UART.
+"""Drive the native_sim gateway (apps/gateway/tests/interop) with the host's
+real GatewayClient (Cremind's hardware runtime) over the gateway's native PTY UART.
 
 Usage (inside the NCS toolchain container, see README.md)::
 
-    PYTHONPATH=/work/companion/src python3 interop.py /build/gw-interop/zephyr/zephyr.exe
+    CREMIND_SRC=/cremind python3 interop.py /build/gw-interop/zephyr/zephyr.exe
 
 Every scenario talks to the same gateway process through pyserial on the PTY,
-exactly as the companion talks to a USB/UART gateway. Exit status 0 = every
+exactly as the host talks to a USB/UART gateway. Exit status 0 = every
 scenario passed.
 """
 
@@ -22,8 +22,16 @@ import sys
 import time
 import traceback
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
-from cremind_tag.gateway import (
+# The host side is Cremind's hardware runtime (app.tags.runtime): a Cremind checkout at
+# $CREMIND_SRC (default /cremind, where run.sh and the README mount it) or an installed
+# `cremind[tags]`.
+CREMIND_SRC = Path(os.environ.get("CREMIND_SRC", "/cremind"))
+if (CREMIND_SRC / "app" / "tags" / "runtime").is_dir():
+    sys.path.insert(0, str(CREMIND_SRC))
+
+from app.tags.runtime.gateway import (  # noqa: E402
     AssignResult,
     BridgeInfoEvent,
     GatewayClient,
@@ -38,7 +46,7 @@ from cremind_tag.gateway import (
     UnprovBeacon,
     matches,
 )
-from cremind_tag.protocol.ids import RESULT_FLAG_DUPLICATE, DeliveryStage, NodeRole, SerialMsg, Status
+from app.tags.runtime.protocol.ids import RESULT_FLAG_DUPLICATE, DeliveryStage, NodeRole, SerialMsg, Status  # noqa: E402
 
 BRIDGE = 0x0002
 PACK = bytes(8)
@@ -250,12 +258,12 @@ async def s_delivery(url: str, notes: list[str]) -> None:
         after = await counters(c)
         check(result.status == Status.OK, f"INCOMPLETE path status {result.status}")
         check(after["chunks_resent"] - before["chunks_resent"] == 1, "exactly chunk 1 resent")
-        # The largest layout the companion sends.
+        # The largest layout the host sends.
         layout = os.urandom(4000)
         result, _, dt = await deliver_and_wait(c, layout, 0x0A0B0C0E, 3)
         check(result.status == Status.OK and result.digest == hashlib.sha256(layout).digest()[:8],
               "4000 B layout")
-        # The tag answered with its stored ACK: flags bit0 reaches the companion.
+        # The tag answered with its stored ACK: flags bit0 reaches the host.
         result, _, _ = await deliver_and_wait(c, os.urandom(300), 0xDEAD0003, 4)
         check(result.status == Status.OK and result.flags == RESULT_FLAG_DUPLICATE and result.duplicate
               and result.stored_epoch == 1, f"stored ACK flag {result.raw}")

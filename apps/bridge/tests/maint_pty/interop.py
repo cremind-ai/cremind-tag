@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Drive the bridge maintenance port (the native_sim build of tests/maint_pty)
-with the companion's BridgeMaintClient: HELLO, PING, INFO, FONT_STATUS, a
+with the host's BridgeMaintClient (Cremind's hardware runtime): HELLO, PING, INFO, FONT_STATUS, a
 complete font install (FONT_ABORT, FONT_BEGIN, FONT_DATA, FONT_COMMIT), an
 install of the active pack (skipped), a forced install into the other slot and
 FLASH_TEST twice with the same op_id.
 
     python3 interop.py <zephyr.exe> [pack.ctfp]
 
-Needs pyserial and cbor2 (both in the NCS toolchain image) and the companion
-sources. Exit status 0 = interoperable.
+Needs pyserial and cbor2 (both in the NCS toolchain image) and Cremind's
+sources ($CREMIND_SRC, default /cremind) or an installed ``cremind[tags]``.
+Exit status 0 = interoperable.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import subprocess
 import sys
@@ -21,11 +23,16 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(ROOT / "companion" / "src"))
+# The host side is Cremind's hardware runtime (app.tags.runtime): a Cremind checkout at
+# $CREMIND_SRC (default /cremind, where run.sh and the README mount it) or an installed
+# `cremind[tags]`.
+CREMIND_SRC = Path(os.environ.get("CREMIND_SRC", "/cremind"))
+if (CREMIND_SRC / "app" / "tags" / "runtime").is_dir():
+    sys.path.insert(0, str(CREMIND_SRC))
 
-from cremind_tag.bridge_maint.client import BridgeMaintClient  # noqa: E402
-from cremind_tag.fontpack.format import FontPack  # noqa: E402
-from cremind_tag.protocol.ids import NodeRole, Status  # noqa: E402
+from app.tags.runtime.bridge_maint.client import BridgeMaintClient  # noqa: E402
+from app.tags.runtime.fontpack.format import FontPack  # noqa: E402
+from app.tags.runtime.protocol.ids import NodeRole, Status  # noqa: E402
 
 
 def start(exe: str) -> tuple[subprocess.Popen[str], str]:

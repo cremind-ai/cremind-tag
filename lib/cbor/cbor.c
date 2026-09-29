@@ -1,4 +1,4 @@
-/* Serial CBOR maps (docs/protocol.md 1.1); mirrors companion protocol/cbor_msgs.py. */
+/* Serial CBOR maps (docs/protocol.md 1.1); mirrors Cremind's app/tags/runtime/protocol/cbor_msgs.py. */
 #include <errno.h>
 #include <string.h>
 
@@ -120,6 +120,9 @@ static const uint8_t key_spec[] = {
 	[CTAG_CBOR_KEY_ROOT_PROOF] = K(CTAG_CBOR_BSTR, L_EQ16),
 	[CTAG_CBOR_KEY_RELEASE_STAGE] = U32,
 	[CTAG_CBOR_KEY_OP_KEY] = K(CTAG_CBOR_BSTR, L_EQ32),
+	/* the gateway's own radio (docs/protocol.md 11) */
+	[CTAG_CBOR_KEY_MODE] = U32,
+	[CTAG_CBOR_KEY_TAG_LINKS] = U32,
 };
 
 static uint8_t spec_of(uint64_t key)

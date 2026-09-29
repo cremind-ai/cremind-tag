@@ -4,7 +4,7 @@
  * device-side grant rules, the ownership record, secure-message framing,
  * tunnel fragments and the responder-side secure endpoint that every v2
  * device runs behind IDENTIFY / IDENT, SECURE_OPEN and SECURE_DATA (or a
- * tunnel). Mirrors companion secure/{identity,grants,noise,messages,device}.py;
+ * tunnel). Mirrors Cremind's app/tags/runtime/secure/{identity,grants,noise,messages,device}.py;
  * protocol/fixtures/v2_secure.json pins the behaviour.
  *
  * Primitives come from the vendored HACL* (lib/third_party/hacl) and the

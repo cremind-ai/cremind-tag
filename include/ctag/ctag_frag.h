@@ -1,7 +1,7 @@
 /*
  * GATT fragmentation of CTRL, DATA and STATUS messages (docs/protocol.md 5.3).
  * One sender and one reassembler per characteristic and direction; SEQ starts
- * at 0 on connect. Mirrors companion protocol/fragments.py.
+ * at 0 on connect. Mirrors Cremind's app/tags/runtime/protocol/fragments.py.
  */
 #ifndef CTAG_FRAG_H_
 #define CTAG_FRAG_H_

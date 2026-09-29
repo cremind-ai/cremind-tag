@@ -22,4 +22,9 @@ target_sources_ifdef(CONFIG_CTAG_GW_SECURE app PRIVATE
   src/reset.c
   src/core/gw_secure.c
   src/core/gw_tunnel.c)
+# Tags on the gateway's own radio (docs/protocol.md 11): the relay core and
+# its Bluetooth side (lib/sched and lib/frag come with CONFIG_CTAG_GW_RADIO).
+target_sources_ifdef(CONFIG_CTAG_GW_RADIO app PRIVATE
+  src/central.c
+  src/core/gw_radio.c)
 target_include_directories(app PRIVATE src src/core)

@@ -14,7 +14,7 @@ images ([releasing.md → Reproducibility](releasing.md#reproducibility)).
 |---|---|---|
 | Docker | Docker Desktop (WSL 2 backend) | Docker Engine |
 | Shell | Git Bash | any POSIX shell |
-| Python | 3.13 with PyYAML — the companion venv has both (`cd companion && uv sync`) | same |
+| Python | 3.11+ with PyYAML — the tools environment has both (`uv sync`, [`pyproject.toml`](../pyproject.toml)) | same |
 
 `build.py` needs only the standard library and PyYAML on the host; everything
 else runs in the container.
@@ -44,9 +44,9 @@ python tools/build.py -v gateway-nrf52840dk        # stream the full build outpu
 python tools/build.py --shell                      # interactive shell in the container (cd /ncs)
 ```
 
-Use the companion venv's interpreter if `python` lacks PyYAML
-(`companion/.venv/Scripts/python.exe` on Windows, `companion/.venv/bin/python`
-on Linux).
+Use the tools environment if `python` lacks PyYAML (`uv run python
+tools/build.py …`, or its interpreter: `.venv/Scripts/python.exe` on Windows,
+`.venv/bin/python` on Linux).
 
 | Option | Effect |
 |---|---|
@@ -243,12 +243,14 @@ qualification reports.
 
 Docker Desktop on Windows cannot pass USB devices to containers, so flash from
 the host with the artifacts in `build/<target>/`. Connect SWDIO, SWCLK, GND and
-VTref (and power the tag from its battery or a bench supply).
+VTref (and power the tag from its battery or a bench supply); the J-Link pins
+and what to check when the probe cannot reach the chip are in
+[enrollment.md → Wiring](enrollment.md#wiring).
 
-Gateways and bridges: `cremind-tag firmware flash --target <target> --hex
+Gateways and bridges: `cremind tags tools firmware flash --target <target> --hex
 build/<target>/zephyr.hex [--dry-run]` checks the image against its
 `metadata.json` first and erases only the pages it covers; tags:
-`cremind-tag tag enroll --firmware`
+`cremind tags tools tag enroll --firmware`
 ([releasing.md → First release](releasing.md#first-release-j-link-and-flashing)).
 By hand:
 
@@ -327,7 +329,7 @@ No probe and no soldering:
    (the bootloader's port).
 
 The dongle then restarts into the gateway: the bootloader's port goes away and
-the gateway's appears ("Cremind Tag gateway", `1209:0002`; `cremind-tag gateway
+the gateway's appears ("Cremind Tag gateway", `1209:0002`; `cremind tags tools gateway
 ports` lists it). No LED is lit while the gateway runs. nRF Connect for
 Desktop's Programmer app does the same from the `.hex`, without the packaging
 step. To update, press RESET and repeat step 4: the bootloader stages the new
@@ -358,8 +360,9 @@ west twister -T /work/tests/ztest -p native_sim -p native_sim/native/64 \
 
 ## Continuous integration
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml): Python (companion
-tests, `tests/tools`, `codegen.py --check`), host C tests (`tests/host`), the
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml): Python (the tools
+environment: `tests/tools`, `version.py --check`, `codegen.py --check`, the
+contract built and verified), host C tests (`tests/host`), the
 firmware matrix in the toolchain container with a cached west workspace
 (`python3 tools/build.py --in-container --all`; artifacts and the memory report
 are uploaded, the report is added to the job summary), and twister on

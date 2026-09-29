@@ -1,4 +1,4 @@
-/* COBS (docs/protocol.md 1.1); mirrors companion protocol/cobs.py. */
+/* COBS (docs/protocol.md 1.1); mirrors Cremind's app/tags/runtime/protocol/cobs.py. */
 #include <errno.h>
 #include <string.h>
 

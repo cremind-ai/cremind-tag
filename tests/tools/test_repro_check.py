@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import struct
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -133,22 +132,20 @@ def test_compare_target_statuses(tmp_path: Path):
     write_build(out_a / "half", image)
     assert rc.compare_target("half", out_a, out_b, [])["status"] == "build-failed"
     statuses = [{"status": "reproducible"}, {"status": "image-reproducible"}]
-    assert rc._exit_status(statuses, []) == 0
-    assert rc._exit_status([*statuses, {"status": "skipped"}], []) == 3
-    assert rc._exit_status(statuses, [{"status": "DIFFERENT"}]) == 1
+    assert rc._exit_status(statuses) == 0
+    assert rc._exit_status([*statuses, {"status": "skipped"}]) == 3
+    assert rc._exit_status([*statuses, {"status": "DIFFERENT"}]) == 1
 
 
 def test_snapshot_skips_output_and_caches_only(tmp_path: Path):
     src = tmp_path / "src"
-    for rel in ("build/t/zephyr.hex", "build-x/y", "dist/0.1.0/a", "fonts/cache/n/f.ttf", "fonts/out/dev/p",
-                "companion/.venv/lib/x", "apps/tag/__pycache__/m.pyc", "apps/tag/out/keep.c",
-                "apps/tag/src/main.c", ".git/HEAD", "fonts/manifest.yaml", "tests/host/build/x", "tests/host/t.c"):
+    for rel in ("build/t/zephyr.hex", "build-x/y", "dist/0.1.0/a", "tools/.venv/lib/x", "apps/tag/__pycache__/m.pyc",
+                "apps/tag/out/keep.c", "apps/tag/src/main.c", ".git/HEAD", "tests/host/build/x", "tests/host/t.c"):
         (src / rel).parent.mkdir(parents=True, exist_ok=True)
         (src / rel).write_text("x", encoding="utf-8")
     rc.snapshot(src, tmp_path / "dst")
     copied = {p.relative_to(tmp_path / "dst").as_posix() for p in (tmp_path / "dst").rglob("*") if p.is_file()}
-    assert copied == {"apps/tag/out/keep.c", "apps/tag/src/main.c", ".git/HEAD", "fonts/manifest.yaml",
-                      "tests/host/t.c"}
+    assert copied == {"apps/tag/out/keep.c", "apps/tag/src/main.c", ".git/HEAD", "tests/host/t.c"}
 
 
 def test_run_firmware_builds_two_checkouts(tmp_path: Path, monkeypatch):
@@ -178,24 +175,3 @@ def test_run_firmware_builds_two_checkouts(tmp_path: Path, monkeypatch):
     kept = repo / "build" / "repro" / "leaky"
     assert (kept / "a" / "zephyr.hex").is_file() and (kept / "b" / "zephyr.hex").is_file()
     assert not (tmp_path / "work").exists()  # scratch removed without --keep
-
-
-def test_font_check(monkeypatch, tmp_path: Path):
-    pytest.importorskip("cremind_tag")
-    runs = []
-
-    def fake_run(cmd, **kwargs):
-        out = Path(cmd[cmd.index("--out") + 1])
-        out.mkdir(parents=True)
-        profile = cmd[cmd.index("--profile") + 1]
-        runs.append(cmd)
-        pack = b"PACK" if profile == "dev" or "--jobs" not in cmd else b"PACK2"
-        (out / "fontpack.ctfp").write_bytes(pack)
-        (out / "fontpack.json").write_text(json.dumps({"pack_id": pack.hex()}), encoding="utf-8")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(rc.subprocess, "run", fake_run)
-    results = rc.run_fonts(["dev", "full"])
-    assert [r["status"] for r in results] == ["reproducible", "DIFFERENT"]
-    assert results[1]["differing_files"] == ["fontpack.ctfp", "fontpack.json"]
-    assert any("--jobs" in c for c in runs)
