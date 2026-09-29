@@ -243,7 +243,9 @@ qualification reports.
 
 Docker Desktop on Windows cannot pass USB devices to containers, so flash from
 the host with the artifacts in `build/<target>/`. Connect SWDIO, SWCLK, GND and
-VTref (and power the tag from its battery or a bench supply).
+VTref (and power the tag from its battery or a bench supply); the J-Link pins
+and what to check when the probe cannot reach the chip are in
+[enrollment.md → Wiring](enrollment.md#wiring).
 
 Gateways and bridges: `cremind tags tools firmware flash --target <target> --hex
 build/<target>/zephyr.hex [--dry-run]` checks the image against its

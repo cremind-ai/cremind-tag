@@ -67,6 +67,20 @@ during [hardware verification](hardware/verification.md). After enrollment,
 disconnect the probe and power-cycle the tag: the debug interface stays powered
 until a power-on reset.
 
+On the J-Link's 20-pin connector (pin 1 is the red wire of a ribbon cable):
+
+| Signal | Pin | Connect to |
+|---|---|---|
+| VTref | 1 | the tag's VDD |
+| SWDIO (TMS) | 7 | the tag's SWDIO pad |
+| SWCLK (TCK) | 9 | the tag's SWCLK pad |
+| GND | 4 (or any even pin from 4 to 20) | the tag's GND |
+| RESET | 15 | nothing (not needed) |
+| 5V-Supply | 19 | **nothing** |
+
+If the probe cannot reach the chip, see
+[When the probe cannot reach the chip](#when-the-probe-cannot-reach-the-chip).
+
 | Board (`--board`) | SoC | J-Link device | Stock panel |
 |---|---|---|---|
 | `laowu_bw` (`laowu_bw_nrf51822`) | nRF51822 | `nRF51822_xxAB` | `bw` (UC8176 4.2″ BW) |
@@ -167,6 +181,55 @@ the secret: the tag must then be reflashed and re-enrolled. The command asks
 for confirmation first; declining skips protection without failing the
 enrollment. After protection J-Link Commander may no longer be able to restart
 the core; the resulting reset warning is expected.
+
+## When the probe cannot reach the chip
+
+Every step here only reads; none of them erases or programs anything.
+
+1. **The probe and the supply.** Start J-Link Commander (`JLink.exe`, or
+   `JLinkExe` on Linux and macOS) and type `ShowHWStatus` at the `J-Link>`
+   prompt. It prints the probe's firmware, its serial number and `VTref`,
+   which must read the tag's supply voltage (about 3 V). Near 0 V means the
+   tag is unpowered or VTref is not wired.
+2. **The chip's debug port.** Run
+   `nrfutil device protection-get --serial-number <SN>`. Any protection status
+   in the answer means SWD works: an nRF52 answers this even when it is
+   protected. The error *Setting the debug port SELECT register failed*
+   (J-Link DLL error −1) means the debug port did not answer at all. That is
+   never protection; the cause is the wiring, the supply or the probe:
+   - SWDIO and SWCLK swapped, the most common mistake on unlabelled pads.
+     Swap them and try again.
+   - GND not shared with the tag, or VTref not tied to its VDD.
+   - A loose contact on a test pad. Check continuity from the probe's pin to
+     the pad.
+   - Leads too long for the speed. Try 100 kHz (step 3).
+3. **A connection with J-Link Commander.** Name the core, not the Nordic part:
+
+   ```text
+   JLink.exe -device Cortex-M4 -if SWD -speed 100 -autoconnect 1
+   ```
+
+   Use `Cortex-M0` for the nRF51 tags. With a Nordic part name, J-Link
+   Commander offers to unlock a protected chip, and unlocking erases it: the
+   vendor firmware and, on an enrolled tag, its identity. With a core name it
+   connects or fails without that offer. A protected chip fails here as well,
+   so use step 2 to tell the two apart.
+4. **Clone probes.** A probe whose `ShowHWStatus` shows `S/N: -1` is not a
+   genuine SEGGER J-Link. `nrfutil device list` lists it as `4294967295`;
+   pass that as `--serial-number` to nrfutil and to the `cremind tags tools`
+   commands. SEGGER's current software packs carry no firmware for the J-Link
+   V8 hardware, genuine or not. Such a probe can answer the computer and still
+   never reach a target. If the wiring checks out and step 2 still gets no
+   answer, use another probe: a genuine J-Link (for example the J-Link EDU
+   Mini), or the on-board J-Link of a Nordic DK, which programs an external
+   board through its Debug out header.
+5. **Once the chip answers.** Read its identity before anything erases it:
+   `cremind tags tools firmware info --soc <soc>` (for example
+   `nrf52811_qfaa`) prints the part, the variant (its build code), the memory
+   and `UICR.APPROTECT`. If it reads nothing and step 2 reports the chip
+   protected, see [Recovery](#recovery-and-re-enrollment). Unlocking erases
+   the vendor firmware, so first record what
+   [hardware verification](hardware/verification.md) needs from it.
 
 ## Recovery and re-enrollment
 
