@@ -162,7 +162,7 @@ HWMv2 boards live in [`boards/cremind/`](../boards/cremind/) (vendor `cremind`):
 | `laowu_bw` | `SOC_NRF51822_QFAB` | code 124 KiB, NVS 4 × 1 KiB at `0x1f000` | pins from the matrix; LEDs unconfirmed (none); debug TX P0.06 as disabled `uart0` |
 | `laowu_bwr` | `SOC_NRF51822_QFAA` (nRF51802 modelled as QFAA) | code 252 KiB, NVS 4 × 1 KiB at `0x3f000` | LEDs P0.03/04/05; debug TX P0.08 |
 | `sifei_52810` | `SOC_NRF52810_QFAA` | code 184 KiB, NVS 2 × 4 KiB at `0x2e000` | **placeholder panel pins**, panel id 255 |
-| `hema_52811` | `SOC_NRF52811_QFAA` | code 184 KiB, NVS 2 × 4 KiB at `0x2e000` | **placeholder panel pins**, panel id 255 |
+| `hema_52811` | `SOC_NRF52811_QFAA` | code 184 KiB, NVS 2 × 4 KiB at `0x2e000` | SSD1619 2.13" 128 × 250 BWR, panel id 3; pins documented by EPD-nRF5; panel supply EN P0.07; LED P0.18 |
 
 Common to all four:
 
@@ -171,14 +171,16 @@ Common to all four:
   `PARTITION_DEVICE/OFFSET/SIZE(storage_partition)` for NVS).
 - 32 kHz: calibrated RC (`K32SRC_RC`, calibration on, `MAX_SKIP=0`) until a
   crystal is verified; no UART console; GPIO and SPI enabled; DC/DC left off.
-- `chosen { cremind,panel = &epd; cremind,tag-board = &tag_board; }` —
-  `cremind,uc8176` panel node on `spi0` and a `cremind,tag-board` node with
+- `chosen { cremind,panel = &epd; cremind,tag-board = &tag_board; }` — a
+  panel node on `spi0` (`cremind,uc8176`; `cremind,ssd1619` on the Hema) and a `cremind,tag-board` node with
   the protocol `board-id` (bindings in [`dts/bindings/`](../dts/bindings/)).
 - Panel contract: **firmware must refuse to drive a panel with `panel-id` 255
   (UNVERIFIED)** — no bus init, no pin configuration, every frame refused. The
-  Sifei/Hema SPI bus is `zephyr,deferred-init`, so the SPI driver is linked
+  Sifei SPI bus is `zephyr,deferred-init`, so the SPI driver is linked
   (memory-fit builds stay honest) but never touches the placeholder pins unless
-  firmware calls `device_init()`, which it must not do for panel id 255.
+  firmware calls `device_init()`, which it must not do for panel id 255. The
+  Hema bus is deferred for another reason: its SSD1619 driver calls
+  `device_init()` only after switching the panel supply (EN) on.
 - Runners: `jlink` (default) and `nrfjprog`.
 
 To bring up a Laowu board with serial logs, enable the debug pad in an overlay

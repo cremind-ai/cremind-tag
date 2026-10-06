@@ -2,33 +2,23 @@
  * Copyright (c) 2026 Cremind
  * SPDX-License-Identifier: MIT
  *
- * PLACEHOLDER PINS. The Hema/Alibaba 52811 display mapping is UNVERIFIED
- * (hardware/matrix.yaml: pins unverified). These numbers are arbitrary: they
- * exist only so memory-fit builds link the SPI and panel drivers. The SPI bus
- * is `zephyr,deferred-init` and the panel is panel-id 255 (UNVERIFIED), so
- * firmware never configures or drives any of them. Replace every
- * HEMA_PLACEHOLDER_* value with measured pins before setting a real panel-id.
+ * Hema/Alibaba 52811 panel bus, as documented by EPD-nRF5 (EPD_CFG_52811:
+ * MOSI P0.20, SCLK P0.19; hardware/matrix.yaml pins). Write-only SPI: the
+ * panel has no MISO line.
  */
-
-#define HEMA_PLACEHOLDER_SCK	25
-#define HEMA_PLACEHOLDER_MOSI	23
-#define HEMA_PLACEHOLDER_CS	22
-#define HEMA_PLACEHOLDER_DC	20
-#define HEMA_PLACEHOLDER_RST	19
-#define HEMA_PLACEHOLDER_BUSY	18
 
 &pinctrl {
 	spi0_default: spi0_default {
 		group1 {
-			psels = <NRF_PSEL(SPIM_SCK, 0, HEMA_PLACEHOLDER_SCK)>,
-				<NRF_PSEL(SPIM_MOSI, 0, HEMA_PLACEHOLDER_MOSI)>;
+			psels = <NRF_PSEL(SPIM_SCK, 0, 19)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 20)>;
 		};
 	};
 
 	spi0_sleep: spi0_sleep {
 		group1 {
-			psels = <NRF_PSEL(SPIM_SCK, 0, HEMA_PLACEHOLDER_SCK)>,
-				<NRF_PSEL(SPIM_MOSI, 0, HEMA_PLACEHOLDER_MOSI)>;
+			psels = <NRF_PSEL(SPIM_SCK, 0, 19)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 20)>;
 			low-power-enable;
 		};
 	};

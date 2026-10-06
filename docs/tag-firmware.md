@@ -9,9 +9,10 @@ and reports the result. Protocol behaviour is normative in
 implements it, what it measured, and what still has to be verified on a
 physical sample.
 
-> Nothing here has run on hardware yet. Memory figures are link results;
-> stack figures are static estimates; the panel driver is written from the
-> UC8176 datasheet and has not driven a panel.
+> Only the SSD1619 panel driver has run on hardware (a bench test on the Hema
+> 52811, §6). Memory figures are link results; stack figures are static
+> estimates; the UC8176 driver is written from its datasheet and has not driven
+> a panel.
 
 ## 1. Layout
 
@@ -190,13 +191,22 @@ build logs the reason, the system stays idle. The secret is never copied: the
 session reads it in place from UICR, and the parsed copy on main's stack is
 wiped with volatile stores.
 
-## 6. Panel driver (UC8176)
+## 6. Panel drivers (UC8176, SSD1619)
+
+`apps/tag/CMakeLists.txt` links one driver per image, chosen by the compatible of
+the chosen `cremind,panel` node: `cremind,ssd1619` → `panel_ssd1619.c`,
+otherwise `panel_uc8176.c` (also the virtual panel id 0 of the nRF52 DK). Both
+implement `src/panel.h` and keep its rules (refuse panel id 255 before any pin
+or bus, reset every frame, stage only, refresh only in `commit_refresh`, poll
+BUSY without blocking, idempotent sleep).
+
+### UC8176
 
 From the UC8176 datasheet (UC8176c A0.1, in EPD-nRF5 `docs/datasheets/`, used
 as hardware documentation only). OTP waveforms (`REG_EN = 0`); KW mode for one
 plane, KWR mode for two.
 
-### Command sequences
+#### Command sequences
 
 | Step | Sequence | Notes |
 |---|---|---|
@@ -213,7 +223,7 @@ PON is issued only at commit time, so the charge pumps stay off during the
 (tens of seconds) transfer. BUSY_N is read as a raw level and interpreted with
 `busy-active-high` (absent = low means busy, UC8176).
 
-### Planes and polarity
+#### Planes and polarity
 
 Plane bytes pass through unmodified; polarity is expressed in the CDI data
 polarity bits (DDX), derived at compile time from the devicetree
@@ -230,7 +240,7 @@ With the boards' plane-flags (BW 0x01, BWR 0x03) this gives CDI 0xB7 (KW) and
 table is chosen because the tag cannot keep the previous frame (15 kB) as OLD
 data: every pixel is driven towards its new colour whatever SRAM held.
 
-### Must be verified on a sample
+#### Must be verified on a sample
 
 1. BS low selects 4-wire SPI; SPI mode 0 at 4 MHz is accepted.
 2. Reset timing (10 ms low / 10 ms) and BUSY_N release after reset.
@@ -251,6 +261,33 @@ data: every pixel is driven towards its new colour whatever SRAM held.
 9. Flash writes (NVS, incl. garbage collection of a 1 KiB page, ~22 ms) during
    a connection: the Zephyr controller's flash/radio synchronisation must find
    the time slots at the bridge's 30–50 ms interval.
+
+### SSD1619 (Hema 52811)
+
+From the SSD1619A command set and the sequence EPD-nRF5 runs on the same board
+(`EPD/SSD16xx.c` with its "Hema213" panel). OTP waveforms, the controller's
+internal temperature sensor.
+
+| Step | Sequence | Notes |
+|---|---|---|
+| `panel_init` (boot) | EN active (`en-gpios`, the panel supply), then the SPI bus (`zephyr,deferred-init`, started by `device_init()`), BS low, RES# inactive, DC low, BUSY disconnected | the supply stays on (deep sleep between refreshes), so CS is never driven high into an unpowered panel |
+| `begin_frame` | BUSY input; RES# low 10 ms, high 10 ms; SW RESET 0x12; wait BUSY low (≤ 500 ms); border 0x3C {01}; sensor 0x18 {80}; data entry 0x11 {03} (X+ then Y+); RAM X 0x44 {X0/8, (X0+W−1)/8}; RAM Y 0x45 {0, 0, (H−1)&0xFF, (H−1)>>8}; counters 0x4E {X0/8}, 0x4F {0, 0}; WRITE RAM 0x24 | X0 = `ram-x-offset`: the Hema panel starts one byte (8 columns) into RAM |
+| `write_plane_chunk` | data bytes, DC high; the first chunk of plane 1 moves the counters back to the origin and sends WRITE RAM (red) 0x26 | stages RAM only |
+| `validate_frame` | every byte of every plane staged and BUSY low | |
+| `commit_refresh` | DISPLAY UPDATE CONTROL 1 0x21 {RAM options, 00}; DISPLAY UPDATE CONTROL 2 0x22 {F7}; MASTER ACTIVATION 0x20 | 0xF7: clock and analog on, load temperature and LUT, display, analog and clock off |
+| `wait_refresh_complete` | as for the UC8176; BUSY is high while busy (`busy-active-high`) | |
+| `sleep_panel` | wait BUSY (stuck → hardware reset), DEEP SLEEP 0x10 {01}; DC low; BUSY disconnected | only a hardware reset wakes the controller |
+
+Planes pass through unmodified. Natively a B/W bit 1 is white and a red bit 1 is
+red; DISPLAY UPDATE CONTROL 1 takes the red RAM option in A[7:4] and the B/W
+option in A[3:0] (0 normal, 8 inverse, 4 read as 0 for a one-plane panel),
+derived from `plane-flags`: the Hema's 0x03 gives 0x00.
+
+Bench check (2026-10-06, a Hema 2.13-inch sample, build code AAA0): a test frame
+drawn through this driver (border, origin marker, black and red bars,
+checkerboard) appeared complete, in the right colours and with no column
+offset; BUSY held 12,577 ms after MASTER ACTIVATION. Held landscape, the tag
+shows the native origin at its top-right: Cremind rotation 3.
 
 ## 7. Power behaviour
 
@@ -489,10 +526,10 @@ python scripts/tags/gen_conversation.py --out ../cremind-tag/tests/ztest/tag_cor
 
 ## 13. Open items
 
-- Nothing has run on hardware: panel sequences, polarity, orientation, BUSY
-  timing, VDD reading, radio/flash coexistence and all stack sizes are
-  unverified.
-- Sifei 52810 and Hema 52811: placeholder pins, panel id 255; the firmware
-  links the full UC8176 driver (so the fit is honest) but never drives it.
+- Only the Hema 52811 panel has run on hardware (§6 SSD1619 bench check). The
+  UC8176 sequences, VDD reading, radio/flash coexistence and all stack sizes
+  are unverified.
+- Sifei 52810: placeholder pins, panel id 255; the firmware links the full
+  UC8176 driver (so the fit is honest) but never drives it.
 - `CMD{SLEEP}` (System OFF) is implemented for boards with `wake-verified` only;
   none has it.

@@ -18,6 +18,8 @@ SOC_KCONFIG = {
     "hema_52811": "SOC_NRF52811_QFAA",
 }
 NRF52_BOARDS = {"sifei_52810", "hema_52811"}
+PLACEHOLDER_BOARDS = {"sifei_52810"}
+PANEL_BOARDS = ["laowu_bw", "laowu_bwr", "hema_52811"]
 
 
 def board_file(board: str, name: str) -> str:
@@ -110,7 +112,35 @@ def test_laowu_pins_match_the_matrix(board):
     assert 'status = "disabled";\n\tcurrent-speed' in text  # debug UART present but off
 
 
-@pytest.mark.parametrize("board", sorted(NRF52_BOARDS))
+def test_hema_pins_match_the_matrix():
+    board = "hema_52811"
+    pins = TAGS[board]["pins"]
+    text, pinctrl = dts(board), board_file(board, f"{board}-pinctrl.dtsi")
+    assert psel(pinctrl, "SPIM_MOSI") == pins["mosi"]
+    assert psel(pinctrl, "SPIM_SCK") == pins["sck"]
+    for prop, key in (("cs-gpios", "cs"), ("dc-gpios", "dc"), ("reset-gpios", "reset"),
+                      ("busy-gpios", "busy"), ("bs-gpios", "bs"), ("en-gpios", "en")):
+        assert gpio(text, prop) == pins[key], prop
+    assert pins["wake"] == "none" and "wake-gpios" not in text
+    assert pins["debug_tx"] == "none" and "UART_TX" not in pinctrl
+    leds = [int(n) for n in re.findall(r"led_\d+ \{\s*gpios = <&gpio0 (\d+) ", text)]
+    assert leds == TAGS[board]["leds"]
+    assert "PLACEHOLDER" not in pinctrl + text
+    # SSD1619: BUSY is high while busy; the bus starts after the panel supply.
+    assert '"cremind,ssd1619"' in text and "busy-active-high;" in text
+    assert "zephyr,deferred-init;" in text
+
+
+@pytest.mark.parametrize("board", PANEL_BOARDS)
+def test_panel_geometry_matches_the_matrix(board):
+    text, panel = dts(board), TAGS[board]["panel"]
+    width, height = panel["resolution"]
+    assert f"width = <{width}>;" in text
+    assert f"height = <{height}>;" in text
+    assert f"planes = <{panel['planes']}>;" in text
+
+
+@pytest.mark.parametrize("board", sorted(PLACEHOLDER_BOARDS))
 def test_unverified_boards_use_placeholders_safely(board):
     text = dts(board)
     assert TAGS[board]["pins"] == "unverified"

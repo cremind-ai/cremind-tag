@@ -11,8 +11,14 @@ target_sources(app PRIVATE
   src/adv.c
   src/store_nvs.c
   src/enroll_uicr.c
-  src/panel_uc8176.c
   src/battery.c)
+
+# One panel driver per image: the controller of the chosen cremind,panel node.
+if(CONFIG_DT_HAS_CREMIND_SSD1619_ENABLED)
+  target_sources(app PRIVATE src/panel_ssd1619.c)
+else()
+  target_sources(app PRIVATE src/panel_uc8176.c)
+endif()
 
 # Link-time optimisation (prj.conf CONFIG_LTO) for everything except:
 # - the Zephyr Link Layer: the timing-critical controller is compiled exactly

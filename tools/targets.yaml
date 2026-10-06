@@ -148,7 +148,7 @@ targets:
     extra_conf: []
     extra_overlay: []
     resources: {flash_headroom_pct: 15, ram_free_min: 3072}
-    release: false  # placeholder panel pins (panel id 255): nothing to show yet
+    release: false  # panel bench-checked only (docs/qualification/hema_52811.md): not qualified yet
 
   tag-nrf52dk:
     app: apps/tag

@@ -63,6 +63,10 @@ static const struct bt_uuid_128 data_uuid = BT_UUID_INIT_128(CTAG_GATT_CHR_DATA_
 static const struct bt_uuid_128 status_uuid = BT_UUID_INIT_128(CTAG_GATT_CHR_STATUS_UUID_VAL);
 static const struct bt_uuid_128 ident_uuid = BT_UUID_INIT_128(CTAG_GATT_CHR_IDENT_UUID_VAL);
 static const struct bt_uuid_128 pair_uuid = BT_UUID_INIT_128(CTAG_GATT_CHR_PAIR_UUID_VAL);
+/* Static, as every UUID a discovery is given: the stack keeps the pointer until
+ * the procedure completes, and BT_UUID_GATT_CCC is a compound literal on the
+ * caller's stack (gone once gatt_step returns: no CCC would ever match). */
+static const struct bt_uuid_16 ccc_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
 
 enum phase {
 	PH_IDLE = 0,
@@ -421,7 +425,7 @@ static void gatt_step(struct gw_core *g, uint8_t i, const struct gw_evt *e, int6
 		if (session ? (h->caps == 0u || h->ctrl == 0u || h->data == 0u || h->status == 0u)
 			    : (h->ident == 0u || h->pair == 0u)) {
 			setup_done(g, i, CTAG_STATUS_UNSUPPORTED, NULL, 0u, now); /* 11.3 */
-		} else if (discover(cl, BT_GATT_DISCOVER_DESCRIPTOR, BT_UUID_GATT_CCC, h->start + 1u,
+		} else if (discover(cl, BT_GATT_DISCOVER_DESCRIPTOR, &ccc_uuid.uuid, h->start + 1u,
 				    h->end) != 0) {
 			setup_done(g, i, CTAG_STATUS_INVALID, NULL, 0u, now);
 		} else {

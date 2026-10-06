@@ -97,13 +97,21 @@ PyYAML); see [building.md](building.md).
    power loss mid first boot, is removed first).
 5. Self-configuration once (CDB flag `CONFIGURED` of `0x0001`): the
    configuration client adds app key 0 to the local node and binds
-   `LAYOUT_CLI`, `MGMT_CLI` and the Health Client to it.
+   `LAYOUT_CLI`, `MGMT_CLI` and the Health Client to it. The two vendor binds
+   are Config Model App Bind messages the gateway builds itself (as for
+   bridges, §3) and waits up to 2 s for their status:
+   `bt_mesh_cfg_cli_mod_app_bind_vnd()` refuses company id 0xFFFF, Zephyr's
+   `CID_NVAL`, with `-EINVAL`.
 6. `boot_id` from `sys_csrand_get()`; the CDB's nodes (except `0x0001`) and the
    stored names and assignments are loaded into the core; the loop starts and
    asks every configured bridge for `CAPS_GET` + `HEALTH_GET`.
 
 If the mesh does not come up the serial server still runs: `INFO` reports the
-error in the `mesh_init` counter and requests to bridges fail.
+error in the `mesh_init` counter and the step that failed in `mesh_step` (1
+`bt_enable`, 2 `bt_mesh_init`, 3 `settings_load`, 4 the CDB and its net key, 5
+the first app key, 6 provisioning itself, 7 self-configuration's app key, 8 its
+binds; 0 once the mesh runs), and requests to bridges fail. Tags on the own
+radio are not heard either (the listener rides the mesh's scan).
 
 ---
 
@@ -140,7 +148,7 @@ hash Zephyr's `APP_BUILD_VERSION` records), `boot_id`, `caps` and `counters`;
 `unseg_dropped`, `provisions`, `beacons`, `tag_seen_limited`, `reboots`,
 `queue_depth`, `layout_arena_used`, `nodes`, `assignments`, `uptime_s`, and
 from the platform `uart_rx_bytes`, `uart_tx_bytes`, `uart_rx_overflow`,
-`uart_rx_paused`, `mesh_init`, `mesh_start_errors`, `cfg_send_errors`,
+`uart_rx_paused`, `mesh_init`, `mesh_step`, `mesh_start_errors`, `cfg_send_errors`,
 `evq_dropped`; v2 adds its own (§15), tag links theirs (§16.7).
 
 **Serial driver.** `uart_io.c` uses the interrupt-driven UART API on every
@@ -193,8 +201,8 @@ configuration client's status callback within 5 s, each tried up to 3 times:
 | Step | Message | Success |
 |---|---|---|
 | 1 | Config AppKey Add (net 0, app 0, the CDB's app key) — segmented, sent through the lane of §4 with its own `send_cb` | status 0 |
-| 2 | Model App Bind, `LAYOUT_SRV` | status 0 |
-| 3 | Model App Bind, `MGMT_SRV` | status 0 |
+| 2 | Model App Bind, `LAYOUT_SRV` — built by the gateway (company 0xFFFF, §1 step 5) | status 0 |
+| 3 | Model App Bind, `MGMT_SRV` — likewise | status 0 |
 | 4 | Relay Set (`relay`, retransmit 2 × 20 ms) | relay state as asked |
 | 5 | Default TTL Set (`ttl`) | TTL echoed |
 | 6 | Network Transmit Set (3 × 20 ms) | any answer |
@@ -678,10 +686,17 @@ results in the board's qualification report.
 
 ## 14. Open items
 
-- Nothing has run on real hardware: the mesh stack integration (PB-ADV
-  provisioning, the configuration client sequence, `send_cb` behaviour with 16
-  segments, CDB persistence through reboots, secure storage of device keys),
-  USB CDC ACM enumeration and the nRF UARTE path are verified only by building.
+- First hardware run (2026-10-06, nRF52840 Dongle with Nordic's bootloader,
+  a Hema 52811 tag, Cremind's integrated worker): USB CDC ACM enumeration, the
+  serial server with the v2 secure session, the mesh start-up with
+  self-configuration (after two fixes: §1 step 5's vendor binds, and the
+  static CCC UUID of `central.c`), and the own radio — adverts, connections,
+  the SESSION GATT setup, a v1 session's `CLEAR` and a layout displayed — all
+  ran, and the network and ownership survived reboots and DFU updates. Still
+  verified only by building: PB-ADV provisioning, the configuration client
+  sequence of a bridge, `send_cb` behaviour with 16 segments, bridge nodes in
+  the CDB, the PAIR tunnel and the nRF UARTE path. The mesh suspend for a
+  connection took up to 763 ms.
 - Stack sizes are unmeasured on both boards (§10, §13 step 5).
 - The nRF52832 gateway's RAM margin (4.5 KiB) and its reduced queue need the
   resource qualification before it is used.

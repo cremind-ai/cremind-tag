@@ -190,8 +190,9 @@ def test_release_notes():
 
 def test_main_packages_a_trial_release(tmp_path: Path, monkeypatch, capsys):
     src = tmp_path / "build"
-    _fake_build(src, "tag-laowu-bw")
-    monkeypatch.setattr(build, "git_info", lambda repo=None: {"commit": COMMIT, "describe": "v0.1.0", "dirty": False,
+    current = str(release.ctag_version.read_version())  # a trial release packages the repository's VERSION
+    _fake_build(src, "tag-laowu-bw", version=current, app_version=current)
+    monkeypatch.setattr(build, "git_info", lambda repo=None: {"commit": COMMIT, "describe": f"v{current}", "dirty": False,
                                                               "changed_files": [], "commit_time": 1790536279})
     monkeypatch.setattr(release.ctag_version, "check", lambda version, root=None: [])
     # The contract's revision, as for a committed tree (this checkout may have work in progress).

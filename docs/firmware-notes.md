@@ -147,7 +147,11 @@ build.
   163 B → 14 segments (4-B MIC) / 15 (8-B MIC); `SEG_MAX=16` works. A second
   concurrent segmented send returns `-EBUSY` while `TX_SEG_MSG_COUNT=1`.
 - Config client (`cfg_cli.h`): `bt_mesh_cfg_cli_app_key_add(net_idx, addr, key_net_idx, key_app_idx, app_key[16], *status)` (842);
-  `bt_mesh_cfg_cli_mod_app_bind_vnd(net_idx, addr, elem_addr, mod_app_idx, mod_id, cid, *status)` (938);
+  `bt_mesh_cfg_cli_mod_app_bind_vnd(net_idx, addr, elem_addr, mod_app_idx, mod_id, cid, *status)` (938),
+  which returns `-EINVAL` for `cid` 0xFFFF (`CID_NVAL`, its marker for a SIG model; `cfg_cli.c`
+  1565) — `MESH_COMPANY_ID` — so the gateway builds Model App Bind (`0x803D`: element, app
+  index, company, model, all LE16) itself; a status with company 0xFFFF reads like a SIG
+  model's;
   `bt_mesh_cfg_cli_relay_set(net_idx, addr, new_relay, new_transmit, *status, *transmit)` (773);
   `bt_mesh_cfg_cli_ttl_set(net_idx, addr, val, *ttl)` (623);
   `bt_mesh_cfg_cli_net_transmit_set(net_idx, addr, val, *transmit)` (728);
@@ -211,6 +215,12 @@ build.
 - GATT client: `bt_gatt_discover` (1902), `bt_gatt_subscribe` (2304),
   `bt_gatt_write_without_response_cb(conn, handle, data, len, sign, func, user_data)` (2114),
   `bt_gatt_write` (2087), `bt_gatt_read` (2038).
+- A discovery keeps `params->uuid` until it completes, so the UUID must be
+  static: `BT_UUID_GATT_CCC` is `BT_UUID_DECLARE_16()` (`uuid.h:128`, 911), a
+  compound literal on the caller's stack. Passed from a step that returns
+  before the Find Information responses arrive, no CCC ever matched — every
+  setup ended `UNSUPPORTED` on hardware (found 2026-10-06; the gateway's and
+  the bridge's `central.c` use a static `ccc_uuid`).
 - Buffers: `BT_MAX_CONN`, `BT_BUF_ACL_TX_COUNT` (also sizes controller TX, `ull_conn.c:134-145`),
   `BT_L2CAP_TX_BUF_COUNT` (2–255), `BT_ATT_TX_COUNT`, `BT_BUF_ACL_RX_COUNT_EXTRA`.
   There is **no** `BT_BUF_ACL_RX_COUNT`, `BT_CTLR_TX_BUFFERS` or `BT_ATT_TX_MAX`;

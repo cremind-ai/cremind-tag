@@ -35,19 +35,19 @@ Every board moves through these states; qualification reports in
 | [laowu_bw](../qualification/laowu_bw.md) | 16 | Laowu 4.2-inch black/white | `laowu_bw/nrf51822` | nRF51822 QFAB | 128 / 16 KiB | UC8176 4.2 in 400×300 black/white (id 1, not verified) | buildable | Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 75.2 % used, 2,068 B RAM free); nothing verified on a sample yet. |
 | [laowu_bwr](../qualification/laowu_bwr.md) | 17 | Laowu 4.2-inch black/white/red | `laowu_bwr/nrf51822` | nRF51802 QFAA-compatible (256 KiB / 16 KiB) | 256 / 16 KiB | UC8176 4.2 in 400×300 black/white/red (id 2, not verified) | buildable | Tag firmware (apps/tag) links within the exact geometry and meets the targets (flash 37.1 % used, 2,060 B RAM free); nothing verified on a sample yet. |
 | [sifei_52810](../qualification/sifei_52810.md) | 18 | Sifei 52810 | `sifei_52810/nrf52810` | nRF52810 QFAA | 192 / 24 KiB | unverified (panel id 255) | buildable | Tag firmware (apps/tag) links with the panel driver and meets the targets (flash 53.3 % used, 9,056 B RAM free); the placeholder panel (id 255) is never driven and frames are refused until display mapping, panel model and wake sources are verified. |
-| [hema_52811](../qualification/hema_52811.md) | 19 | Hema/Alibaba 52811 | `hema_52811/nrf52811` | nRF52811 QFAA | 192 / 24 KiB | unverified (panel id 255) | buildable | Tag firmware (apps/tag) links with the panel driver and meets the targets (flash 53.3 % used, 9,056 B RAM free); the placeholder panel (id 255) is never driven and frames are refused until display mapping, panel model and wake sources are verified. |
+| [hema_52811](../qualification/hema_52811.md) | 19 | Hema/Alibaba 52811 (2.13-inch) | `hema_52811/nrf52811` | nRF52811 QFAA | 192 / 24 KiB | SSD1619 2.13 in 128×250 black/white/red (id 3, not verified) | buildable | Pins and panel as documented by EPD-nRF5 (EPD_CFG_52811 and its "Hema213" SSD1619 panel, RAM from column 8); EN (P0.07) switches the panel supply. Tag firmware (apps/tag) links with the SSD1619 driver and meets the targets (flash 53.7 % used, 9,056 B RAM free); not yet verified on a sample. |
 
 ### Tag pins (port 0, decimal)
 
 Board files: [`boards/cremind/`](../../boards/cremind/). Unverified boards use placeholder
 pins in their devicetree and panel id 255, which firmware refuses to drive.
 
-| Board | MOSI | SCK | CS | DC | RESET | BUSY | BS | WAKE | DEBUG TX | LEDs | 32.768 kHz |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| laowu_bw | 5 | 8 | 9 | 10 | 11 | 12 | 13 | 7 | 6 | unconfirmed | unverified (RC assumed until a crystal is confirmed) |
-| laowu_bwr | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 9 | 8 | 3, 4, 5 | unverified (RC assumed until a crystal is confirmed) |
-| sifei_52810 | unverified | unverified | unverified | unverified | unverified | unverified | unverified | unverified | unverified | - | unverified |
-| hema_52811 | unverified | unverified | unverified | unverified | unverified | unverified | unverified | unverified | unverified | - | unverified |
+| Board | MOSI | SCK | CS | DC | RESET | BUSY | BS | WAKE | DEBUG TX | EN | LEDs | 32.768 kHz |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| laowu_bw | 5 | 8 | 9 | 10 | 11 | 12 | 13 | 7 | 6 | - | unconfirmed | unverified (RC assumed until a crystal is confirmed) |
+| laowu_bwr | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 9 | 8 | - | 3, 4, 5 | unverified (RC assumed until a crystal is confirmed) |
+| sifei_52810 | unverified | unverified | unverified | unverified | unverified | unverified | unverified | unverified | unverified | unverified | - | unverified |
+| hema_52811 | 20 | 19 | 6 | 5 | 4 | 3 | 2 | none | none | 7 | 18 | unverified (RC assumed until a crystal is confirmed) |
 
 ## Build targets
 
@@ -81,7 +81,7 @@ From `build/memory-report.json` generated 2026-09-28T02:04:54+00:00 (NCS v3.4.1)
 | tag-laowu-bw | `apps/tag` | 95,508 / 126,976 | 24.8 % (15 %) | 14,316 / 16,384 | 2,068 (2,048) | pass (edtlib) | ok | 2026-09-27 |
 | tag-laowu-bwr | `apps/tag` | 95,628 / 258,048 | 62.9 % (15 %) | 14,324 / 16,384 | 2,060 (2,048) | pass (edtlib) | ok | 2026-09-27 |
 | tag-sifei-52810 | `apps/tag` | 100,492 / 188,416 | 46.7 % (15 %) | 15,520 / 24,576 | 9,056 (3,072) | pass (edtlib) | ok | 2026-09-27 |
-| tag-hema-52811 | `apps/tag` | 100,396 / 188,416 | 46.7 % (15 %) | 15,520 / 24,576 | 9,056 (3,072) | pass (edtlib) | ok | 2026-09-28 |
+| tag-hema-52811 | `apps/tag` | 101,204 / 188,416 | 46.3 % (15 %) | 15,520 / 24,576 | 9,056 (3,072) | pass (edtlib) | ok | 2026-10-06 |
 | tag-nrf52dk | `apps/tag` | 100,904 / 499,712 | 79.8 % (15 %) | 15,640 / 65,536 | 49,896 (none) | pass (edtlib) | ok | 2026-09-27 |
 
 ## Verification checklist
