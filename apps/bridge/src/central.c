@@ -53,6 +53,10 @@ static const struct bt_uuid_128 caps_uuid = BT_UUID_INIT_128(CTAG_GATT_CHR_CAPS_
 static const struct bt_uuid_128 ctrl_uuid = BT_UUID_INIT_128(CTAG_GATT_CHR_CTRL_UUID_VAL);
 static const struct bt_uuid_128 data_uuid = BT_UUID_INIT_128(CTAG_GATT_CHR_DATA_UUID_VAL);
 static const struct bt_uuid_128 status_uuid = BT_UUID_INIT_128(CTAG_GATT_CHR_STATUS_UUID_VAL);
+/* Static, as every UUID a discovery is given: the stack keeps the pointer until
+ * the procedure completes, and BT_UUID_GATT_CCC is a compound literal on the
+ * caller's stack (gone once the step returns: no CCC would ever match). */
+static const struct bt_uuid_16 ccc_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
 
 struct handles {
 	uint32_t tag_id;
@@ -472,7 +476,7 @@ static void gatt_step(struct clink *cl, const struct bev *e)
 	case GATT_CHRC:
 		if (cl->cur.caps == 0u || cl->cur.ctrl == 0u || cl->cur.data == 0u ||
 		    cl->cur.status == 0u ||
-		    discover(cl, BT_GATT_DISCOVER_DESCRIPTOR, BT_UUID_GATT_CCC, cl->cur.start + 1u,
+		    discover(cl, BT_GATT_DISCOVER_DESCRIPTOR, &ccc_uuid.uuid, cl->cur.start + 1u,
 			     cl->cur.end) != 0) {
 			gatt_fail(cl, CTAG_STATUS_INVALID);
 		} else {

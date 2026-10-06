@@ -27,15 +27,33 @@ LOG_MODULE_REGISTER(gw_mesh, LOG_LEVEL_INF);
 #define NET_IDX           BT_MESH_NET_PRIMARY
 #define APP_IDX           0x000
 #define OP_APP_KEY_ADD    BT_MESH_MODEL_OP_1(0x00)
+#define OP_MOD_APP_BIND   BT_MESH_MODEL_OP_2(0x80, 0x3D)
 #define AD_MESH_BEACON    0x2B /* Mesh Beacon AD type */
 #define BEACON_UNPROV     0x00
 #define RELAY_TRANSMIT    BT_MESH_TRANSMIT(2, 20) /* 2 retransmissions, 20 ms (2) */
 #define NET_TRANSMIT      BT_MESH_TRANSMIT(3, 20) /* 3 retransmissions, 20 ms (2) */
 #define SELF_CFG_TIMEOUT  2000
 
+/* The start-up step that failed (counter mesh_step; 0 once the mesh runs). */
+enum start_step {
+	STEP_NONE,
+	STEP_BT_ENABLE,
+	STEP_MESH_INIT,
+	STEP_SETTINGS,
+	STEP_NETWORK,  /* the CDB with its net key */
+	STEP_APP_KEY,  /* first boot: app key 0 in the CDB */
+	STEP_PROVISION,
+	STEP_SELF_APP_KEY,
+	STEP_SELF_BIND,
+};
+
 static uint8_t dev_uuid[16];
 static int mesh_err;
+static uint8_t mesh_step;
 static uint32_t start_errors, cfg_errors;
+/* The gateway's own Model App Status, which configure_self waits for. */
+static K_SEM_DEFINE(self_bind_sem, 0, 1);
+static uint8_t self_bind_status;
 #ifdef CONFIG_CTAG_GW_SECURE
 /* The static OOB of the provisioning in progress (wiped when it ends). */
 static uint8_t prov_oob[CTAG_STATIC_OOB_LEN];
@@ -129,7 +147,12 @@ static void cb_mod_app(struct bt_mesh_cfg_cli *cli, uint16_t addr, uint8_t statu
 	ARG_UNUSED(cli);
 	ARG_UNUSED(elem_addr);
 	ARG_UNUSED(app_idx);
-	if (id == CTAG_MESH_MODEL_LAYOUT_SRV) {
+	if (addr == GW_ADDR) {
+		/* Its own bindings, checked first: with company id 0xFFFF (CID_NVAL)
+		 * the Health Client's status (SIG model 0x0003) reads like MGMT_SRV's. */
+		self_bind_status = status;
+		k_sem_give(&self_bind_sem);
+	} else if (id == CTAG_MESH_MODEL_LAYOUT_SRV) {
 		cfg_post(addr, GW_CFG_BIND_LAYOUT, status, 0u);
 	} else if (id == CTAG_MESH_MODEL_MGMT_SRV) {
 		cfg_post(addr, GW_CFG_BIND_MGMT, status, 0u);
@@ -372,6 +395,25 @@ static int app_key_add(uint16_t addr, uint32_t tag)
 	return err;
 }
 
+/*
+ * Config Model App Bind of a vendor model at addr's primary element, built here
+ * as well: bt_mesh_cfg_cli_mod_app_bind_vnd() refuses company id 0xFFFF (its
+ * CID_NVAL, "a SIG model") with -EINVAL, and CTAG_MESH_COMPANY_ID is 0xFFFF
+ * until an assigned id lands. The status arrives at cb_mod_app.
+ */
+static int mod_app_bind_vnd(uint16_t addr, uint16_t mod_id)
+{
+	BT_MESH_MODEL_BUF_DEFINE(msg, OP_MOD_APP_BIND, 8);
+	struct bt_mesh_msg_ctx mctx = BT_MESH_MSG_CTX_INIT_DEV(NET_IDX, addr);
+
+	bt_mesh_model_msg_init(&msg, OP_MOD_APP_BIND);
+	net_buf_simple_add_le16(&msg, addr);
+	net_buf_simple_add_le16(&msg, APP_IDX);
+	net_buf_simple_add_le16(&msg, CTAG_MESH_COMPANY_ID);
+	net_buf_simple_add_le16(&msg, mod_id);
+	return bt_mesh_model_send(cfg_cli.model, &mctx, &msg, NULL, NULL);
+}
+
 int gw_mesh_cfg(void *ctx, uint16_t addr, uint8_t step, uint8_t arg, uint32_t tag)
 {
 	int err;
@@ -383,10 +425,8 @@ int gw_mesh_cfg(void *ctx, uint16_t addr, uint8_t step, uint8_t arg, uint32_t ta
 		break;
 	case GW_CFG_BIND_LAYOUT:
 	case GW_CFG_BIND_MGMT:
-		err = bt_mesh_cfg_cli_mod_app_bind_vnd(
-			NET_IDX, addr, addr, APP_IDX,
-			step == GW_CFG_BIND_LAYOUT ? CTAG_MESH_MODEL_LAYOUT_SRV : CTAG_MESH_MODEL_MGMT_SRV,
-			CTAG_MESH_COMPANY_ID, NULL);
+		err = mod_app_bind_vnd(addr, step == GW_CFG_BIND_LAYOUT ? CTAG_MESH_MODEL_LAYOUT_SRV
+									 : CTAG_MESH_MODEL_MGMT_SRV);
 		break;
 	case GW_CFG_RELAY:
 		err = bt_mesh_cfg_cli_relay_set(NET_IDX, addr,
@@ -499,6 +539,7 @@ size_t gw_mesh_counters(struct ctag_cbor_counter *items, size_t max)
 {
 	const struct ctag_cbor_counter all[] = {
 		CTAG_CBOR_COUNTER("mesh_init", (uint32_t)-mesh_err),
+		CTAG_CBOR_COUNTER("mesh_step", mesh_step),
 		CTAG_CBOR_COUNTER("mesh_start_errors", start_errors),
 		CTAG_CBOR_COUNTER("cfg_send_errors", cfg_errors),
 		CTAG_CBOR_COUNTER("evq_dropped", gw_thread_dropped()),
@@ -542,6 +583,20 @@ static int create_app_key(void)
 	return err;
 }
 
+/* One of its own vendor client models to app key 0, waiting for the status. */
+static int bind_self_vnd(uint16_t mod_id, uint8_t *status)
+{
+	int err;
+
+	k_sem_reset(&self_bind_sem);
+	err = mod_app_bind_vnd(GW_ADDR, mod_id);
+	if (err == 0 && k_sem_take(&self_bind_sem, K_MSEC(SELF_CFG_TIMEOUT)) != 0) {
+		err = -ETIMEDOUT;
+	}
+	*status = self_bind_status;
+	return err;
+}
+
 /* The gateway binds its own client models to app key 0 once (the
  * configuration client talking to the local configuration server). */
 static int configure_self(void)
@@ -551,6 +606,7 @@ static int configure_self(void)
 	uint8_t status = 0;
 	int err;
 
+	mesh_step = STEP_SELF_APP_KEY;
 	if (self == NULL) {
 		return -ENOENT;
 	}
@@ -563,14 +619,11 @@ static int configure_self(void)
 	}
 	memset(key, 0, sizeof(key));
 	if (err == 0 && status == 0) {
-		err = bt_mesh_cfg_cli_mod_app_bind_vnd(NET_IDX, GW_ADDR, GW_ADDR, APP_IDX,
-						       CTAG_MESH_MODEL_LAYOUT_CLI,
-						       CTAG_MESH_COMPANY_ID, &status);
+		mesh_step = STEP_SELF_BIND;
+		err = bind_self_vnd(CTAG_MESH_MODEL_LAYOUT_CLI, &status);
 	}
 	if (err == 0 && status == 0) {
-		err = bt_mesh_cfg_cli_mod_app_bind_vnd(NET_IDX, GW_ADDR, GW_ADDR, APP_IDX,
-						       CTAG_MESH_MODEL_MGMT_CLI,
-						       CTAG_MESH_COMPANY_ID, &status);
+		err = bind_self_vnd(CTAG_MESH_MODEL_MGMT_CLI, &status);
 	}
 	if (err == 0 && status == 0) {
 		err = bt_mesh_cfg_cli_mod_app_bind(NET_IDX, GW_ADDR, GW_ADDR, APP_IDX,
@@ -591,6 +644,7 @@ static int start_network(void)
 	uint8_t dev_key[16];
 	int err;
 
+	mesh_step = STEP_NETWORK;
 	err = sys_csrand_get(net_key, sizeof(net_key));
 	if (err != 0) {
 		return err;
@@ -598,6 +652,7 @@ static int start_network(void)
 	err = bt_mesh_cdb_create(net_key);
 	if (err == 0) {
 		LOG_INF("new network: CDB created");
+		mesh_step = STEP_APP_KEY;
 		err = create_app_key();
 		if (err != 0) {
 			return err;
@@ -615,6 +670,7 @@ static int start_network(void)
 	if (!bt_mesh_is_provisioned()) {
 		struct bt_mesh_cdb_node *stale = bt_mesh_cdb_node_get(GW_ADDR);
 
+		mesh_step = STEP_PROVISION;
 		if (stale != NULL) {
 			bt_mesh_cdb_node_del(stale, true); /* power lost mid first boot */
 		}
@@ -638,18 +694,22 @@ int gw_mesh_start(void)
 	int err;
 
 	make_uuid();
+	mesh_step = STEP_BT_ENABLE;
 	err = bt_enable(NULL);
 	if (err == 0) {
+		mesh_step = STEP_MESH_INIT;
 		err = bt_mesh_init(&prov, &comp);
 	}
 	if (err == 0 && IS_ENABLED(CONFIG_SETTINGS)) {
 		/* bt_enable -> bt_mesh_init -> settings_load (firmware-notes 3). */
+		mesh_step = STEP_SETTINGS;
 		err = settings_load();
 	}
 	if (err == 0) {
 		err = start_network();
 	}
 	if (err == 0) {
+		mesh_step = STEP_NONE;
 		bt_le_scan_cb_register(&scan_cb);
 	} else {
 		start_errors++;
