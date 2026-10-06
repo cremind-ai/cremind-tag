@@ -135,18 +135,23 @@ tags:
   - id: hema_52811
     board_id: 19
     zephyr_board: hema_52811/nrf52811
-    name: Hema/Alibaba 52811
+    name: Hema/Alibaba 52811 (2.13-inch)
     mcu: nRF52811
     soc_variant: QFAA
     flash_kib: 192
     ram_kib: 24
     panel:
-      id: 255
-      controller: unverified
+      id: 3
+      controller: SSD1619
+      size_in: 2.13
+      resolution: [128, 250]
+      planes: 2
       verified: false
-    pins: unverified
+    pins: {mosi: 20, sck: 19, cs: 6, dc: 5, reset: 4, busy: 3, bs: 2, wake: none, debug_tx: none, en: 7}
+    leds: [18]
+    oscillator_32k: unverified (RC assumed until a crystal is confirmed)
     status: buildable
-    notes: Tag firmware (apps/tag) links with the panel driver and meets the targets (flash 53.3 % used, 9,056 B RAM free); the placeholder panel (id 255) is never driven and frames are refused until display mapping, panel model and wake sources are verified.
+    notes: Pins and panel as documented by EPD-nRF5 (EPD_CFG_52811 and its "Hema213" SSD1619 panel, RAM from column 8); EN (P0.07) switches the panel supply. Tag firmware (apps/tag) links with the SSD1619 driver and meets the targets (flash 53.7 % used, 9,056 B RAM free); not yet verified on a sample.
 
 # Per-board verification checklist (docs/hardware/verification.md explains each item).
 verification_items:

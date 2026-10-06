@@ -86,7 +86,7 @@ If the probe cannot reach the chip, see
 | `laowu_bw` (`laowu_bw_nrf51822`) | nRF51822 | `nRF51822_xxAB` | `bw` (UC8176 4.2″ BW) |
 | `laowu_bwr` (`laowu_bwr_nrf51802`) | nRF51802 | `nRF51822_xxAA` | `bwr` (UC8176 4.2″ BWR) |
 | `sifei_52810` (`sifei_nrf52810`) | nRF52810 | `nRF52810_xxAA` | `unverified` |
-| `hema_52811` (`hema_nrf52811`) | nRF52811 | `nRF52811_xxAA` | `unverified` |
+| `hema_52811` (`hema_nrf52811`) | nRF52811 | `nRF52811_xxAA` | `ssd1619_213_bwr` (SSD1619 2.13" 128×250 BWR) |
 | `nrf52dk_tag` | nRF52832 | `nRF52832_xxAA` | `none` (virtual 400×300 BW) |
 
 ## The command
@@ -102,7 +102,7 @@ cremind tags tools tag enroll --board <board> [--panel <panel>] [--firmware <zep
 | Flag | Meaning |
 |---|---|
 | `--board` | tag board (table above; spec names, short ids or numbers) |
-| `--panel` | panel; defaults to the board's stock panel. `unverified` panels (Sifei, Hema) need their geometry given with `--width --height --planes --plane-flags` until the panel is verified |
+| `--panel` | panel; defaults to the board's stock panel. `unverified` panels (Sifei) need their geometry given with `--width --height --planes --plane-flags` until the panel is verified |
 | `--firmware` | Intel HEX to flash after a **full chip erase**; without it only UICR is rewritten and the application on the tag stays |
 | `--protect` | enable APPROTECT after enrollment, after a confirmation (see [APPROTECT](#approtect-trade-off)) |
 | `--dry-run` | print every command, write the UICR image and J-Link command files, run nothing, change nothing |

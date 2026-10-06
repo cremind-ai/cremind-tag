@@ -44,7 +44,7 @@ resource, timing and battery figures come only from qualification reports.
 
 | Area | State |
 |---|---|
-| Tag boards (Laowu BW/BWR nRF51822, Sifei 52810, Hema 52811) | **buildable**: secure firmware links within each board's exact memory geometry; Sifei/Hema panel pins still unverified (the firmware never drives them) |
+| Tag boards (Laowu BW/BWR nRF51822, Sifei 52810, Hema 52811) | **buildable**: secure firmware links within each board's exact memory geometry; the Hema 52811 drives its SSD1619 panel (bench-checked); Sifei panel pins still unverified (the firmware never drives them) |
 | Bridges (nRF52840, nRF52832) and gateways (nRF52840 DK or Dongle, nRF52832) | **buildable** |
 | Stack | every image verified Zephyr Host + Controller only (`tools/verify_stack.py`); all nine targets rebuild byte for byte (`tools/repro_check.py`) |
 | End to end | the first vertical slice (Cremind event → gateway → bridge → tag → ACK back in Cremind) passes against a real Cremind with the simulator standing in for the radio (Cremind's `scripts/tags/e2e_slice.py`) |

@@ -143,7 +143,8 @@ def render_matrix(matrix: dict[str, Any], targets: dict[str, Any], report: dict[
             f"| {t['mcu']} {t['soc_variant']} | {t['flash_kib']} / {t['ram_kib']} KiB | {panel_text(t['panel'])} "
             f"| {t['status']} | {t.get('notes', '')} |"
         )
-    pin_names = ["mosi", "sck", "cs", "dc", "reset", "busy", "bs", "wake", "debug_tx"]
+    # en (panel supply switch) is optional: boards without one show "-".
+    pin_names = ["mosi", "sck", "cs", "dc", "reset", "busy", "bs", "wake", "debug_tx", "en"]
     out += [
         "",
         "### Tag pins (port 0, decimal)",
@@ -156,7 +157,8 @@ def render_matrix(matrix: dict[str, Any], targets: dict[str, Any], report: dict[
     ]
     for t in matrix["tags"]:
         pins = t["pins"]
-        cells = [str(pins[p]) for p in pin_names] if isinstance(pins, dict) else ["unverified"] * len(pin_names)
+        cells = ([str(pins[p]) if p != "en" else str(pins.get(p, "-")) for p in pin_names]
+                 if isinstance(pins, dict) else ["unverified"] * len(pin_names))
         leds = ", ".join(str(n) for n in t["leds"]) if isinstance(t.get("leds"), list) else str(t.get("leds", "-"))
         out.append(f"| {t['id']} | " + " | ".join(cells) + f" | {leds} | {t.get('oscillator_32k', 'unverified')} |")
 

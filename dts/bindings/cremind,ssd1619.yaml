@@ -1,0 +1,105 @@
+# Copyright (c) 2026 Cremind
+# SPDX-License-Identifier: MIT
+
+title: Solomon Systech SSD1619 e-paper panel driven by the Cremind Tag firmware
+
+description: |
+  A Solomon Systech SSD1619 e-paper controller on a Cremind tag board. The panel
+  is driven by the Cremind Tag panel library (not the Zephyr display API):
+  writes stage image planes into controller RAM and only an explicit commit
+  refreshes (docs/protocol.md section 6). The properties shared with
+  cremind,uc8176 keep their names and meaning, so the firmware reads the
+  chosen panel the same way whatever its controller.
+
+  Panel identity and safety contract: as for cremind,uc8176 (panel-id 255 is
+  never driven; panel-verified only after a check on a physical sample).
+
+  BUSY: describe busy-gpios with GPIO_ACTIVE_HIGH (plus any pull flag). The
+  firmware reads the raw pin level and interprets it with busy-active-high.
+  The SSD1619 BUSY output is high while the controller is busy, so
+  busy-active-high is normally present.
+
+compatible: "cremind,ssd1619"
+
+include: [spi-device.yaml]
+
+properties:
+  dc-gpios:
+    type: phandle-array
+    required: true
+    description: Data/command select. Physical high selects data.
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: Controller reset (RES#, active low).
+
+  busy-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Controller BUSY output, read as a raw level; see busy-active-high.
+
+  bs-gpios:
+    type: phandle-array
+    description: |
+      Optional bus-select (BS1) line routed to the MCU. The firmware drives it
+      physically low to select the 4-wire SPI interface before reset.
+
+  en-gpios:
+    type: phandle-array
+    description: |
+      Optional panel supply switch routed to the MCU. The firmware drives it
+      active once at boot, before any other panel pin, and keeps the panel
+      powered: between refreshes the controller is in deep sleep.
+
+  width:
+    type: int
+    required: true
+    description: Native panel width in pixels (source direction, multiple of 8).
+
+  height:
+    type: int
+    required: true
+    description: Native panel height in pixels (gate direction).
+
+  ram-x-offset:
+    type: int
+    default: 0
+    description: |
+      First RAM column of the panel in pixels (multiple of 8): some panels
+      start their visible area a byte into the controller RAM.
+
+  planes:
+    type: int
+    required: true
+    enum: [1, 2]
+    description: Image planes; 1 = black/white, 2 = black/white + red.
+
+  plane-flags:
+    type: int
+    default: 0
+    description: |
+      Bit meaning of the planes as reported in CAPS (protocol/spec.yaml
+      tag_caps.plane_flags): bit0 set = a 1 bit in plane 0 is white;
+      bit1 set = a 1 bit in plane 1 is red.
+
+  busy-active-high:
+    type: boolean
+    description: A high BUSY level means busy (SSD1619). Absent = low means busy.
+
+  refresh-timeout-ms:
+    type: int
+    required: true
+    description: |
+      Upper bound for BUSY to release after a refresh command. Exceeding it
+      yields REFRESH_TIMEOUT.
+
+  panel-id:
+    type: int
+    required: true
+    description: Protocol panel id (protocol/spec.yaml `panels`); 255 = UNVERIFIED.
+
+  panel-verified:
+    type: boolean
+    description: Pins, polarity, panel model and planes verified on hardware.

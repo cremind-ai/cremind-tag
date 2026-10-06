@@ -52,9 +52,10 @@ corrected `soc`.
 3. Note the SPI clock rate and mode used by the vendor firmware.
 4. Compare with `pins` in `hardware/matrix.yaml` and the board devicetree.
 
-Unlocks: real pins in `<board>-pinctrl.dtsi` and the panel node; on Sifei/Hema
+Unlocks: real pins in `<board>-pinctrl.dtsi` and the panel node; on Sifei
 this replaces every `*_PLACEHOLDER_*` value and removes `zephyr,deferred-init`
-from the SPI bus (together with item 3).
+from the SPI bus (together with item 3). The Hema keeps a deferred bus: its
+driver starts it after switching the panel supply on.
 
 ## 3. Panel model, resolution, colour planes and connector orientation
 

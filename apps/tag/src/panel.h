@@ -4,8 +4,8 @@
  * panel_commit_refresh() issues the refresh command. Every function returns 0
  * or a negative errno (the core reports PANEL_ERROR).
  *
- * Implemented by panel_uc8176.c on the tag and by a fake in the native_sim
- * tests. Planes arrive in order (plane 0 fully, then plane 1) at strictly
+ * Implemented by panel_uc8176.c or panel_ssd1619.c on the tag (the controller
+ * of the chosen panel node) and by a fake in the native_sim tests. Planes arrive in order (plane 0 fully, then plane 1) at strictly
  * increasing offsets; a frame always restarts from begin_frame().
  */
 #ifndef TAG_PANEL_H_

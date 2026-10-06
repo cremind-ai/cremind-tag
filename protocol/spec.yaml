@@ -936,7 +936,8 @@ panels:
   NONE:               {value: 0, doc: "No panel (dev/test)"}
   UC8176_420_BW:      {value: 1, doc: "4.2in 400x300 UC8176 monochrome"}
   UC8176_420_BWR:     {value: 2, doc: "4.2in 400x300 UC8176 black/white/red"}
-  UNVERIFIED:         {value: 255, doc: "Panel not yet physically verified (Sifei/Hema)"}
+  SSD1619_213_BWR:    {value: 3, doc: "2.13in 128x250 SSD1619 black/white/red (Hema 52811)"}
+  UNVERIFIED:         {value: 255, doc: "Panel not yet physically verified (Sifei)"}
 
 # ---------------------------------------------------------------------------
 # Font pack (bridge external flash). See docs/fontpack.md.

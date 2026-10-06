@@ -806,5 +806,6 @@ packaged runtime. Until then it is behind the server setting
 3. Clean installs on Windows x64, macOS arm64 + x64, Linux x64 (systemd) with no
    developer tools; delivery continues after the browser and the desktop app close.
 4. Two profiles cannot reach each other's devices through new or legacy APIs.
-5. Hema panel pins/controller verified (the placeholder panel refuses every
-   frame) before the tag is offered to consumers.
+5. Hema panel pins/controller qualified on a sample (documented from EPD-nRF5
+   and bench-checked 2026-10-06; the rest of the qualification is pending)
+   before the tag is offered to consumers.

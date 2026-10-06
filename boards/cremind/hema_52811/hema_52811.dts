@@ -2,10 +2,11 @@
  * Copyright (c) 2026 Cremind
  * SPDX-License-Identifier: MIT
  *
- * Hema/Alibaba nRF52811 e-paper tag: nRF52811 QFAA (192 KiB flash, 24 KiB
- * SRAM). Display mapping, panel model and wake sources are UNVERIFIED: the
- * panel node below uses placeholder pins (see hema_52811-pinctrl.dtsi) and
- * panel-id 255.
+ * Hema/Alibaba nRF52811 e-paper tag, 2.13-inch (aesl0213c): nRF52811 QFAA
+ * (192 KiB flash, 24 KiB SRAM). Pins and panel as documented by EPD-nRF5
+ * (EPD_CFG_52811 and its "Hema213" panel: SSD1619, 128 x 250, RAM from column
+ * 8). Bench-checked on one sample (docs/qualification/hema_52811.md); not
+ * qualified yet (no panel-verified); wake sources unverified.
  */
 
 /dts-v1/;
@@ -32,7 +33,17 @@
 		/* Wake sources unverified: none described. */
 	};
 
+	leds {
+		compatible = "gpio-leds";
+
+		led0: led_0 {
+			gpios = <&gpio0 18 GPIO_ACTIVE_LOW>;
+			label = "LED 0 (P0.18)";
+		};
+	};
+
 	aliases {
+		led0 = &led0;
 		watchdog0 = &wdt0;
 	};
 };
@@ -54,33 +65,35 @@
 };
 
 /*
- * Deferred init: the SPI driver is linked but never applies its pinctrl state
- * or configures cs-gpios at boot, so no placeholder pin is touched.
+ * Deferred init: the bus starts in panel_init(), after the panel supply
+ * (en-gpios) is on, so CS is never driven high into an unpowered panel.
  */
 &spi0 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
 	zephyr,deferred-init;
-	cs-gpios = <&gpio0 HEMA_PLACEHOLDER_CS GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
 	pinctrl-0 = <&spi0_default>;
 	pinctrl-1 = <&spi0_sleep>;
 	pinctrl-names = "default", "sleep";
 
-	/* PLACEHOLDER panel: firmware must refuse to drive panel-id 255. */
 	epd: epd@0 {
-		compatible = "cremind,uc8176";
+		compatible = "cremind,ssd1619";
 		reg = <0>;
 		spi-max-frequency = <DT_FREQ_M(4)>;
-		dc-gpios = <&gpio0 HEMA_PLACEHOLDER_DC GPIO_ACTIVE_HIGH>;
-		reset-gpios = <&gpio0 HEMA_PLACEHOLDER_RST GPIO_ACTIVE_LOW>;
-		busy-gpios = <&gpio0 HEMA_PLACEHOLDER_BUSY GPIO_ACTIVE_HIGH>;
-		/* Placeholder geometry: the largest documented UC8176 panel. */
-		width = <400>;
-		height = <300>;
+		dc-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio0 4 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		busy-active-high;
+		bs-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		en-gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
+		width = <128>;
+		height = <250>;
+		ram-x-offset = <8>;
 		planes = <2>;
 		plane-flags = <0x03>;
 		refresh-timeout-ms = <30000>;
-		panel-id = <255>;	/* UNVERIFIED */
+		panel-id = <3>;
 	};
 };
 
