@@ -7,12 +7,15 @@ pack** stored in its soldered external flash.
 ## 1. Contents
 
 - One regular face per script covered by the pinned Noto collection, plus the
-  CJK regional faces (SC, TC, HK, JP, KR) — see the host software's
+  CJK regional faces (SC, TC, HK, JP, KR), plus weight variants of a face
+  (e.g. Noto Sans Bold) that hosts use only for emphasis; bridges treat every
+  face alike. See the host software's
   [`fonts.md`](https://github.com/cremind-ai/cremind/blob/main/docs/tags/fonts.md) and
   its `fonts/manifest.yaml` (packs are built by the host, not in this repository).
 - Face 0 is the icon face (ids from `spec.yaml` `icons`).
-- Strikes at `FONT_SIZES` (16, 24, 32 px) for text faces and `ICON_SIZES`
-  (16, 24, 32, 48 px) for the icon face.
+- Each text face carries strikes at sizes from `FONT_SIZES` (12, 14, 16, 24,
+  32 px; a pack may build a subset, and layouts use only the strikes the active
+  pack has); the icon face carries `ICON_SIZES` (16, 24, 32, 48 px).
 - **Every glyph of every face** (contextual and ligature glyphs included), so
   whatever HarfBuzz produces can be drawn.
 
